@@ -1,0 +1,137 @@
+---
+title: PIM attention offload
+sidebar_position: 3
+---
+
+# PIM attention offload
+
+> **What this demonstrates:** moving attention compute off the GPU
+> and onto a PIM (processing-in-memory) device, while keeping the
+> rest of the layer on GPU.
+
+Attention's memory-bandwidth bottleneck makes it a natural fit for
+PIM, which puts compute units inside DRAM. LLMServingSim models
+attention as a separate device-bound block; turning on
+`--enable-attn-offloading` swaps the GPU attention kernel for a PIM
+attention kernel inside the trace.
+
+This is **compute disaggregation**: attention runs on PIM, the rest
+of the layer runs on the NPU, and the simulator coordinates the
+hand-off.
+
+## Prerequisites
+
+- Simulator container set up
+- Bundled RTXPRO6000 profile for `meta-llama/Llama-3.1-8B`
+- A PIM device config from `configs/pim/` (e.g.,
+  `DDR4_8GB_3200_pim`): each is a DRAMSim3 INI file describing the
+  PIM substrate.
+
+## Cluster config
+
+`configs/cluster/single_node_pim_instance.json`: note the
+`pim_config` field on the node's `cpu_mem`:
+
+```json title="configs/cluster/single_node_pim_instance.json (excerpt)"
+{
+  "num_nodes": 1,
+  "link_bw": 16,
+  "link_latency": 20000,
+  "nodes": [
+    {
+      "num_instances": 1,
+      "cpu_mem": {
+        "mem_size": 512,
+        "mem_bw": 256,
+        "mem_latency": 0,
+        "pim_config": "DDR4_8GB_3200_pim"
+      },
+      "instances": [
+        {
+          "model_name": "meta-llama/Llama-3.1-8B",
+          "hardware": "RTXPRO6000",
+          "npu_mem": {"mem_size": 96, "mem_bw": 1597, "mem_latency": 0},
+          "pd_type": null,
+          "tp_size": 1
+        }
+      ],
+      "power": { "...": "see provided config for full power model" }
+    }
+  ]
+}
+```
+
+The PIM hookup:
+
+- `cpu_mem.pim_config: "DDR4_8GB_3200_pim"`: points at
+  `configs/pim/DDR4_8GB_3200_pim.ini` (a DRAMSim3 INI file describing
+  PIM-side compute and memory).
+- The GPU instance is otherwise unchanged. PIM attention is selected
+  at runtime via the CLI flag, not the config.
+
+## Run
+
+```bash
+python -m serving \
+  --cluster-config 'configs/cluster/single_node_pim_instance.json' \
+  --dtype bfloat16 --block-size 16 \
+  --enable-attn-offloading \
+  --dataset 'workloads/example_trace.jsonl' \
+  --output 'outputs/pim_offload_run.csv' \
+  --log-level WARNING
+```
+
+`--enable-attn-offloading` is the switch that swaps the trace's
+attention kernel from the NPU profile to the PIM profile. The rest
+(qkv_proj, o_proj, mlp) still runs on the GPU.
+
+## Expected output
+
+```text
+[10.0s] Avg prompt throughput: 1104.0 tokens/s, Avg generation throughput: 520.0 tokens/s
+        ├─Running Instance[0]: 8 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63412.51 MB (64.499 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 11040)
+        └─Node[0]: Total CPU Memory Usage 0.00 MB, 0.000 % Used
+[11.0s] Avg prompt throughput: 1138.0 tokens/s, Avg generation throughput: 540.0 tokens/s
+        ├─Running Instance[0]: 8 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63486.51 MB (64.574 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 12178)
+        └─Node[0]: Total CPU Memory Usage 0.00 MB, 0.000 % Used
+```
+
+**The heartbeat has no PIM field.** Offloading changes attention's
+`comp_time` inside the trace, so its effect shows up as generation
+throughput and TPOT, not as a utilization counter. To see whether PIM
+is the bottleneck, compare TPOT against the same workload without
+`--enable-attn-offloading`, or inspect a trace with
+`--save-trace-text` and look at the `PIM` marker blocks.
+
+## What's interesting
+
+- **Decode TPOT often improves** because attention on long KV caches
+  is memory-bandwidth-bound. PIM has very different bandwidth
+  characteristics than GPU HBM, and on decode-heavy workloads with
+  long contexts the PIM path can win even with slower per-op
+  throughput.
+- **Prefill TTFT can regress** because attention during prefill is
+  more compute-bound, PIM's narrower compute per channel doesn't
+  help there. Pair with sub-batch interleaving (see Advanced) to
+  overlap prefill compute on GPU with decode attention on PIM.
+- **NPU memory drops**: KV cache lives in PIM memory now, freeing
+  ~10–30 GB of NPU memory for weights or larger batches.
+
+## Related examples
+
+- **[Sub-batch interleaving](../advanced/sub-batch-interleaving)** -
+  the natural follow-on. Overlap GPU and PIM work to recover the
+  prefill regression.
+- **[Prefill/decode split](./prefill-decode-split)**: alternative way
+  to specialize on decode-heavy workloads, but with whole-instance
+  granularity instead of per-layer.
+
+## Where to learn more
+
+- The PIM device model lives in `serving/core/pim_model.py`; the
+  trace generator emits `PIM {channel}` / `PIM END` markers around
+  the offloaded attention block (see
+  [Trace file format](/docs/reference/trace-format)).
+- DRAMSim3 INI files in `configs/pim/<name>/` configure the PIM
+  substrate. Add a new substrate by dropping a new directory there
+  and pointing `pim_config` at it.

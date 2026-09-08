@@ -1,0 +1,138 @@
+---
+sidebar_position: 2
+title: Simulator setup
+---
+
+# Simulator setup
+
+The simulator runs in a Docker container based on
+[`astrasim/tutorial-micro2024`](https://hub.docker.com/r/astrasim/tutorial-micro2024).
+The image supplies Python 3.10 and ASTRA-Sim's **build** dependencies —
+it does **not** ship a pre-built backend for this repo's submodule, so
+step 3 below is required, not optional. It also ships none of the
+Python packages the simulator imports; `docker-sim.sh` pip-installs
+those at launch.
+
+This is the install path **everyone needs**. If you also want to
+profile new hardware or run end-to-end vLLM validation, follow
+**[vLLM setup](./vllm)** afterwards.
+
+## 1. Clone the repository
+
+The repo includes ASTRA-Sim and Chakra as git submodules, so you must
+clone with `--recurse-submodules`:
+
+```bash
+git clone --recurse-submodules https://github.com/casys-kaist/LLMServingSim.git
+cd LLMServingSim
+```
+
+If you already cloned without `--recurse-submodules`, fix it with:
+
+```bash
+git submodule update --init --recursive
+```
+
+## 2. Launch the simulator container
+
+```bash
+./scripts/docker-sim.sh
+```
+
+This:
+
+- Mounts the repo root into the container at `/app/LLMServingSim`
+- Installs the Python deps the simulator needs, three of them
+  **version-pinned** for the image's Python 3.10:
+
+  ```
+  pyyaml pyinstrument rich pandas==1.5.3 numpy==1.23.5 matplotlib==3.5.3
+  ```
+
+  Each is imported by code that runs in this container: `pyyaml` for
+  the profiler's `meta.yaml` and architecture catalogs, `pyinstrument`
+  by `serving/__main__.py`, `rich` by the loggers, `pandas` by the
+  scheduler / trace generator / PIM model, `numpy` by the scheduler,
+  and `matplotlib` by `bench/core/plots.py`. If you install by hand,
+  keep the pins.
+- Drops you into a `bash` shell at `/app/LLMServingSim`
+
+The container is named `servingsim_docker`. To re-attach later (e.g.,
+after a reboot):
+
+```bash
+docker start -ai servingsim_docker
+```
+
+To remove and start fresh:
+
+```bash
+docker rm -f servingsim_docker
+./scripts/docker-sim.sh
+```
+
+## 3. Build ASTRA-Sim and install Chakra
+
+Inside the simulator container, compile the analytical backend and
+install Chakra:
+
+```bash
+./scripts/compile.sh
+```
+
+What this does:
+
+- `pip install` Chakra (the C++ → protobuf converter ASTRA-Sim
+  consumes) from `astra-sim/extern/graph_frontend/chakra`.
+- Compile the **analytical backend** of ASTRA-Sim
+  (`astra-sim/build/astra_analytical/build.sh`).
+
+It runs `protoc` on Chakra's `et_def.proto` (once), then `cmake` and
+`cmake --build` with up to 16 threads. The build takes 2–5 minutes on a
+typical machine and prints ordinary cmake / make output — there is no
+success banner to look for. Check the artifact instead:
+
+```bash
+ls -l astra-sim/build/astra_analytical/build/AnalyticalAstra/bin/AnalyticalAstra
+```
+
+That is the exact path `serving/__main__.py` launches as a subprocess,
+so if it exists and is executable, the build worked.
+
+:::tip[ns3 backend]
+`compile.sh` has a commented-out block for the ns3 backend
+(packet-level network simulation). Most users don't need it. Uncomment
+it only if you intend to pass `--network-backend ns3`, which launches a
+different binary:
+`astra-sim/extern/network_backend/ns-3/build/scratch/ns3.42-AstraSimNetwork-default`.
+:::
+
+## 4. Verify the install
+
+Run the bundled smoke test from inside the simulator container:
+
+```bash
+python -m serving \
+  --cluster-config 'configs/cluster/single_node_single_instance.json' \
+  --dtype bfloat16 --block-size 16 \
+  --dataset 'workloads/example_trace.jsonl' \
+  --output 'outputs/example_single_run.csv' \
+  --log-interval 1.0
+```
+
+You should see a startup banner, a **KV Cache Initialization** line, a
+heartbeat block once per simulated second, and a final per-request CSV
+at `outputs/example_single_run.csv`. If you instead get
+`FileNotFoundError: Profile variant folder not found: ...`, check
+[Troubleshooting → Missing profile data](../troubleshooting#missing-profile-data).
+
+
+
+## You're done
+
+The simulator is installed. Continue with one of:
+
+- **[Quickstart](../quickstart)**: walk through the example run,
+  understand the flags, and read the output.
+- **[vLLM setup](./vllm)**: install the vLLM environment for
+  profiling new hardware or running the benchmark suite. (Optional.)

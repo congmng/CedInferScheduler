@@ -1,0 +1,727 @@
+### 跨域PD关系矩阵驱动结构重构_研究设计.docx
+跨域 P/D 分离中的
+关系矩阵驱动结构重构调度
+P-D Allocation Matrix Modeling · Structural-Gain Guided P Scaling
+版本：2026-08-20
+由“P/D 联合弹性调度”收缩重构为“P-D 分配 + 结构变化评估”主线
+0. 研究设计摘要
+本版本将研究主线从“P/D 扩缩容、缓存放置、异构资源与网络联合优化”重新收缩为“P-D 对应关系矩阵的建模与结构重构”。系统在任意时刻都有一个由当前 P 集合、固定或给定 D 集合、网络条件和实例能力共同决定的资源结构 S。对于固定结构 S，首先求当前最优 P-D 分配 X*(S)；如果该最优解仍存在高代价匹配、局部 D 拥塞或明显的分配后悔（assignment regret），再评估少量 P 扩缩容候选。
+关键变化在于：扩缩容不再作为独立的容量控制问题，而被定义为“关系矩阵结构编辑”。P scale-out 相当于向矩阵增加一行，P scale-in 相当于删除一行。只有当结构变化使重新求解后的最优 P-D 分配获得足够大的全局收益，并能够覆盖重构成本时，才执行扩缩容。
+1. 问题重构：从 Autoscaling 转向 P-D Allocation with Structural Reconfiguration
+1.1 研究对象
+系统由若干 Prefill 实例 P={P₁,…,Pₘ} 和 Decode 实例 D={D₁,…,Dₙ} 组成。P 与 D 可以位于不同计算域，具有不同 GPU 能力和网络关系。P 完成 Prefill 后，需要把本请求 Decode 所需 KV 发送给某个 D。
+本研究不首先决定“系统需要几个 P/D”，而是首先研究当前资源结构下“P 的产出应该如何分配给 D”。因此，P-D correspondence matrix 是一等研究对象，扩缩容只是改变该矩阵可行域和结构的一种外层操作。
+1.2 第一版研究边界
+2. P-D 关系矩阵建模
+2.1 三类矩阵与容量向量
+建议将问题拆成三类矩阵：可行矩阵 A、代价矩阵 C、分配矩阵 X（或流量矩阵 F）。其中只有 X/F 是核心决策变量；A 与 C 来自当前系统状态。
+2.2 P-D 代价矩阵 C
+第一版不需要设计复杂的 learned cost model。对于每个 P-D pair，直接使用网络传输、D 排队和 Decode 服务时间构造代价：
+cᵢⱼ = RTTᵢⱼ + KVSizeᵢ / BWᵢⱼ + Queueⱼ + DecodeTimeⱼ
+其中 DecodeTimeⱼ 直接由异构 GPU profiling 获得；Queueⱼ 由运行时观测；RTT/BW 由网络监控获得。若部分 pair 不允许使用，则 aᵢⱼ=0 并强制 fᵢⱼ=0。
+该矩阵表达的是“pair preference”，但最终不能逐行简单选最小值，因为 D 列存在容量约束；因此必须考虑全局分配。
+2.3 固定结构下的最优 P-D 分配
+使用 fᵢⱼ 表示单位时间内从 Pᵢ 进入 Dⱼ 的等效流量。对于给定资源结构 S，固定结构优化定义为：
+J*(S) = min_F  ΣᵢΣⱼ fᵢⱼ · cᵢⱼ
+满足以下约束：
+Σⱼ fᵢⱼ ≤ μᵢᴾ      （P 行容量）
+Σᵢ fᵢⱼ ≤ μⱼᴰ      （D 列容量）
+ΣᵢΣⱼ fᵢⱼ ≥ λ       （总体需求）
+fᵢⱼ ≥ 0；若 aᵢⱼ=0，则 fᵢⱼ=0
+该子问题本质上是 capacitated min-cost flow / LP，可直接复用成熟求解器。论文不需要把求解算法本身作为主要创新，而应重点分析“固定结构最优之后是否还存在结构性改进空间”。
+3. 结构性重构：把 P 扩缩容视为矩阵增行/删行
+3.1 矩阵视角下的 P Scaling
+第一版固定 D pool，因此不做列增删。未来若扩展 D scaling，可自然解释为矩阵增列/删列。
+3.2 Structural Gain：结构变化是否值得
+对任一候选结构动作 a:S→Sₐ，先在新结构 Sₐ 下重新求解最优关系矩阵 X*(Sₐ)，再比较新旧最优目标。定义结构重构收益：
+G(a) = J*(S) − J*(Sₐ) − C_reconfig(a)
+如果需要跨 workload/规模比较，可使用相对指标 Structural Gain Ratio：
+SGR(a) = [J*(S) − J*(Sₐ)] / J*(S)
+只有当 G(a) 超过收益阈值 θ，并满足最小驻留时间等抗抖动条件时，才执行结构变化。这样扩缩容不再由单一 utilization 阈值驱动，而由“结构变化能否改变全局最优分配”驱动。
+3.3 为什么当前最优仍可能需要重构
+固定结构下的 X*(S) 只是在当前可行域内最优。如果多个 P 都偏好同一个 D，而该 D 容量有限，部分流量会被迫走高成本 pair；或者某个强 D 因附近缺少合适 P 而长期利用不足。此时 min-cost flow 已经“无路可走”，必须通过加入一条新的 P 行改变 feasible region。
+4. 当前矩阵诊断：Trigger 只负责筛选，不取代 Counterfactual Evaluation
+为了避免每个周期穷举所有结构候选，可以先用少量矩阵诊断指标判断“当前结构是否可能存在瓶颈”。这些指标只用于触发候选评估；最终是否扩缩容仍由 Structural Gain 决定。
+4.1 Assignment Regret
+cᵢ_best = minⱼ cᵢⱼ
+c̄ᵢ = (Σⱼ fᵢⱼ cᵢⱼ) / (Σⱼ fᵢⱼ)
+R = Σᵢ λᵢ (c̄ᵢ − cᵢ_best)
+R 衡量 P 因 D 容量竞争/拓扑限制而“被迫偏离最优 pair”的程度。R 高说明当前矩阵可能存在结构性失配。
+4.2 Expensive-edge Ratio 与 D Pressure
+E_exp = ΣᵢΣⱼ fᵢⱼ · 1(cᵢⱼ > τ_c) / ΣᵢΣⱼ fᵢⱼ
+ρⱼ = (Σᵢ fᵢⱼ) / μⱼᴰ
+E_exp 高说明大量流量被迫走高成本 P-D 边；ρⱼ 的极端不均衡说明某些 D 列成为结构瓶颈。
+5. 存算协同在新主线中的位置：Prefix 状态只改变“行容量”和“新行形成代价”
+为了避免重新膨胀成 Cache Placement 问题，Prefix Cache 不再作为全局 yᵢₖ 决策变量。系统只需要知道当前每个 P 的 cache 状态，以及 scale-out 时是否采用 cold/warm 两种形成方式。
+5.1 Cache-aware P Row Capacity
+μᵢᴾ = f(GPUᵢ, Cacheᵢ, Workload)
+同一 GPU 上，拥有高复用 Prefix 的 P 可以减少实际 Prefill token 数，因此其可承载的单位时间请求量更高。在矩阵模型中，Prefix Cache 直接改变 P 行容量 μᵢᴾ，而不是作为一个独立的“缓存命中率优化目标”。
+5.2 Scale-out 的 cold / warm 两个 Counterfactual
+因此同一位置的 scale-out 可以被建模为两个候选结构动作，由 Structural Gain 统一判断：是否值得付出 warmup 成本以换取更高的新行有效容量。
+6. 推荐算法：固定结构优化 + Counterfactual Row Search
+算法不需要全局 MILP。由于第一版只允许 P 行做局部增删，候选空间很小，可以采用“先求当前最优，再在邻域中做反事实评估”的结构。
+状态观测：获取当前 P/D 集合、μᴾ、μᴰ、网络 BW/RTT、D queue、Prefix hit/热度与 workload。
+构造当前 A、C，并用 min-cost flow 求 F*(S) 与 J*(S)。
+计算 assignment regret、expensive-edge ratio、D pressure；若结构健康且 SLO 正常，则保持当前结构。
+若触发结构诊断，则生成小规模候选邻域 N(S)：例如 +1 P@Edge-A、+1 P@Edge-B、+1 P@Cloud，以及允许的 −1 Pᵢ；scale-out 同时评估 cold/warm 两种版本。
+对每个候选 a，构造新结构 Sₐ、新行容量与新的 cost vector，重新求 min-cost flow，得到 J*(Sₐ)。
+计算 G(a)=J*(S)−J*(Sₐ)−C_reconfig(a)，选择收益最大的 a*。
+仅当 G(a*)>θ 且满足 minimum dwell time 时执行；否则维持当前结构。
+执行后更新 P-D affinity；具体请求级 D 选择交给已有 runtime router。
+7. Baseline 设计：尽量让所有方法共享同一个 Matching Solver
+为了把收益明确归因于“结构变化判断”，所有强基线都应使用相同的 P-D cost matrix 与 min-cost flow。区别只放在是否改变结构、以及用什么规则改变结构。
+其中最关键的两组对照是：Ours vs B1，证明“结构收益驱动”优于传统 capacity-driven scaling；Ours vs B3，证明 Prefix 状态确实会改变结构变化的价值判断，而不是仅提高 cache hit rate。
+8. 实验设计
+8.1 实验环境：第一版两域即可
+8.2 必做 Case
+8.3 Sweep 变量
+8.4 指标
+9. 预期验证的核心假设
+H1：固定 P/D 资源结构下，显式建模 P-D pair cost 与 D 列容量能够显著优于 nearest-D / fastest-D / simple load balancing。
+H2：即使总 P capacity 已经满足请求需求，当前最优分配仍可能因矩阵结构受限而长期使用高成本 pair；因此 capacity sufficiency 不是“不需要扩容”的充分条件。
+H3：P scale-out 的主要价值有时来自“重塑整个最优 P-D 分配”，而非新增 P 自身的边际 capacity；Structural Gain 能捕获这种价值。
+H4：相比 utilization-driven scaling，Structural-Gain guided scaling 能以更少或更有针对性的结构变化降低 P-D 总代价并提高 SLO goodput。
+H5：Prefix Cache 会通过改变新 P 的有效行容量与 warmup 成本，改变不同 scale-out 候选的 Structural Gain 排序，因此存储状态需要进入结构重构判断。
+H6：将矩阵诊断指标仅用作 trigger、最终用 counterfactual J*(Sₐ) 决策，可以在可解释性、性能和在线开销之间取得较好平衡。
+10. 可提炼的论文贡献
+11. 第一版最小实现范围与后续扩展
+后续扩展可以自然包括：D 列增删、P/D 双边结构编辑、多域大规模候选剪枝、Prefix warmup 集合选择、更精细的 queueing/SLO model。但这些都不应进入第一版核心，以避免再次稀释“P-D allocation + structural reconfiguration”主线。
+12. 最终问题压缩
+核心：  F*(S)  →  Diagnose  →  Sₐ  →  F*(Sₐ)  →  Structural Gain  →  Keep / Reconfigure
+TABLE 0
+一句话研究问题 / 给定当前 P/D 资源结构，首先求解固定结构下的最优 P-D 对应关系矩阵；进一步把 P 扩缩容视为对关系矩阵的增行/删行操作，通过比较结构变化前后的全局最优分配收益与重构代价，判断是否值得进行结构性重构。Prefix Cache 不再作为独立放置问题，而只通过影响 P 的有效行容量与扩容预热代价进入模型。
+TABLE 1
+层次 | 核心问题 | 是否创新 | 实现方式
+内层：P-D 分配 | 固定结构下，流量如何在 P-D pair 间分配？ | 建模为主；solver 可复用 | Min-Cost Flow / LP
+外层：结构重构 | 当前最优解是否值得通过增/删 P 行进一步改善？ | 核心创新 | Counterfactual evaluation + structural gain
+存算协同 | Prefix 状态如何改变 P 的有效供给与新 P 的形成代价？ | 轻量保留 | Cache-aware row capacity + warm/cold option
+运行时路由 | 具体请求落到哪个 D？ | 不创新 | 复用已有 capacity/network-aware router
+TABLE 2
+核心主线 / Optimize within a structure → Diagnose structural bottleneck → Evaluate counterfactual row operations → Reconfigure only when structural gain is significant.
+TABLE 3
+核心观察 1：当前结构最优 ≠ 结构层面最优 / 即使 X*(S) 已经是当前资源集合 S 下的全局最优分配，它仍可能因为缺少某个位置/类型的 P 行而被迫使用大量高成本 P-D pair。此时继续优化 X 本身没有空间，只有改变结构 S 才能获得明显改善。
+TABLE 4
+核心观察 2：Marginal Capacity ≠ Structural Value / 新增 P 的价值不只等于它增加了多少 Prefill capacity，更取决于这条“新行”加入后，是否能够释放原有瓶颈、减少高成本边、重新平衡 D 列负载并改变整个最优分配矩阵。
+TABLE 5
+内容 | 第一版处理方式
+P 扩缩容 | 保留；作为矩阵增行/删行操作，是结构变化的主要手段
+P-D 对应关系 | 核心；使用流量矩阵统一表示 many-to-many affinity
+D 扩缩容 | 第一版固定 D pool，不研究列增删；后续可扩展
+D 异构能力 | 作为已知输入，直接由 profiling 获得，不提出新模型
+Prefix Cache | 只影响 P 行容量与 scale-out warmup 代价，不做全局 cache placement
+Active Decode KV migration | 不考虑
+新的 request-level D router | 不提出，复用已有网络/队列感知路由
+复杂预测 / RL | 不考虑，负载与状态使用 EWMA/滑窗统计即可
+TABLE 6
+符号 | 定义 | 来源 | 角色
+A=[aᵢⱼ] | Pᵢ 与 Dⱼ 是否允许建立关系 | 拓扑/模型兼容/硬 SLO | 可行性掩码
+C=[cᵢⱼ] | 单位流量经过 Pᵢ→Dⱼ 的综合代价 | 网络、D queue、decode profile | 每个矩阵格子的 cost
+F=[fᵢⱼ] | 单位时间内 Pᵢ→Dⱼ 的请求/等效工作量 | 优化变量 | P-D 对应关系本体
+μᴾ=[μᵢᴾ] | 每个 P 的有效 Prefill 行容量 | GPU + Prefix 状态 + workload | 行容量
+μᴰ=[μⱼᴰ] | 每个 D 的 Decode 列容量 | profiling + 当前负载 | 列容量
+TABLE 7
+示例 C | D₁ Edge | D₂ Cloud | D₃ Cloud
+P₁ Edge | 5 | 22 | 31
+P₂ Edge | 7 | 18 | 27
+P₃ Cloud | 30 | 9 | 6
+TABLE 8
+动作 | 矩阵变化 | 含义
+P scale-out | m×n → (m+1)×n | 新增一条具有特定 capacity 与 pair-cost vector 的 P 行
+P scale-in | m×n → (m−1)×n | 删除一条 P 行，缩小可行域
+P placement change | 删除旧行 + 增加新行 | 行位置变化导致到各 D 的 cost vector 改变
+TABLE 9
+“质变”的可操作定义 / 不使用模糊的“质变”表述，而定义为 structural gain：当增/删一条 P 行后，重新求解的全局最优分配成本出现超过阈值的下降，且收益能够覆盖启动、预热、状态损失等重构开销，即视为值得发生的结构性变化。
+TABLE 10
+现象 | 矩阵表现 | 潜在结构动作
+高成本边占比高 | 大量 fᵢⱼ 落在 cᵢⱼ 较大的格子 | 在靠近目标 D 的域新增 P
+单个 D 列接近饱和 | Σᵢfᵢⱼ / μⱼᴰ 接近 1 | 增加可使用其他 D 的 P 行，重新分流
+强 D 空闲但流量去不到 | 低 cost 列低利用、其他列高利用 | 新增到该 D cost 更低的 P 行
+P 行供给充足但分配代价高 | 总 P capacity 足够，但 J*(S) 仍高 | 结构驱动 scale-out，而非 capacity-driven scaling
+TABLE 11
+设计原则 / 不要把 Regret、E_exp、ρ 等指标线性加权成新的复杂总目标。它们只负责“提示可能需要重构”；真正的动作评估直接重求 J*(Sₐ)，保持算法逻辑可解释。
+TABLE 12
+候选 | 新增 P 行容量 | 额外代价 | 适用条件
++Pₖ(cold) | μₖ,coldᴾ | 实例启动成本；后续更多 prefix recompute | WAN 差、Prefix 不够热
++Pₖ(warm) | μₖ,warmᴾ > μₖ,coldᴾ | Prefix warmup 传输 + 等待时间 | 热点稳定、可摊销收益高
+TABLE 13
+新的存算协同表述 / Storage → Compute：Prefix 状态改变 P 行容量；Compute/Placement → Storage：选择 warm scale-out 时才触发必要的 Prefix 预热。研究不优化“Prefix 全局放哪”，而研究“状态是否足以改变结构重构的收益判断”。
+TABLE 14
+第一版最小变动约束 / 默认每次只允许 |ΔP|≤1；若实验发现单步结构变化不足，再扩展到 |ΔP|≤2。这样“最小变动”天然由邻域大小控制，不需要单独设计复杂重构算法。
+TABLE 15
+方法 | P-D Matching | P Scaling | Cache State | 验证目的
+B0 Static + Optimal Matching | 相同 min-cost flow | 不扩缩 | 只作为当前 μᴾ 输入 | 证明仅优化当前矩阵仍有结构上限
+B1 Load-based Scaling + Optimal Matching | 相同 min-cost flow | 按 utilization / demand gap ±P | 不参与 scaling 判断 | 传统容量驱动扩缩容
+B2 Pair-cost-aware Heuristic Scaling | 相同 min-cost flow | 优先在当前高成本流量附近扩 P | 不考虑 warm/cold | 较强拓扑感知基线
+B3 Structure-aware NoCache | 相同 min-cost flow | 用 structural gain | 把 P 行容量视为仅由 GPU 决定 | 隔离 Prefix 状态作用
+Ours | 相同 min-cost flow | structural-gain guided ±P | cache-aware μᴾ + warm/cold | 完整方法
+TABLE 16
+维度 | 建议配置
+域 | 2 个域即可：Edge + Cloud；至少存在一条可控 WAN
+P | 每域准备可启停 P 实例池；P GPU 可同构或两档即可
+D | D pool 固定；至少包含两种 decode 能力或不同域位置，以形成非平凡 pair cost
+网络 | 域内高带宽；WAN 做 10/20/40/80/100 Gbps 或实验可实现档位
+Prefix | 稳定热点为主；第一版只做 cold/warm scale-out，不做热点迁移算法
+框架 | 复用现有 P/D disaggregation、KV transfer、runtime router；只改控制器与矩阵求解层
+TABLE 17
+Case | 构造方式 | 要证明的结论 | 核心指标
+A 固定结构分配 | 固定 P/D，改变 WAN、D capacity、request KV size | P-D matrix optimization 比 nearest/fastest-D 更优 | J、P95 TTFT、cross-domain KV traffic
+B 结构瓶颈但总容量足够 | 总 P capacity≥需求，但大量流量被迫走高成本 pair | “不超载”不代表“结构合理”；structure-driven scale-out 有价值 | SGR、expensive-edge ratio、goodput
+C Capacity-driven vs Structure-driven | 逐步升高 λ，并在部分区间制造 topology mismatch | Ours 不只在容量不足时扩，而在 structural gain 足够大时扩 | 扩容时刻、J、GPU-hours、SLO
+D Warm vs Cold Row | 同一 scale-out 位置，Prefix 热度/复用率不同 | Cache 状态会改变新行有效容量和结构收益排序 | ramp-up time、recomputed tokens、G(a)
+E Scale-in | 负载下降，多个 P 行对全局分配贡献不同 | 删掉“结构价值最低”的行优于只按 utilization 删除 | J 增量、SLO、重构次数
+TABLE 18
+变量 | 建议范围
+请求到达率 λ | 低/中/高 + burst，区分 capacity-driven 与 structure-driven 区间
+P/D 数量比 | 在固定 D 下改变当前 P 行数与候选扩容位置
+WAN bandwidth / RTT | 制造 pair-cost 排序变化与跨域阈值
+D 异构度 | 同构 / 两档 / 三档 decode profile
+Prefix 复用率 | 0%、20%、50%、80%+
+Warmup 成本 | 改变 Top-K prefix 大小或复制带宽
+Structural Gain 阈值 θ | 观察重构收益与稳定性权衡
+Dwell time | 验证抗抖动与过度结构调整问题
+TABLE 19
+类别 | 指标
+P-D 分配质量 | J*(S)、平均 pair cost、assignment regret、expensive-edge ratio
+服务性能 | P50/P95/P99 TTFT、TPOT、Goodput、SLO attainment
+结构收益 | Structural Gain、SGR、结构变化后 J 恢复/下降幅度
+资源效率 | GPU-hours / cost、P active instances、D load balance
+网络 | P→D KV traffic、跨域 KV traffic、链路峰值占用
+存算协同 | P effective row capacity、recomputed prefix tokens、warmup traffic、capacity ramp-up time
+稳定性 | 扩缩容次数、配置翻转次数、minimum dwell time 触发情况
+TABLE 20
+贡献 | 内容
+C1 P-D 关系矩阵建模 | 把跨域网络、D 服务能力与 P/D capacity 统一到“行容量—列容量—pair cost—flow allocation”的关系矩阵中。
+C2 结构收益驱动的 P 重构 | 把 P scale-out/scale-in 重新解释为矩阵增行/删行，通过 counterfactual re-solving 衡量结构变化对全局最优分配的真实收益。
+C3 轻量存算协同 | Prefix 状态不做全局 placement，而是通过 cache-aware P row capacity 与 warm/cold scale-out 代价直接影响结构收益判断。
+C4 面向动态环境的实现评估 | 在 WAN、D 异构、负载变化和 Prefix 复用条件下，验证固定结构最优、传统扩缩容与结构性重构之间的差异。
+TABLE 21
+最终叙事 / 本工作不是“又一个 P/D autoscaler”。主线是：先把当前 P-D 关系做到最优，再回答“当前最优是否被资源结构锁死”；如果改变一条 P 行能够显著重塑全局分配并获得净收益，才执行结构重构。
+TABLE 22
+第一版必须做 | 第一版明确不做
+P-D cost / feasibility matrix 构造 | D autoscaling / D placement optimization
+固定结构 min-cost flow | active Decode KV migration
+P scale-out / scale-in 作为行操作 | Prefix 全局 placement / eviction 优化
+Structural Gain counterfactual evaluation | 新的 request-level D routing 算法
+cache-aware P capacity + warm/cold option | KV compression、模型权重迁移
+收益阈值 + minimum dwell time | RL、复杂 workload predictor
+TABLE 23
+最终问题定义 / 给定跨域 P/D 分离系统当前结构 S，先求固定结构下最优 P-D 分配 F*(S)。若当前矩阵存在显著结构瓶颈，则对少量 P 增行/删行候选做反事实求解，比较 J*(S) 与 J*(Sₐ) 并扣除重构代价；只有当 Structural Gain 超过阈值时才改变结构。Prefix Cache 仅通过改变 P 行容量和 warm scale-out 代价参与决策。
+### 跨域PD分离相关工作对比与研究空档分析.docx
+跨域 P/D 分离相关工作对比与研究空档分析
+聚焦 PrfaaS、HeteroScale、BanaServe、NetKV 与 DOPD（截至 2026 年 8 月）
+摘要
+本文围绕跨域 Prefill/Decode（P/D）分离推理，选取 PrfaaS、HeteroScale、BanaServe、NetKV 和 DOPD 五项代表性工作，从问题定义、决策变量、跨域能力、动态扩缩容、KV 状态、网络模型、算法与实验平台八个维度进行对比。分析表明，现有工作已分别覆盖“跨数据中心 Prefill 卸载”“异构 P/D 扩缩容”“KV/模块迁移”“网络感知 Decode 选择”和“动态 P/D 比例调整”等关键子问题，但仍缺少对“跨域 P/D 实例重配置 + KV 状态迁移 + 网络变化 + 重配置成本”的统一建模。由此，一个较清晰的研究切入点是：跨域状态感知的最小重构 P/D 扩缩容。
+1. 研究范围与比较口径
+本文所称“跨域 P/D 分离”，重点指 Prefill 和 Decode 可能位于不同资源域、网络域、集群或数据中心，且调度器需要同时处理计算资源差异、P/D 容量匹配、KV Cache 传输以及跨域网络约束。为了避免概念混淆，本文特别区分以下三类“动态性”：
+实例级扩缩容：真正增加或减少 P/D 实例数量，例如 scale-out / scale-in。
+角色重配置：在已有节点中改变 P/D 比例或把节点从 Prefill 角色转换为 Decode 角色。
+模块/状态迁移：不改变实例数量，而是在已有 GPU 之间迁移 Transformer layer、KV head 或 KV Cache 以重新平衡负载。
+因此，“BanaServe 支持 dynamic migration”不能直接等同于“BanaServe 支持实例级动态扩缩容”；同样，“HeteroScale 考虑 network domain”也不等同于“跨 WAN 的 P/D 分离”。
+2. 五篇核心工作的统一对比
+表 1  五篇代表性工作的统一比较。表中的“动态扩缩容”仅指实例级或节点角色级资源变化，不把单纯的请求路由等同于扩缩容。
+3. 各工作的关键定位与边界
+3.1 PrfaaS：当前与“真正跨域 P/D”最接近
+PrfaaS 已同时覆盖跨数据中心、P/D 资源配置和 KV 跨域传输三个核心维度。其短时间尺度根据带宽、队列和 prefix cache 状态进行请求路由，长时间尺度则重新检查 Prefill/Decode 瓶颈，并调整本地 P/D 资源比例。因此，如果研究仅表述为“根据 workload 动态调整跨域 P/D 数量”，与 PrfaaS 的差异已经不够明显。
+更有区分度的方向是把“从当前配置迁移到目标配置”的代价显式纳入决策，使调度器不仅判断目标配置是否更优，还判断当前时刻是否值得进行重配置。
+目标：min  C_serving(x_{t+1}) + λ · C_transition(x_t, x_{t+1})
+3.2 HeteroScale：异构资源与实例级扩缩容基线
+HeteroScale 解决的是生产级异构 P/D 集群中的 autoscaling 与 topology-aware placement。它适合回答“需要扩多少 P/D、使用什么 GPU、应该放入哪个网络资源域”，因此是异构资源扩缩容方向最自然的对比基线。
+其不足在于没有把每个实例上的 KV 状态作为核心优化变量。新增或缩减实例时，系统主要关注容量与拓扑亲和性，而不是“哪些状态必须迁移、迁移是否值得、跨域迁移会占用多少网络”。
+3.3 BanaServe：状态感知重配置的直接参考
+BanaServe 的核心价值在于把计算放置与状态迁移成本绑定起来。它通过 layer-level 与 attention-level migration，在已有 GPU 中迁移模块和 KV，从而缓解 P/D 资源不平衡。其迁移约束可概括为：迁移收益必须在给定的迁移时间预算内实现。
+T_mig(M) ≤ T_budget，且 T_mig ≈ (S_weight + S_KV) / B_net + T_sync
+但 BanaServe 当前主要针对 single-region、高带宽数据中心网络，也没有解决实例数量随 workload 弹性变化的问题。因此它非常适合支撑“为什么存储状态会影响计算重配置”，但不能直接覆盖跨域弹性扩缩容。
+3.4 NetKV：网络感知请求调度基线
+NetKV 的问题位于 request-level：Prefill 完成后，选择哪个 Decode 实例接收该请求。它在五篇工作中对网络建模最细，显式考虑网络层级、带宽、时延、外部拥塞和同时进行的 KV 传输，因此特别适合作为“只做网络感知请求路由、不改变资源配置”的基线。
+d* = argmin_d { C_queue + C_decode + C_KV-transfer }
+与更高层的 P/D control plane 相比，NetKV 假设 P/D 池已经给定，不负责决定某个域应该有多少 P、多少 D，也不负责实例扩缩容或角色转换。
+3.5 DOPD：动态 P/D 数量调整的直接基线
+DOPD 与“根据请求数量、输入长度和输出长度动态调整 P/D 实例数”的设想最接近。它利用离线性能 profile 与在线 workload 预测计算最优 P/D ratio，并通过 proactive scaling 和 reactive fallback 完成弹性扩缩容。因此，只要研究中包含动态 P/D 数量调整，DOPD 都应作为核心 baseline。
+DOPD 的关键空缺是没有把跨域网络、实例状态迁移和重配置成本统一放入扩缩容目标。KV occupancy 虽可用于触发 Decode 扩容，但“缩掉哪个 D、它上的 KV 是否需要迁移、迁移到哪个域以及是否值得迁移”不是其主要优化对象。
+4. 能力维度总结
+5. 研究空档：跨域状态感知的最小重构 P/D 扩缩容
+将五项工作放在同一框架下，可以看到现有研究已经分别解决了 P/D 扩缩容、异构资源放置、网络感知路由、KV 状态迁移和跨数据中心 Prefill 卸载等子问题，但这些决策大多是分开的。一个仍较有空间的问题是：在已有系统状态 x_t 的前提下，联合决定是否跨域扩容、缩容或改变 P/D 角色，并把 KV 状态迁移和重配置成本作为一等公民。
+可以把系统状态表示为：
+x_t = { N_{P,d}, N_{D,d}, GPU_i, KV_i, B_{d,d′}(t), λ_t, L_in,t, L_out,t }
+其中 N_{P,d}、N_{D,d} 表示域 d 中 Prefill/Decode 实例数量，GPU_i 表示异构 GPU 类型和容量，KV_i 表示实例上的活动/热点 KV 状态，B_{d,d′}(t) 表示跨域链路带宽，λ_t、L_in,t、L_out,t 描述 workload。
+调度动作可以表示为：
+a_t = { scale_out, scale_in, P/D_role_conversion, placement, KV_migration }
+目标函数不再只优化新配置本身，而需要同时考虑运行性能与从当前状态迁移过去的代价：
+min_a  L(x_{t+1}) + α C_GPU + β C_WAN + γ C_KV-mig + δ C_reconfig
+并满足 TTFT、TPOT 等服务等级目标。这里真正形成“存算协同”的是 C_KV-mig 与 C_reconfig：计算实例的扩缩容和角色变化会改变 KV 所在位置；KV 的体量和热度又决定跨域迁移是否可接受，进而反过来影响是否应该执行扩缩容。
+6. 与五篇工作的差异可以如何表述
+7. 建议的论文问题表述
+一个较精简且与现有工作边界清晰的问题表述可以是：
+“面向异构跨域 P/D 分离推理，在 workload 和跨域带宽变化下，动态决定各域 P/D 实例数量与角色配置；在进行扩缩容或角色变换时，联合考虑现有 KV 状态、跨域迁移成本和服务收益，选择满足 SLO 的最小重构方案。”
+这一表述将研究核心从“再做一个动态 P/D ratio 算法”转移到“stateful transition-aware control plane”。其价值在于解释现实系统中的一个反直觉现象：即使目标配置 B 的稳态性能优于当前配置 A，若迁移 KV、预热新实例和占用跨域带宽的代价过大，短时间内保持 A 反而可能拥有更低的总成本。
+8. 建议的 baseline 组合
+DOPD：代表动态 P/D ratio 与实例级扩缩容，但不考虑跨域状态迁移。
+HeteroScale：代表异构 GPU + topology-aware autoscaling，但 KV 状态不是核心变量。
+NetKV：代表网络感知 request-level P→D 调度，可作为“固定资源池 + 最优请求路由”基线。
+BanaServe：代表显式状态/模块迁移，可以验证“只迁移状态、不做跨域弹性资源重配置”的效果。
+PrfaaS：代表真正跨数据中心 P/D 与带宽感知路由，是最需要正面对比的跨域系统。
+此外，可增加一个简单但很重要的 ablation：在相同目标配置搜索算法下，去掉 C_KV-mig 与 C_reconfig，仅根据稳态性能选配置。该基线能够直接量化“考虑存储状态与重配置代价”带来的收益，是体现存算协同最关键的实验之一。
+9. 参考工作
+[1] Prefill-as-a-Service: KVCache of Next-Generation Models Could Go Cross-Datacenter, 2026.
+[2] Taming the Chaos: Coordinated Autoscaling for Heterogeneous and Disaggregated LLM Inference (HeteroScale), 2025.
+[3] BanaServe: Unified KV Cache and Dynamic Module Migration for Balancing Disaggregated LLM Serving, 2025/2026.
+[4] NetKV: Network-Aware Decode Instance Selection for Disaggregated LLM Inference, 2026.
+[5] DOPD: A Dynamic PD-Disaggregation Architecture for Maximizing Goodput, 2025/2026.
+TABLE 0
+工作 | 问题定义 | 核心决策变量 | 是否跨域 | 动态扩缩容 | KV 状态 | 网络模型 | 算法 | 实验平台
+PrfaaS / 2026 | 跨数据中心条件下，将长上下文 Prefill 选择性卸载到独立 P 集群，同时控制 KV 跨域流量并平衡 P/D 吞吐。 | 远端/本地 Prefill；长度阈值 t；本地 N_P/N_D；P/D 节点角色；prefix cache 位置 | ✅ 真正跨 DC / 跨集群 | ✅ 长时间尺度可重新优化 P/D 数量与角色；短时间尺度动态路由 | ✅ 强：global KV manager、prefix locality、跨域 KV transfer | WAN / VPC 带宽约束；实时监测 egress bandwidth 与队列；域内 RDMA、域间专线/VPC | 二维搜索求 t 与 P/D 配置；双时间尺度调度：短期 bandwidth/cache-aware routing，长期 P/D re-optimization | 真实 profiling + 模型驱动 case study；H200 PrfaaS 集群 + H20 local PD；跨集群约 100 Gbps VPC
+HeteroScale / 2025 | 异构 GPU 与 P/D 分离生产集群中，根据 workload 自动增加/减少 P/D 资源，并维持 P/D balance 与 network affinity。 | P/D instance 数；placement；GPU type；Deployment Group；RDMA Subgroup | △ 网络域/集群内部，不是 WAN P→D | ✅ 强：真正 instance scale-out/in；在线主要维持预设 P/D ratio | △ 弱：感知 P→D KV 传输和网络亲和，但不优化 KV placement/migration | 拓扑约束模型：node→S1→S2→cluster/VDC；RDMA affinity；不是动态 congestion cost | metric-driven autoscaling + preset P/D ratio maintenance + topology-aware placement + anti-flapping | ByteDance 生产系统；数万 GPU；Doubao-Seed-1.6-thinking；代表性实验含 16 节点 × 8 H20
+BanaServe / 2025/26 | 静态 P/D 划分造成资源失衡和 cache 热点，通过迁移计算模块与 KV 状态动态重平衡已有 GPU。 | 迁移哪些 Transformer layers；哪些 KV heads；迁移目标 GPU；request→P instance | ❌ 当前设计 single-region | ❌ 严格说不是实例级扩缩容，而是 existing GPUs 间动态 module/KV rebalancing | ✅ 非常强：Global KV Cache Store；layer-level / attention-level KV migration | 迁移时间以 S/B 建模；假设 NVLink/InfiniBand/PCIe 等高带宽 DC fabric；无 WAN 拓扑/拥塞优化 | 最小化最大 GPU 利用率；受迁移预算 T_mig≤T_budget 约束；粗粒度 layer + 细粒度 attention migration | 基于 vLLM/DistServe；LLaMA-13B、OPT-13B；Alpaca + LongBench；single-region
+NetKV / 2026 | P 已确定后，为每个完成 Prefill 的请求选择 Decode 实例，避免只看 load/cache 而忽略网络。 | Decode instance d；queue/load；prefix KV locality；P→D network cost | ❌ intra-cluster | ❌ P/D pool 固定 | ✅ 中强：根据 prefix hit 计算有效 KV 传输量，但不做主动 KV 迁移 | 五篇中最细：fat-tree tier、静态 bandwidth、latency、dynamic congestion、scheduler self-contention；T=s/B_eff+L | 对所有 D 进行 O(|D|) greedy scoring，联合 queue + cache hit + network cost | 纯仿真；64 H100-class GPU，4P+12D，TP=4；4-tier fat-tree；Mooncake 23K production requests
+DOPD / 2025/26 | ISL/OSL/arrival rate 变化时，预测未来负载并计算最优 P/D ratio 与实例数量，进行零停机动态扩缩容。 | N_P、N_D；optimal P/D ratio；P/D TP；短请求是否聚合处理 | ❌ local cluster | ✅ 非常强：真正 elastic scale-out/in + zero-downtime resizing | △ 中等：KV occupancy 是 D 扩容触发；router 看 prefix hit；但不联合优化状态迁移成本 | KV 经 NIXL GPU-to-GPU transfer；网络不是主要优化变量；无 topology/WAN/congestion-aware optimization | 离线 TTFT/TPOT profiling → analytical ratio → ARIMA 预测 → proactive scaling；queue/KV occupancy reactive fallback | 真实 8×H100-SXM-80GB；OPT-30B、Llama-3.3-70B-FP8、Qwen2.5-72B-FP8；BurstGPT/Azure/ShareGPT traces
+TABLE 1
+能力 | PrfaaS | HeteroScale | BanaServe | NetKV | DOPD
+动态请求路由 | ✅ | △ | ✅ | ✅ | ✅
+动态 P/D 实例数量 | ✅ | ✅ | ❌ | ❌ | ✅
+动态 P/D ratio | ✅ | △ 预设目标比例 | ❌ | ❌ | ✅
+异构 GPU placement | ✅ | ✅ 强 | △ | ❌ | ❌
+KV locality | ✅ | △ | ✅ | ✅ | ✅
+主动 KV / 模块迁移 | △ | ❌ | ✅ 强 | ❌ | ❌
+显式状态迁移成本 | △ | ❌ | ✅ | 仅传输成本 | ❌
+动态网络状态 | ✅ 带宽 | ❌ | ❌ | ✅ 强 | ❌
+WAN / 跨域带宽 | ✅ | ❌ | ❌ | ❌ | ❌
+真正跨数据中心 P/D | ✅ | ❌ | ❌ | ❌ | ❌
+最小变动/重配置约束 | ❌ | △ anti-flapping | △ migration budget | ❌ | △ 扩缩步长控制
+TABLE 2
+工作 | 其主要回答的问题 | 拟研究方向进一步回答的问题
+HeteroScale | workload 变化后，需要扩多少 P/D、用什么异构 GPU、放在哪个拓扑资源池？ | 在跨域 KV 状态已存在时，扩/缩/改角色是否值得，如何控制迁移和重配置成本？
+DOPD | workload 变化后，最优 N_P/N_D 与实例数量是多少？ | 最优目标配置之外，如何考虑从当前配置到目标配置的跨域 transition cost？
+NetKV | P 完成后，这个请求应该选择哪个 D？ | 更高层先决定每个域应有多少 P/D、哪些实例需要扩缩，再进行 request routing。
+BanaServe | 现有 GPU 负载不平衡时，哪些 layer/KV 应该迁移？ | 将状态迁移从单域负载均衡扩展到跨域实例级弹性重配置，并联合 WAN 成本。
+PrfaaS | 长上下文请求是否跨 DC 做 Prefill，本地 P/D 配置如何调整？ | 不仅找更优配置，还判断从当前配置变到目标配置是否值得，并选择最小代价的重构路径。
+### 跨域PD动态状态驱动关系矩阵与结构重构_研究设计.docx
+跨域 P/D 分离中的
+动态状态驱动关系矩阵与结构重构调度
+State-Conditioned P-D Relation Modeling · SLO/Topology/Cache-Aware Allocation · Structural Transition
+版本：2026-08-20
+由“静态 A/C/F + Structural Gain”进一步重构为“当前状态 → 动态关系 → 增量分配 → 状态转移评估”
+0. 研究设计摘要
+上一版已经把研究主线收缩为“P-D 对应关系矩阵 + P 行结构重构”，并将 Prefix Cache 降为影响 P 行容量与扩容预热代价的轻量状态。本版保留这一主线，但进一步解决三个问题：第一，pair cost 不能只由静态 BW/RTT 表示，必须显式建模共享网络拓扑；第二，SLO 不应只作为普通加权 cost，而应优先约束可行性与 goodput；第三，求解输入必须包含上一周期和当前运行状态，而不是每个周期从零求一个静态最优。
+因此，关系矩阵不再被定义为固定的 C=[c_ij]，而是由系统状态 S_t 条件化生成的动态关系模型。核心决策仍然是 P-D 分配 F，但 F 扩展为按请求类 k 区分的 F_ijk(t)，并显式受到 Prefix KV 状态、D 上已有 Active KV/Decode 负载、共享链路剩余带宽、当前 SLO 余量以及上一周期关系 F_{t-1} 的约束。
+1. 问题重构：从“静态最优矩阵”转向“状态驱动关系与状态转移”
+1.1 研究对象与边界
+系统由 Prefill 实例集合 P={P_i} 与 Decode 实例集合 D={D_j} 组成。P 与 D 可以分布在多个域、使用不同 GPU，并通过存在共享瓶颈的跨域网络连接。P 完成 Prefill 后，需要把本请求 Decode 所需 KV 发送给某个 D。第一版固定 D pool，只允许 P 做局部 scale-out/scale-in；Active Decode KV 不迁移，新的 request-level router 继续复用现有框架。
+1.2 为什么“当前结构最优”仍不等于“当前状态最优”
+即使在给定 P/D 集合上求得最小代价流，如果没有把当前 Queue、Active Decode、Prefix Cache、链路剩余带宽与上一周期分配纳入输入，得到的仍只是一个静态配置上的理论最优。真实在线系统中，D_1 可能是更快的 GPU，但此刻已经承载大量长 Decode；P_1 可能计算能力一般，但恰好持有当前热点 Prefix；两个 P-D pair 可能都显示 20 Gbps，却共享同一条 WAN 瓶颈。因而最优关系必须写成 F_t*=OPT(S_t,W_t)，而不是只写 F*=OPT(S)。
+2. 当前状态 S_t：把“系统已经运行成什么样”明确写进输入
+建议把每个调度周期的输入拆成系统状态 S_t 与 workload 状态 W_t。S_t 描述已经存在且短时间内不能任意重置的资源、缓存、队列、网络和历史关系；W_t 描述当前或短窗口内新到请求的类别与需求。
+S_t = { Z_t, F_{t-1}, Q^P_t, Q^D_t, L^active_t, H_t, B^res_t, U_t }
+W_t = { λ_k(t), L^in_k, L^out_k, Prefix_k, SLO_k }
+2.1 请求类 k：避免把不同 KV/SLO 请求压成一个平均流量
+如果仍只使用二维 F_ij，则不同 Prompt 长度、Output 长度、Prefix 命中和 SLO 等级会被平均掉。第一版无需做到逐请求优化，可按少量 bucket 定义请求类 k，例如：k=(input-length bucket, output-length bucket, prefix class, SLO class)。通常 8–32 个 workload class 已足以表达主要差异。
+3. 状态驱动的 P-D 关系模型：A / C / F + 拓扑关联 R
+为了保持论文可读性，不建议把每种状态都定义成独立“优化矩阵”。最终正文可以压缩为四个核心对象：动态可行张量 A_ijk(t)、动态代价张量 C_ijk(t)、P-D 分配张量 F_ijk(t)，以及独立的 path-link incidence R_ije。H、Queue、Active KV、链路状态等作为生成 A/C/R 与容量约束的状态输入。
+3.1 Prefix KV：从“只改变行容量”升级为 P-request affinity
+定义 H_ik(t)∈[0,1] 表示 P_i 当前对请求类 k 的 Prefix KV 可复用比例。它首先改变 P_i 服务 k 的实际 Prefill 工作量，而不是直接被压成一个统一行容量。
+L^eff_{ik}(t) = L^in_k · (1 - H_{ik}(t))
+T^prefill_{ik}(t) = Profile_P(GPU_i, L^eff_{ik}(t), Q^P_i(t))
+之后再根据当前 workload mix 将请求相关性能聚合为 P_i 的有效行容量 μ^P_i(t)。因此存储状态首先改变“P_i 对哪类请求更适合”，再进一步改变整体供给能力。
+3.2 Active Decode KV：作为锁定状态扣减 D 的残余容量
+本研究不迁移正在 Decode 的请求，因此 D_j 上现存 Active KV / Active sequence 不重新优化。它们形成固定背景负载 L^active_j(t)，只影响新请求可用的 residual decode capacity。
+μ^{D,res}_j(t) = μ^D_j - Load(L^active_j(t), Q^D_j(t))
+如果希望更细，可以用 remaining output tokens 对 Active Decode 加权；但这仍属于 profiling/状态估计，不需要成为算法创新。
+4. 网络拓扑与 SLO：不再把所有条件塞进一个 pair cost
+4.1 共享网络拓扑：使用 path-link incidence R_ije
+跨域环境中，P-D pair 的带宽不是彼此独立的。两个 pair 即使单独测得相同 BW，也可能经过同一条 WAN/ToR/跨域出口并互相竞争。因此建议保留物理链路集合 E，以及 P_i→D_j 的路径 π_ij。
+R_{ije} = 1  iff  link e ∈ π_{ij};  otherwise 0
+Σ_{i,j,k} R_{ije} · F_{ijk}(t) · S^{KV}_k  ≤  B^{res}_e(t),   ∀e
+其中 B^res_e(t) 是当前周期扣除背景流量后的剩余可用带宽。这样网络拓扑直接进入约束，而不是通过一个互相独立的 BW_ij 被静态化。
+4.2 SLO：先判断可行，再在可行解中优化代价
+对请求类 k 预测其经过 P_i→D_j 的 TTFT 与 TPOT。TTFT 至少包括 P queue、Prefill、KV transfer、D queue 与首 token；TPOT 主要由 D GPU 与当前 active decode load 决定。
+T̂^TTFT_{ijk}(t) = W^P_i + T^prefill_{ik} + T^KV_{ijk} + W^D_j + T^first_{jk}
+T̂^TPOT_{jk}(t) = g(GPU_j, L^active_j(t), Q^D_j(t), L^out_k)
+A^{SLO}_{ijk}(t) = 1[ T̂^TTFT_{ijk} ≤ SLO^TTFT_k ] · 1[ T̂^TPOT_{jk} ≤ SLO^TPOT_k ]
+最终可行性 A_ijk(t) 还可以乘上模型兼容、域访问策略等硬约束。若 A_ijk(t)=0，则强制 F_ijk(t)=0。只有在所有 pair 都无法满足 SLO 时，才允许 violation/slack 变量进入第二层优化。
+4.3 动态代价 C_ijk(t)：用于可行 pair 的细粒度排序
+C 不再承担“所有约束”的职责，而只在可行 pair 中表达网络时间、计算时间、资源成本、SLO slack 风险等边际差异。第一版不需要 learned cost model，可直接由 profiling + runtime telemetry 构造。
+C_{ijk}(t) = w1·T^prefill_{ik} + w2·T^KV_{ijk} + w3·T^decode_{jk} + w4·Risk^{SLO}_{ijk} + w5·Cost_{ij}
+5. 固定结构下的动态增量 P-D 分配
+优化对象不是“把系统里所有历史请求重新放一次”，而是当前周期可调整的新到流量。已有 Active Decode 与其 KV 位置固定；上一周期 F_{t-1} 作为历史关系和稳定性参考。
+F_t* = argmin_F  Σ_{i,j,k} F_{ijk}(t) · C_{ijk}(t)  +  γ·Switch(F_t,F_{t-1})
+第一版推荐使用分层目标，而不是把所有因素强行线性加权：先最大化 SLO 内可服务的 goodput，再在满足 goodput 的解中最小化总 pair cost 与 routing change。
+5.1 当前关系 F_{t-1} 如何进入，而不把问题做复杂
+如果每个周期完全重求 F，网络或 queue 的轻微波动可能造成 P-D 关系频繁翻转。因此建议使用 routing proportion x_ijk=F_ijk/λ_k 而不是绝对 flow，轻量惩罚策略变化。
+Switch(F_t,F_{t-1}) = Σ_{i,j,k} | x_{ijk}(t) - x_{ijk}(t-1) |
+这样 workload 从 100 req/s 增到 200 req/s 时不会因为绝对流量变化被误判为“关系重构”。第一版也可直接设置每周期最大 routing proportion 变化 ε，避免引入新的算法创新点。
+6. 结构性重构：从“矩阵增删行”进一步解释为“状态转移”
+上一版将 P scale-out/scale-in 解释为关系矩阵增行/删行，这一表述继续保留。但新行不是一个静态 cost vector，而是由当前 S_t 决定的状态化新行 Row_new(S_t)：它的 GPU、域位置、Prefix warmup、到各 D 的路径、启动时间和有效容量 ramp-up 都随当前状态不同。
+6.1 为什么不能只比较 steady-state J*(S) 与 J*(S_a)
+扩容不是瞬时完成。实例创建、框架初始化、cold capacity、Prefix warmup 和最终 steady state 存在明显 ramp-up。如果只比较扩容完成后的静态 J*(S_a)，会高估短暂热点下的 scale-out 价值。
+μ^P_new(t+τ) : 0 → cold capacity → warm capacity → steady capacity
+6.2 短窗口 Structural Gain
+定义候选动作 a 在当前状态 S_t 下的短窗口反事实收益。H 可以取 10–30 s，负载只用 EWMA/滑窗外推，无需复杂预测器。
+G_H(a | S_t) = J_H(keep | S_t) - J_H(a | S_t) - C_reconfig(a | S_t)
+这里 J_H 是未来 H 内的累计 SLO violation / pair cost / resource cost。对 warm scale-out，C_reconfig 包含 Prefix 传输与等待；对 cold scale-out，则未来窗口内 T^prefill 较大、有效容量较低。只有当 G_H 超过阈值 θ 且满足 minimum dwell time，才执行状态转移。
+7. 当前矩阵诊断与在线算法
+7.1 Trigger 只负责筛选候选，不取代 Counterfactual Evaluation
+为了避免每个周期对所有位置穷举扩缩容，可以继续使用 assignment regret、expensive-edge ratio、D pressure、SLO slack 等指标判断“当前关系是否可能被结构锁死”。这些指标只触发候选生成；最终动作仍由 G_H(a|S_t) 决定。
+7.2 推荐在线流程
+观测当前 S_t：P/D 实例、上一周期关系、P/D queue、Active Decode/Active KV、Prefix 状态、链路带宽/RTT/背景流量与可用 GPU pool。
+把新请求按少量 request class k 聚合，得到 λ_k(t)、输入/输出长度、Prefix 类别与 SLO。
+根据 S_t 与 W_t 构造 H_ik、A_ijk(t)、C_ijk(t)、R_ije 与当前 residual capacities。
+固定资源结构，求增量 P-D 分配 F_t*；已有 Active Decode 不迁移。
+计算 regret、expensive-edge、D/link pressure、SLO slack；若健康则保持结构。
+若触发诊断，生成局部候选 N(S_t)：+1 P@各候选域的 cold/warm 版本，以及允许 drain 的 −1 P_i。
+对每个 a 模拟 S_t→S_{t+τ}^{(a)} 的短窗口 ramp-up，并在窗口内重复求状态驱动分配，得到 G_H(a|S_t)。
+选择净收益最大的 a*；仅当 G_H(a*)>θ 且满足 minimum dwell time / 最小变动限制时执行。
+执行后更新实例、Cache 与 relation state；具体 request-level D 选择继续交给现有 runtime router。
+8. 存算协同在新主线中的位置
+本版仍不把问题扩张成“全局 KV placement + migration 联合优化”，但会比上一版更明确地区分三类 KV 状态，并说明它们如何改变计算、网络和结构决策。
+这样“存”不是额外加一个 cache hit rate 指标，而是直接改变可行域、服务时间、网络竞争和结构重构收益；同时又没有把第一版膨胀成独立的 cache placement 论文。
+9. Baseline 设计：所有强基线共享同一套动态 P-D Solver
+为了把收益尽可能归因于“状态建模 + 结构变化判断”，建议让强基线共享同一个基础 P-D flow solver；差异集中在是否建模网络共享、SLO、Cache/Active 状态，以及用何种规则扩缩容。
+最关键对照建议保留三组：Ours vs B0/B1 证明“不是静态矩阵重算”；Ours vs B2 证明“结构收益驱动”优于容量阈值；Ours vs B4 证明 KV 状态会改变结构价值排序，而不只是提高 cache hit rate。
+10. 实验设计
+10.1 最小实验环境
+10.2 必做 Case
+10.3 Sweep 变量
+11. 指标与预期验证假设
+11.1 指标
+11.2 预期验证的核心假设
+H1：在相同 P/D 结构下，把 D active load、Prefix affinity、SLO 与共享链路状态纳入 A/C/R，可显著优于只根据静态 BW/RTT/GPU profile 的 P-D matching。
+H2：pair-wise BW_ij 不能充分表达跨域共享瓶颈；显式 R_ije + B^res_e(t) 能避免多个“局部最优 pair”同时压垮同一 WAN。
+H3：Prefix KV 的主要调度价值不仅是提高统一 P capacity，而是改变 P_i 对不同 request class k 的 Prefill cost 和 affinity。
+H4：已有 Active Decode/Active KV 必须作为锁定状态进入 D residual capacity；否则静态 fastest-D 容易把新请求继续压到已拥塞的强 D。
+H5：即使总 P capacity 充足，当前最优 F_t* 仍可能因为拓扑/SLO/Cache 结构受限而长期使用高成本或低 SLO slack pair，因此存在 structure-driven scale-out 区间。
+H6：短窗口 G_H(a|S_t) 比只比较 steady-state J*(S_a) 更能避免短 burst 下的扩容反转与无效 warmup。
+H7：F_{t-1} 作为状态并加入轻量 routing-change 控制，可在基本不牺牲 goodput 的情况下显著减少关系翻转。
+12. 可提炼的论文贡献与最终问题压缩
+12.1 论文贡献
+12.2 最终问题定义
+12.3 最终叙事
+本工作不是“每隔一段时间重算一个静态 cost matrix”，也不是“又一个 P/D autoscaler”。主线是：先承认系统已经处于一个带历史、队列、Cache、Active KV 与共享网络负载的当前状态，再在这个状态上做增量 P-D 分配；如果当前最优被资源结构锁死，则评估改变一条 P 行是否能在真实 ramp-up 过程中重塑未来关系并获得可覆盖重构成本的累计收益。
+S_t → {A_t, C_t, R_t} → F_t* → Diagnose → a → S^{(a)}_{t+1} → F^{*(a)}_{t+1} → G_H(a|S_t) → Keep / Reconfigure
+TABLE 0
+一句话研究问题：给定跨域 P/D 分离系统的当前运行状态 S_t（包括 P/D 结构、已有 P-D 关系、队列与活跃 Decode、网络拓扑与链路负载、Prefix/Active KV 状态以及当前 workload/SLO），先求固定结构下仅针对可调整新流量的状态驱动最优 P-D 分配；若当前最优仍受结构锁死，则把 P 扩缩容视为状态转移与关系矩阵增/删行，通过短时间窗口内的反事实累计收益判断是否值得重构。
+TABLE 1
+层次 | 核心问题 | 本版处理方式 | 是否核心创新
+状态层 S_t | 系统现在已经运行成什么样？ | P/D 结构、F_{t-1}、队列、Active Decode、Cache、网络、workload | 建模基础
+关系层 A/C/R | 当前状态下哪些 P-D pair 可用、代价多大、共享哪些链路？ | SLO 可行矩阵 + 动态代价矩阵 + path-link incidence | 核心建模
+分配层 F_t | 固定结构下，新到流量如何进入 P-D pair？ | 状态驱动的 capacitated flow / LP | 核心决策
+结构层 a | 当前最优是否被结构锁死？ | P 增行/删行 + 短窗口 counterfactual gain | 核心创新
+存算协同 | KV 状态如何改变计算与结构价值？ | Prefix affinity/容量 + Active KV 锁定 + warm/cold ramp-up | 轻量但必要
+TABLE 2
+核心主线：Observe current state S_t → Build state-conditioned A_t/C_t/R_t → Solve incremental F_t* → Diagnose structural bottleneck → Evaluate candidate state transitions → Reconfigure only when short-horizon net gain is significant.
+TABLE 3
+内容 | 第一版处理方式
+P-D 对应关系 | 核心；按请求类 k 建模 F_ijk(t)，允许 many-to-many flow
+P 扩缩容 | 保留；解释为关系张量新增/删除一条 P 行及其状态
+D 扩缩容 | 固定 D pool；后续扩展为列增删
+网络拓扑 | 显式保留物理链路 e 与 P-D 路径 π_ij，不压缩成独立 BW_ij
+Prefix KV Cache | 作为当前状态 H_ik(t)，影响 Prefill cost、有效容量与 warm scale-out
+Active Decode KV | 位置固定，不迁移；作为 D_j 的既有状态与残余容量占用
+SLO | 优先作为可行性与 goodput 约束；必要时再引入 violation/slack
+运行时预测 | EWMA/滑窗 + profiling；不使用 RL/复杂 learned predictor
+TABLE 4
+核心观察 1：关系矩阵不是输入常量，而是系统状态的函数：A_t=A(S_t,W_t)，C_t=C(S_t,W_t)。上一周期关系 F_{t-1} 本身也是当前状态的一部分。
+TABLE 5
+核心观察 2：扩缩容不是“重算一个新静态系统”，而是状态转移 S_t → S_{t+1}^{(a)}。同一个 +P@Edge 在不同 Cache、WAN 和 workload 状态下具有不同形成时间、有效容量与结构价值。
+TABLE 6
+状态量 | 含义 | 作用位置
+Z_t | 当前 P/D 实例集合、域位置、GPU 类型、启动状态 | 决定矩阵维度与节点能力
+F_{t-1} | 上一周期 P-D routing proportion / flow | 稳定性、最小变动与关系连续性
+Q^P_i(t) | P 侧排队、GPU 利用、正在执行 Prefill | Prefill waiting / residual capacity
+Q^D_j(t) | D 侧排队与调度队列 | TTFT/TPOT 风险
+L^active_j(t) | D_j 上不可迁移的 Active Decode / Active KV | 锁定既有状态，扣减 D residual capacity
+H_ik(t) | P_i 对请求类 k 的 Prefix KV 命中/覆盖程度 | Prefill token reduction、P-k affinity
+B^res_e(t) | 物理链路 e 当前剩余带宽、RTT、背景流量 | 共享链路约束与 KV transfer time
+U_t | 实例启动/预热状态、候选 GPU pool 可用性 | scale-out ramp-up 与重构成本
+TABLE 7
+请求类特征 | 进入模型的位置
+Input length L^in_k | Prefill compute 与生成 KV 大小
+Output length L^out_k | Decode 工作量与 D residual capacity 消耗
+Prefix class / reuse ratio | 决定 H_ik(t) 与实际需 Prefill token 数
+SLO^TTFT_k | 决定 P-D pair 的 TTFT 可行性
+SLO^TPOT_k | 决定 D_j 在当前 active load 下是否可接受
+TABLE 8
+对象 | 定义 | 是否决策变量 | 核心作用
+A_ijk(t) | 请求类 k 当前是否允许通过 P_i→D_j | 否 | 硬可行性/SLO mask
+C_ijk(t) | 当前状态下该 pair 服务 k 的边际代价/风险 | 否 | 在可行解中排序与优化
+F_ijk(t) | 单位时间内 k 类流量经 P_i→D_j 的量 | 是 | P-D correspondence 本体
+R_ije | P_i→D_j 路径是否经过物理链路 e | 否 | 表达共享拓扑和链路竞争
+TABLE 9
+设计收益：这一步把工作从“network-latency-aware matching”提升为“shared-topology-aware P-D correspondence”，也能自然解释为什么某个局部低 RTT pair 在全局上不一定最优。
+TABLE 10
+原则：SLO 与共享链路优先作为约束；C 只负责在“当前可行”的候选中做全局分配。这样比把 RTT、BW、Queue、Decode、SLO 全部线性相加更可解释。
+TABLE 11
+约束 | 形式/解释
+P 行容量 | Σ_{j,k} Work^P_{ik}(F_ijk) ≤ μ^P_i(t)
+D 残余列容量 | Σ_{i,k} Work^D_{jk}(F_ijk) ≤ μ^{D,res}_j(t)
+共享链路容量 | 对每条 e：Σ R_ije·F_ijk·S^KV_k ≤ B^res_e(t)
+请求供需 | Σ_{i,j}F_ijk + drop_k = λ_k(t)
+SLO/兼容性 | A_ijk(t)=0 ⇒ F_ijk(t)=0
+非负性 | F_ijk(t) ≥ 0
+TABLE 12
+动作 | 矩阵/状态变化 | 本版解释
++P_k cold | 新增 P 行；H_new,k≈0；容量由冷启动逐步形成 | 无需搬 Prefix，但前期重复 Prefill 较多
++P_k warm | 新增 P 行；执行 Prefix warmup；H_new,k↑ | 支付网络/等待成本换取更高有效能力
+−P_i | 删除 P 行；其新流量重新分配 | 需保证无不可中断 Prefill/遵守 drain
+P placement change | 旧行删除 + 新域新增行 | 改变路径 R_ije 与 Cache/WAN 状态
+TABLE 13
+“质变”的新定义：不是“新增容量超过多少”，而是“从当前状态出发，新增/删除一条 P 行是否在其真实形成过程中显著改变未来一段时间的最优 P-D 关系，并产生覆盖重构成本的累计净收益”。
+TABLE 14
+诊断信号 | 动态版本 | 说明
+Assignment regret | 当前 F_t 相对每个 k 的最好可行 pair 的偏离 | 反映容量/拓扑竞争造成的被迫分流
+Expensive-edge ratio | 落在高 C_ijk(t) pair 上的流量占比 | 反映当前状态下高成本边使用
+D pressure | Σ_i,k Work^D(F_ijk)/μ^{D,res}_j(t) | 使用 residual capacity，而非静态 μ^D
+SLO slack | SLO_k − T̂_ijk | 低 slack pair 多时提示结构风险
+Link pressure | 链路 e 当前分配流量 / B^res_e(t) | 定位共享 WAN/出口瓶颈
+TABLE 15
+KV 状态 | 是否优化放置 | 如何进入 P-D 决策
+Reusable Prefix KV @ P | 不做全局 placement；读取当前 H_ik(t) | 减少 Prefill token、形成 P-request affinity、改变 μ^P_i(t)
+Request KV transfer P→D | 随 F_ijk(t) 决定路径 | 产生跨域流量，受 R_ije 与 B^res_e(t) 约束
+Active Decode KV @ D | 固定，不迁移 | 锁定 D 当前状态并扣减 μ^{D,res}_j(t)
+Scale-out warmup Prefix | 只在 warm 候选中触发 | 产生 reconfig traffic 与 ramp-up delay，改变 G_H
+TABLE 16
+存算协同闭环：Storage → Compute：Prefix/Active KV 状态改变 Prefill 工作量与 Decode 残余能力；Compute/Placement → Storage：选择 warm scale-out 或新的 P-D flow 时，才触发必要的 Prefix 预热与 KV 网络流量。
+TABLE 17
+方法 | 状态/拓扑建模 | P Scaling | KV State | 验证目的
+B0 Static Snapshot | 只用静态 pair BW/RTT 与 GPU profile | 不扩缩 | 仅静态 capacity | 证明动态状态建模必要
+B1 Dynamic Matching, No Scaling | 使用当前 queue/SLO，但网络用独立 BW_ij | 不扩缩 | 使用当前 H/Active load | 隔离结构上限
+B2 Load-based Scaling | 与 Ours 相同动态 matching | utilization/demand gap ±P | 不参与 scaling value | 传统容量驱动扩缩容
+B3 Topology-aware Heuristic | 共享拓扑 + 动态 matching | 在高 link/pair cost 附近 +P | 不做 warm/cold counterfactual | 较强网络感知基线
+B4 Structure-aware NoCache | 与 Ours 相同 | G_H guided ±P | H_ik=0/只看 GPU | 隔离 Prefix 状态贡献
+Ours | S_t 条件化 A/C/R/F + SLO/residual state | 短窗口 structural gain ±P | Prefix + Active KV + warm/cold | 完整方法
+TABLE 18
+维度 | 建议配置
+域 | 第一版 2–3 域即可；至少存在共享 WAN/出口，能体现路径竞争
+P | 每域有可启停 P instance pool；同构或两档 GPU
+D | 固定 pool；至少两档 decode 能力或不同域位置；Active Decode 不迁移
+网络 | 可控 BW/RTT + 背景流量；至少构造两个 P-D pair 共享同一瓶颈链路
+Workload | 按 input/output/prefix/SLO 划分 request class；含 steady + burst
+Cache | 稳定热点为主；控制 Prefix reuse 与 warmup size/bandwidth
+框架 | 复用已有 P/D disaggregation、KV transfer、router；主要改控制器与 solver 层
+TABLE 19
+Case | 构造方式 | 要证明的结论 | 核心指标
+A 动态状态 vs 静态矩阵 | 固定结构，改变 D active load / queue | 静态 fastest-D 会失效，S_t-conditioned matching 更稳 | P95 TTFT/TPOT, SLO goodput
+B 共享链路竞争 | 两个低 cost pair 共享 WAN，逐步增加背景流量 | 独立 BW_ij 无法表达全局拓扑耦合 | link utilization, KV traffic, goodput
+C Prefix affinity | 不同 P 缓存不同热点 Prefix | H_ik 应改变 P-request 分配，而不仅是统一 μ^P | recomputed tokens, TTFT, row load
+D 结构瓶颈但总容量足够 | 总 P capacity≥需求，但高成本/低 slack pair 多 | capacity sufficient 不代表结构合理 | SGR/G_H, expensive-edge, SLO
+E Warm vs Cold scale-out | 相同新增位置，改变热点稳定性与 WAN | 同一 +P 动作在不同 S_t 下价值不同 | ramp-up, warmup traffic, G_H
+F 短热点反转 | burst 持续时间小于/接近 warmup 时间 | steady-state gain 会误扩容，short-horizon gain 更稳 | GPU-hours, reconfig count, SLO
+G Scale-in | 负载下降，不同 P 行持有不同 Prefix/拓扑价值 | 不能只按 utilization 删除 | J/G_H increase, SLO, recompute
+TABLE 20
+变量 | 建议范围/目的
+λ_k 与 burst duration | 低/中/高；5s/15s/30s/60s，区分短热点与稳定变化
+WAN bandwidth / RTT / background traffic | 改变路径排序，并制造共享瓶颈
+D active load | 改变 residual capacity 与 TPOT/queue 状态
+Prefix reuse H_ik | 0%、20%、50%、80%+；不同 P 持有不同热点
+Warmup size / bandwidth | 改变新 P 行形成时间与 ramp-up
+SLO tightness | 宽松/中等/严格，观察 feasibility mask 变化
+Structural Gain 阈值 θ | 收益与重构频率权衡
+Dwell time / routing-change ε | 验证抗抖动和关系稳定性
+TABLE 21
+类别 | 指标
+P-D 分配质量 | 总 dynamic pair cost、assignment regret、expensive-edge ratio、routing change
+服务性能 | P50/P95/P99 TTFT、TPOT、Goodput、SLO attainment/drop
+网络 | per-link KV traffic、跨域流量、共享链路峰值/拥塞时间
+状态利用 | P effective capacity、D residual capacity、active load balance
+存算协同 | Prefix reuse、recomputed tokens、warmup traffic、capacity ramp-up time
+结构收益 | G_H、结构变化前后累计 cost/SLO 改善、break-even time
+资源效率 | GPU-hours / cost、active P instances
+稳定性 | scale-out/in 次数、routing flips、dwell-time 触发次数
+TABLE 22
+贡献 | 内容
+C1 状态驱动 P-D 关系建模 | 把当前 P/D、上一周期关系、Queue/Active Decode、Prefix KV、SLO 与共享网络拓扑统一到 A/C/F + R 的关系模型中。
+C2 增量而非静态重放的 P-D 分配 | 仅对当前可调整新流量优化，Active Decode KV 保持原位，并利用 residual capacity 与 F_{t-1} 保持在线连续性。
+C3 状态转移式结构重构 | 把 P scale-out/in 从“容量控制”解释为 S_t→S_{t+1}^{(a)}，通过短窗口反事实收益评估矩阵增删行的真实结构价值。
+C4 轻量存算协同 | Prefix KV 改变 P-request affinity/有效容量，Active KV 改变 D residual capacity，warmup 状态改变结构形成代价；不扩展为全局 cache placement。
+C5 动态环境验证 | 在共享 WAN、D 异构/active load、SLO、Prefix 复用和 burst 下验证静态矩阵、容量扩缩容与状态驱动结构重构的差异。
+TABLE 23
+最终问题：给定跨域 P/D 分离系统当前状态 S_t 与 workload W_t，构造状态条件化的 P-D 可行关系 A_ijk(t)、代价 C_ijk(t) 与共享路径关联 R_ije，在固定当前资源结构且不迁移 Active Decode KV 的条件下，求针对新流量的最优关系 F_t*。若当前最优仍表现出结构瓶颈，则对少量 P 增行/删行候选构造状态转移 S_t→S_{t+τ}^{(a)}，在短时间窗口内反事实求解并计算 G_H(a|S_t)；只有累计净收益超过阈值且满足稳定性条件时才执行结构重构。
+### 跨域异构PD分离_问题抽象方法与实验设计.docx
+跨域异构 P/D 分离中的
+存算协同弹性调度
+问题抽象、方法设计与实验设计
+版本：2026-08-19
+0. 研究设计摘要
+本研究关注跨域、异构 GPU 环境下的 Prefill/Decode（P/D）分离推理。与一般的 P/D autoscaling 不同，本研究不把所有 P、D 实例视为可互换资源：P 的有效能力受可复用 Prefix KV Cache 状态影响，D 的能力受异构 GPU 影响，P-D pair 的性能又受跨域网络影响。因此，扩缩容、放置、缓存状态和 P-D 匹配不能完全独立处理。
+为简化工程边界，Decode 侧不考虑跨请求 KV 复用，也不迁移正在 Decode 的 active KV。D 缩容时采用 drain-and-scale：停止接收新请求，等待当前 Decode 请求完成后再释放实例。存储侧的主要研究对象是 Prefill 侧可跨请求复用的 Prefix KV Cache。
+1. 问题抽象
+1.1 系统场景与边界假设
+1.2 三个“不等价”是问题成立的核心
+P 实例不等价：即使 GPU 相同，不同 Prefix Cache 内容和热度会导致不同的有效 Prefill capacity。
+D 实例不等价：不同 GPU 的 Decode throughput、batch 效率、显存容量和上下文敏感性不同。
+P-D 实例对不等价：相同 P、D 在不同域组合下具有不同 RTT、可用带宽和 KV 传输开销。
+EffectiveCapacity(Pᵢ) = f(GPUᵢ, Cacheᵢ, workload)
+DecodeCapacity(Dⱼ) = g(GPUⱼ, batch, context, OSL)
+PairCost(Pᵢ,Dⱼ) = KVTransferᵢⱼ + Queueⱼ + Decodeⱼ
+因此，本研究不是简单寻找一个全局 N_P:N_D 比例，而是要匹配“有效 Prefill 供给”和“异构 Decode 能力”，并通过 P-D 流量分配把二者连接起来。
+1.3 存算协同如何体现
+存储状态必须直接改变计算决策，才能构成真正的存算协同。这里的关键不是“系统里有 Cache”，而是 Cache 放在哪里、保留哪些、何时复制，会改变 Prefill 重算量和扩容形成有效算力的速度。
+CacheValue(k) = PredictedReuse(k) × SavedPrefillCompute(k)
+由此产生两类基本权衡：
+以存换算：跨域复制高价值 Prefix KV，一次支付网络传输开销，换取后续多个请求减少 Prefill 计算。
+以算换存：当 Prefix 不够热或 WAN 较差时，不复制 KV，而是在目标 P 重新计算，避免状态传输。
+CopyCost(k,i→j) = KVSize(k) / Bandwidth(i,j)
+RecomputeBenefit(k) ≈ n̂ₖ × SavedPrefillTime(k)
+当 CopyCost 小于未来可摊销的重算收益时，主动复制才有价值。扩 P 时，因此需要同时回答“扩在哪里”和“把哪些 Prefix 状态带过去”；缩 P 时则需要考虑被释放实例上的 cache value，而不是只看 utilization。
+1.4 系统状态、决策变量与目标
+一个可实现的总体目标可写为：
+min  C_resource + α·C_prefill + β·C_PD-transfer + γ·C_decode + η·C_reconfig
+其中 C_reconfig 只包含本研究边界内的重构开销：实例启动、D 排空等待、P cache loss / replication 等；不包含 active Decode KV migration。核心约束包括 P/D 容量可行性、GPU 资源上限、缓存容量，以及 TTFT/TPOT SLO。
+1.5 三个核心研究问题（RQ）
+1. RQ1 — 状态相关容量：如何利用 Prefix Cache 热度与命中信息估计 P 的有效容量，使 autoscaling 不再把新扩 P 误认为立即获得完整算力？
+2. RQ2 — 异构 P/D 配置：在多域、异构 GPU 下，如何决定各域启用哪些 P/D 实例，使有效 Prefill 供给与异构 Decode capacity 匹配？
+3. RQ3 — 联合匹配与重构：如何同时考虑 Prefix 状态价值、P-D 网络成本和 D 异构能力，决定 cache 保留/复制、P-D affinity 和扩缩容动作，减少无效重算与跨域传输？
+2. 方法设计
+2.1 总体框架
+建议采用“慢时间尺度资源重构 + 快时间尺度请求路由”的两层控制结构。慢层每隔若干秒或在负载/缓存热点显著变化时重新规划 P/D pool、Prefix placement 和 P-D affinity；快层在已确定的候选关系内，根据实时队列和网络状态选择具体 D。
+2.2 Prefill 有效容量模型
+离线 profiling 得到不同 GPU、输入长度和 batch 下的 full-prefill 时间。在线根据 prefix hit 情况，把每类请求折算为实际需要计算的 token 数，再估算 P_i 的有效 throughput。一个简化形式为：
+ComputeTokens(r,Pᵢ) = ISL(r) − HitPrefixLen(r, Cacheᵢ)
+μᵢᴾ = ProfileP(GPUᵢ, ComputeTokens distribution, batch)
+该模型的关键作用是识别“冷扩容”：新 P 虽然实例 ready，但因为 cache 为空，短期 μ_i^P 可能显著低于稳定态。建议将“Effective Capacity Ramp-up Time”作为方法和实验中的专门指标。
+2.3 异构 Decode 能力模型
+不以 TFLOPS 直接代表 Decode 能力，而对每类 GPU 进行 profiling，得到 tokens/s 或 requests/s 与 batch、context、OSL 的关系：
+μⱼᴰ = ProfileD(GPUⱼ, batch, context, OSL)
+资源规划阶段以“需要多少有效 Decode capacity”为目标，再组合不同 GPU；因此 P/D ratio 不再是简单的实例数量比，而是供给能力匹配。
+2.4 Prefix Cache 价值模型
+对 Prefix k 建立 value score，至少考虑未来复用次数、命中后节省的 Prefill GPU 时间、cache 大小和跨域复制带宽。建议采用：
+Vₖ = n̂ₖ · SavedGPUTimeₖ − λ_net · CopyCostₖ − λ_mem · Sizeₖ
+缩容时优先保留高 V_k 的状态；扩容时只复制超过阈值的 hot prefixes，其余采用 lazy warming 或 recompute。这样“存储多少 GB”被转换成“未来替代多少计算”。
+2.5 P-D 匹配模型
+P-D matching 不建议做固定一一绑定，而采用 provisioning-level affinity + request-level routing。慢层为每个 P 建立可选 D 集合与目标流量比例 x_ij；快层在该集合内做实时选择。
+cᵢⱼ = α·(RTTᵢⱼ + KVSizeᵢ/Bᵢⱼ) + β·QueueDelayⱼ + γ·DecodeTimeⱼ
+min  ΣᵢΣⱼ xᵢⱼ·cᵢⱼ   s.t.  Σⱼxᵢⱼ=λᵢ ,  Σᵢxᵢⱼ≤μⱼᴰ
+该子问题可以用容量约束最小成本流、线性规划或快速贪心近似实现。工程第一版建议先用 min-cost flow / greedy 作为可解释基线，再视规模考虑更快的启发式。
+2.6 联合重构 Planner
+完整求解同时包含离散实例启停、cache placement 和流量分配，直接在线求全局最优可能较重。建议采用“候选生成 + 快速估计 + 局部搜索”的工程化设计：
+1. 根据预测负载计算所需 Prefill/Decode effective capacity 区间，而不是直接给定实例数量。
+2. 在各域异构 GPU 上生成少量 P/D 配置候选，例如围绕当前配置做 ±1/±2 个实例的局部变化，优先最小重构。
+3. 对每个候选估算 cache state loss、hot-prefix replication 方案和 Prefill effective capacity。
+4. 对候选 P/D pool 求 P-D affinity / min-cost flow，得到跨域 KV 与 Decode queue 成本。
+5. 计算总成本和 SLO 可行性，只有当新配置收益超过重构阈值时才执行，降低频繁抖动。
+6. 执行时：P 扩容可做 selective hot-prefix replication；P 缩容先停止新 Prefill 并处理 cache；D 缩容采用 drain-and-scale。
+2.7 推荐的两时间尺度控制
+3. 实验设计
+3.1 实验目标
+实验需要分别证明：① 动态扩缩容有价值；② 异构 D 与 P-D 网络匹配必须考虑；③ Prefix Cache 状态确实会改变计算扩缩容决策；④ 联合优化优于“先算后存”的串行方案。尤其要避免只用“Cache ON vs OFF”来证明存算协同。
+3.2 实验环境建议
+3.3 Baseline 设计
+最重要的实验原则：所有强基线都应使用相同的 Prefix Cache 机制和容量，区别是“调度器是否使用 cache state”，而不是简单关闭缓存。
+3.4 消融实验
+3.5 四组必须覆盖的 workload / 场景
+Case A：请求量变化，Prefix 热点稳定：λ 例如 20→80→20 req/s，prefix 分布基本不变。观察扩容后新 P 从 cold 到有效 capacity 的速度，以及 selective replication 是否缩短 ramp-up。
+Case B：请求量不变，Prefix 热点漂移：λ 固定，但热点从 Prefix A 切换到 B。纯 compute autoscaler看到的请求量几乎不变，而 Prefill 计算量会因 hit/miss 改变；这是证明存储状态必要性的核心场景。
+Case C：D 异构 + WAN 改变：例如 Edge 使用 L40S/A100，Cloud 使用 H100，WAN 从高带宽逐渐降低。观察最优 pairing 从远端强 D 向近端弱 D 转移的阈值。
+Case D：缩容时 Cache Preservation：构造“缓存小但覆盖高热点”和“缓存大但低热度”的 P。比较只按 utilization/cache size 与按 SavedCompute value 缩容的差异。
+3.6 工作负载变量 Sweep
+3.7 指标设计
+其中最建议突出两个专用指标：Recomputed Prefix Tokens（直接量化因 cache placement 不佳导致的额外计算）和 Effective Capacity Ramp-up Time（量化“实例 ready ≠ 有效服务能力 ready”的冷扩容问题）。
+3.8 实验假设（希望验证的结论）
+H1：相同 GPU 数量下，Prefix Cache 状态差异会造成显著不同的 Prefill effective capacity，因此只按实例数/理论算力做 autoscaling 会误判容量。
+H2：在热点稳定或可预测时，selective hot-prefix replication 能减少扩容后的重算并缩短 effective capacity ramp-up time。
+H3：在异构 D 环境中，最强 GPU 并不总是最佳 D；当 WAN 变差时，近端较弱 D 可能具有更低端到端成本。
+H4：联合优化优于 sequential，因为某个“计算上便宜”的缩容/放置动作可能损失高价值 Prefix 状态，随后付出更高重算或复制成本。
+H5：相比 No-Storage 强基线，Ours 的优势应主要体现在更少的 recomputed prefix tokens、更高 SLO goodput 和更低扩容恢复时间，而不只是更高 cache hit rate。
+4. 建议的第一版实现范围
+为了避免问题过大，第一版建议控制在以下最小闭环：
+P/D 数量可在预设资源池内动态扩缩；D 使用 2–3 种异构 GPU。
+P 侧实现 Prefix Cache 观测（命中、热度、大小）和 selective replication / preserve。
+D 缩容只做 drain-and-scale，不迁移 active KV。
+P-D matching 使用 capacity-aware min-cost flow 或 greedy；快层运行时在 affinity 内 least-cost 选择。
+重构 Planner 使用局部候选搜索，不追求复杂全局优化；加入收益阈值和最小驻留时间。
+先验证真实小规模原型，再用 trace-driven simulator 扩展域数/GPU 数和 workload 时间长度。
+5. 最终论文/项目叙事
+本研究最适合围绕“有状态 Prefill + 异构 Decode + 非均质 P-D 连接”展开，而不是泛化成所有存储和计算问题。核心论点可以概括为：
+与现有方向的角色划分可以表述为：DOPD 类工作回答“动态需要多少 P/D”，HeteroScale 类工作回答“异构资源如何扩缩/放置”，NetKV 类工作回答“已有 P/D pool 下请求选哪个 D”，PrfaaS 类工作推动“跨数据中心 Prefill 与缓存/带宽调度”；本研究进一步关注这些决策在 Prefix 状态、异构 D 和跨域 pairing 同时存在时的耦合。
+6. 可提炼的预期贡献
+最终可将整个问题压缩为：
+Cache-aware Cross-domain Heterogeneous P/D Elastic Scheduling
+即：在 Prefill 有状态、Decode 异构且跨域 P-D 网络不均质的条件下，用 Prefix 状态来校正计算容量，用异构计算能力和网络成本来决定 P-D 配置与匹配，并通过最小重构实现弹性调度。
+TABLE 0
+一句话研究问题 / 在跨域异构 P/D 分离推理系统中，Prefill 实例因 Prefix Cache 状态而具有不同的有效计算能力，Decode 实例因 GPU 类型而具有不同的解码能力，P-D 实例对又因跨域网络而具有不同的通信成本。面对动态负载，如何联合决定 P/D 扩缩容与放置、Prefix Cache 的保留/复制，以及 P-D 匹配关系，在满足 TTFT/TPOT SLO 的前提下降低资源、通信和重配置开销。
+TABLE 1
+核心研究主线 / Prefix Cache Placement → Prefill Effective Capacity → P/D Scaling & Placement → Heterogeneous D Demand → P-D Matching；反向地，计算放置和请求分布又决定未来缓存应保留或复制到哪里，形成 Storage <-> Compute <-> Network 的闭环。
+TABLE 2
+假设 | 定义
+多域环境 | 系统由多个计算域组成，例如边缘域、区域云和中心云；域间链路带宽/时延不同并可变化。
+异构计算 | 不同域拥有不同类型和数量的 GPU；尤其 Decode 实例可能由 H100、A100、L40S 等多种资源组成，实际服务能力通过 profiling 获得。
+P/D 分离 | Prefill 与 Decode 运行在不同实例池中。请求 Prefill 完成后，需要把本请求 Decode 所需 KV 发送到选定 D。
+Prefill 有状态 | P 侧维护可跨请求复用的 Prefix KV Cache；cache hit 可减少 prefix 重算，从而直接提高有效 Prefill capacity。
+Decode 近似无持久状态 | Decode KV 不跨请求复用；D 缩容采用 drain-and-scale，不迁移 active Decode KV。
+弹性资源范围 | 各域资源可在给定容量范围内扩缩容，权重已预置/可快速加载，不把跨域模型权重搬迁作为核心问题。
+TABLE 3
+类别 | 主要变量
+工作负载状态 | λ_t、ISL_t、OSL_t、prefix 热度/复用分布
+资源状态 | 各域 GPU 类型、可用实例数、P/D 当前角色、启动/排空状态
+存储状态 | Cache_i：P_i 当前持有的 Prefix 集合、大小、热度和命中信息
+网络状态 | B_ij、RTT_ij、可选的链路拥塞估计
+决策变量 | z_i^P、z_j^D（实例启停/角色）；y_ik（Prefix k 是否放于 P_i）；x_ij（P_i→D_j 的流量比例/affinity）
+TABLE 4
+模块 | 职责
+① Workload & State Profiler | 统计 λ、ISL/OSL、prefix 频率、cache hit、GPU 利用率、D queue、链路状态。
+② Capacity Estimator | 分别估算各候选 P 的 cache-aware effective capacity 与各异构 D 的 decode capacity。
+③ Cache Value Estimator | 把 Prefix 的“存储价值”转换为可节省的未来 Prefill GPU 时间，并估计复制/丢失成本。
+④ Joint Reconfiguration Planner | 选择 P/D 实例、跨域放置和 Prefix 保留/复制；输出目标资源配置。
+⑤ P-D Affinity Planner | 基于 KV 传输成本、D queue 与异构 decode speed 建立 P→D 候选集合/流量比例。
+⑥ Runtime Router | 在候选 D 中按实时 cost 选取具体 D；D 缩容时执行 drain，不迁移 active KV。
+TABLE 5
+精简版算法建议 / 第一版不要同时研究 KV 压缩、active Decode KV migration、模型权重跨域搬迁和复杂预测模型。先把“cache-aware P capacity + heterogeneous D capacity + P-D matching + drain-based scaling”做扎实，已经足以形成完整闭环。
+TABLE 6
+层次 | 设计
+慢层（秒级/事件触发） | P/D 扩缩容、异构实例选择、Prefix 保留/复制、P-D affinity；输入为负载预测与缓存热度趋势。
+快层（请求级） | 在 affinity 集合中选择 D，依据实时 queue、带宽和 GPU service time 做轻量 scoring。
+触发条件 | λ/ISL/OSL 显著变化、cache hit 明显下降、热点 Prefix 漂移、D backlog、链路状态变化。
+抗抖动 | 设置 minimum dwell time、收益阈值和最大单次变更规模，避免扩缩容来回翻转。
+TABLE 7
+维度 | 建议
+域数量 | 建议 3 个域：Edge-A、Edge-B、Cloud；至少包含两个跨域链路。
+P 资源 | 可先使用 1–2 类 GPU，重点体现 Prefix 状态；P 权重预置。
+D 资源 | 至少 3 档异构 GPU，例如高/中/低 decode throughput，显式体现 capacity 差异。
+网络 | 域内高带宽；跨域设置 10/20/40/80/100 Gbps 等档位，并可注入带宽变化。
+推理框架 | 优先选择支持 P/D disaggregation 与 Prefix Cache 的开源 serving stack；先做真实小规模原型，再用 trace-driven simulator 扩展规模。
+模型 | 第一版选择 7B/14B 级模型便于多实例实验；额外可用更大模型做敏感性验证。
+TABLE 8
+方法 | 定义与目的
+B0 Static-Best | 离线搜索最佳静态 P/D + 异构资源配置，全程不重构；用于证明动态调度必要性。
+B1 Compute-AutoScale | DOPD-style：根据 λ/ISL/OSL 动态扩缩 P/D，并按异构 GPU profiling 配 capacity；不看 Prefix 状态。
+B2 Topology/Hetero-Aware | HeteroScale-style：在 B1 上加入异构资源和 topology/network affinity；Prefix 状态仍不参与扩缩容。
+B3 Network-Aware No-Storage | 在 B2 上加入强 P-D matching：综合 KV transfer、D queue、异构 decode speed；这是最重要的 No-Storage 主基线。
+B4 Cache-Aware Sequential | 先根据计算负载做 P/D scaling/placement，再在固定 P pool 上做 cache placement，最后做 P-D matching；证明“考虑存储”仍不等于“存算联合”。
+B5 External SOTA | 工程可行时加入 PrfaaS-style cross-DC baseline；NetKV 可作为 request-level D selection 参考。
+Ours | 联合考虑 cache-aware P capacity、heterogeneous D capacity、P/D placement、Prefix preservation/replication 与 P-D affinity。
+TABLE 9
+两组最关键对照 / Ours vs B3：证明“存储状态进入调度决策”的必要性；Ours vs B4：证明“存和算必须联合”，而不是 autoscaling 与 cache placement 两个模块串起来就够。
+TABLE 10
+Variant | 验证目的
+Ours-NoCache | Cache 正常运行，但调度器不使用 cache state；直接测存储感知的增益。
+Ours-NoHetero | 把所有 D 视为同等 capacity；证明异构 Decode 建模必要。
+Ours-NoNetwork | P-D 匹配忽略 WAN 带宽/RTT；证明网络对 pairing 的影响。
+Ours-NoJoint | 按 scaling → cache → matching 串行执行；证明联合优化价值。
+Ours-NoReplica | 不主动复制 hot prefix，只依赖 lazy warming/recompute；证明 cache placement 策略价值。
+Ours-NoHysteresis | 取消重构收益阈值/最小驻留时间；观察频繁扩缩容和抖动。
+TABLE 11
+变量 | Sweep 建议
+请求到达率 λ | 低/中/高，外加 burst 与周期性变化
+输入/输出长度 | 短输入长输出、长输入短输出、混合 workload
+Prefix 复用率 | 0%、20%、50%、80%+；同时改变热点集中度
+热点漂移速度 | 稳定、缓慢漂移、突发切换
+跨域带宽 | 10/20/40/80/100 Gbps 或按实验链路可实现范围设置
+GPU 异构度 | 同构 D、两档 D、三档 D；比较 capacity ratio
+Cache 容量 | 较小/中等/充足，观察 eviction 与 replication 的价值
+扩缩容频率 | 不同 control interval 与 hysteresis threshold
+TABLE 12
+类别 | 核心指标
+服务性能 | P50/P95/P99 TTFT、P50/P95 TPOT、JCT、Goodput、SLO attainment。
+资源效率 | GPU utilization、GPU-hours / cost、各类 D 的 load imbalance。
+存算协同 | Prefix Cache hit rate、recomputed prefix tokens、saved Prefill GPU time/FLOPs、cache state loss。
+网络 | P→D KV traffic、Prefix replication traffic、跨域总流量、链路峰值占用。
+弹性 | 扩/缩容次数、reconfiguration time、D drain time、Effective Capacity Ramp-up Time。
+稳定性 | 配置翻转次数、重构后性能恢复速度、预测误差下的鲁棒性。
+TABLE 13
+不建议第一版加入 / KV 压缩、active Decode KV migration、跨域模型权重搬迁、复杂强化学习、多模型联合部署、细粒度 layer migration。这些都可以作为未来扩展，但会显著稀释主线。
+TABLE 14
+核心论点 / 传统 P/D autoscaling 主要把实例视为由 GPU 决定容量的计算资源，但在 Prefix Cache 可复用的场景下，P 的有效能力由“硬件 + 缓存状态 + workload”共同决定；同时 D 的异构算力与跨域网络使 P-D pair 也不可互换。因此，资源扩缩容、缓存状态与 P-D 匹配必须联合调度。
+TABLE 15
+贡献 | 内容
+C1 状态相关容量建模 | 提出 cache-aware Prefill effective capacity，把 Prefix hit/miss 转换为实际 Prefill 计算量和扩容有效容量。
+C2 跨域异构联合配置 | 联合决定 P/D 扩缩容、异构资源放置与 P-D affinity，不再以简单 N_P:N_D 数量比描述系统容量。
+C3 Prefix 状态价值调度 | 以 Saved Prefill Compute 衡量 Prefix Cache 价值，联合决定保留、复制或重算，实现“以存换算/以算换存”。
+C4 面向弹性的系统实现与评估 | 采用 drain-based D scaling + selective P cache replication，在动态 workload、热点漂移、异构 GPU 和 WAN 变化下验证 SLO、goodput、资源与重构收益。

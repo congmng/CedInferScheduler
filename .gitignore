@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Logs
+**/*.log
+LLMServingSim/log/
+LLMServingSim/astra-sim/log/
+
+# Compiled ASTRA-Sim artifacts (keep the build scripts themselves)
+LLMServingSim/astra-sim/build/astra_analytical/build/
+LLMServingSim/astra-sim/build/astra_garnet/build/
+LLMServingSim/astra-sim/build/astra_htsim/build/
+LLMServingSim/astra-sim/build/astra_ns3/build/
+
+# Simulation scratch outputs
+LLMServingSim/outputs/*
+!LLMServingSim/outputs/example_*.csv
+LLMServingSim/astra-sim/inputs/runs/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

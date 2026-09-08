@@ -1,0 +1,4 @@
+# Optional exact LP backend for `"casr": {"solver": "lp"}`.
+ortools>=9.10
+# Chakra's generated ET protobuf bindings require a 7.x runtime.
+protobuf>=7.35.1,<8

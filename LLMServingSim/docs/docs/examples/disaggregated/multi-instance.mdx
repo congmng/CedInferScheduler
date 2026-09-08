@@ -1,0 +1,122 @@
+---
+title: Multi-instance LOAD routing
+sidebar_position: 1
+---
+
+# Multi-instance with LOAD routing
+
+> **What this demonstrates:** running two independent serving
+> instances on the same node with vLLM-style load-aware request
+> routing.
+
+This is the simplest "scale out" pattern: replicate the same model
+across multiple instances and let the router pick the least-loaded
+one for each new request. It's what real production deployments
+(vLLM, TGI, SGLang) do under a load balancer.
+
+## Prerequisites
+
+- Simulator container set up
+- Bundled RTXPRO6000 profile for `meta-llama/Llama-3.1-8B`
+
+## Cluster config
+
+`configs/cluster/single_node_multi_instance.json`:
+
+```json title="configs/cluster/single_node_multi_instance.json"
+{
+  "num_nodes": 1,
+  "link_bw": 16,
+  "link_latency": 20000,
+  "nodes": [
+    {
+      "num_instances": 2,
+      "cpu_mem": {"mem_size": 512, "mem_bw": 256, "mem_latency": 0},
+      "instances": [
+        {
+          "model_name": "meta-llama/Llama-3.1-8B",
+          "hardware": "RTXPRO6000",
+          "npu_mem": {"mem_size": 96, "mem_bw": 1597, "mem_latency": 0},
+          "pd_type": null,
+          "tp_size": 1
+        },
+        {
+          "model_name": "meta-llama/Llama-3.1-8B",
+          "hardware": "RTXPRO6000",
+          "npu_mem": {"mem_size": 96, "mem_bw": 1597, "mem_latency": 0},
+          "pd_type": null,
+          "tp_size": 1
+        }
+      ]
+    }
+  ]
+}
+```
+
+The two pieces:
+
+- `num_instances: 2` and matching `instances` array length.
+- Each instance is independent, same model, same hardware, **no**
+  `dp_group` (so they don't share experts or wave-sync).
+
+## Run
+
+```bash
+python -m serving \
+  --cluster-config 'configs/cluster/single_node_multi_instance.json' \
+  --dtype bfloat16 --block-size 16 \
+  --dataset 'workloads/example_trace.jsonl' \
+  --output 'outputs/multi_instance_run.csv' \
+  --request-routing-policy LOAD \
+  --log-interval 1.0
+```
+
+`--request-routing-policy LOAD` is the default but explicit here for
+clarity. Options:
+
+- `LOAD`: vLLM-style least-loaded — score `waiting * 4 + running`
+- `RR`: pure round-robin
+- `RAND`: random pick
+- `CUSTOM`: pluggable in `serving/core/router.py`
+
+## Expected output
+
+```text
+[20.0s] Avg prompt throughput: 2412.0 tokens/s, Avg generation throughput: 820.0 tokens/s
+        ├─Running Instance[0]: 6 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63218.51 MB (64.301 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 74208)
+        ├─Running Instance[1]: 4 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63204.51 MB (64.287 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 71950)
+        └─Node[0]: Total CPU Memory Usage 0.00 MB, 0.000 % Used (Instance[0]: 0.00 %, Instance[1]: 0.00 %)
+[21.0s] Avg prompt throughput: 2508.0 tokens/s, Avg generation throughput: 860.0 tokens/s
+        ├─Running Instance[0]: 6 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63290.51 MB (64.374 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 75462)
+        ├─Running Instance[1]: 5 reqs, Waiting: 0 reqs, Total # 1 NPUs, Each NPU Memory Usage 63276.51 MB (64.360 % Used), Prefix Cache Hit ratio 0.00 %, (0 / 73204)
+        └─Node[0]: Total CPU Memory Usage 0.00 MB, 0.000 % Used (Instance[0]: 0.00 %, Instance[1]: 0.00 %)
+```
+
+The router fills the lighter-loaded instance first. With LOAD policy,
+pending tokens (running + waiting) and active KV-cache footprint both
+weight the choice, same algorithm vLLM uses.
+
+The output CSV gets one row per finished request as usual; each row
+has an `instance_id` column so you can split by replica.
+
+## What's interesting
+
+- **Throughput roughly 2× single-instance** for typical workloads,
+  modulo PCIe / link contention from the shared host (modeled via
+  `link_bw`).
+- **Memory doubles linearly**: the model is fully replicated. No
+  free lunch on weight memory; that's what TP / EP / DP+EP solve.
+- **Per-instance KV cache.** Prefix caching is per-instance by
+  default, a request that lands on instance 1 can't reuse a prefix
+  computed on instance 0 unless prefix sharing is enabled (see
+  [Prefix caching](../memory-tiers/prefix-caching)).
+
+## Related examples
+
+- **[Tensor parallel](../parallelism/tensor-parallel)**: the
+  alternative way to use 2 GPUs (one bigger instance instead of two
+  replicas).
+- **[Prefill/decode split](./prefill-decode-split)**: multi-instance
+  but with *specialized* roles per instance.
+- **[DP+EP MoE](../parallelism/dp-ep-moe)**: multi-instance for MoE
+  with cross-instance expert sharing.

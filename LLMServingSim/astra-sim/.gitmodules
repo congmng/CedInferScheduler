@@ -1,0 +1,21 @@
+[submodule "extern/helper/fmt"]
+	path = extern/helper/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "extern/helper/spdlog"]
+	path = extern/helper/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "extern/network_backend/ns-3"]
+	path = extern/network_backend/ns-3
+	url = https://github.com/casys-kaist/astra-network-ns3.git
+[submodule "extern/network_backend/csg-htsim"]
+	path = extern/network_backend/csg-htsim
+	url = https://github.com/Broadcom/csg-htsim.git
+[submodule "extern/graph_frontend/chakra"]
+	path = extern/graph_frontend/chakra
+	url = https://github.com/casys-kaist/chakra.git
+[submodule "extern/network_backend/analytical"]
+	path = extern/network_backend/analytical
+	url = https://github.com/casys-kaist/astra-network-analytical.git
+[submodule "extern/memory_backend/analytical"]
+	path = extern/memory_backend/analytical
+	url = https://github.com/casys-kaist/astra-memory-analytical.git

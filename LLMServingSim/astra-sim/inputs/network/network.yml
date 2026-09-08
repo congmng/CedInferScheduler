@@ -1,0 +1,4 @@
+topology: [FullyConnected]
+npus_count: [1]
+bandwidth: [112.0]
+latency: [0.0]

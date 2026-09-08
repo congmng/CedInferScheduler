@@ -1,0 +1,19 @@
+"""CASR control-plane primitives for state-aware P/D simulation.
+
+The package deliberately sits above ``serving.core``: schedulers retain their
+vLLM-like batching and KV semantics, while CASR consumes observations and
+publishes routing/lifecycle decisions at a slower control cadence.
+"""
+
+from .affinity import AffinityPlan
+from .prefix_profiler import PrefixProfiler
+
+__all__ = ["AffinityPlan", "PrefixProfiler"]
+from .affinity import AffinityPlan
+from .controller import CASRController
+from .flow_solver import CapacityAwareFlowSolver, FlowAssignment, FlowSolverConfig, SharedLink
+from .lifecycle import PrefillLifecycle
+from .policy import BuiltinPolicy, PolicyError
+from .prefix_profiler import PrefixProfiler
+
+__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "SharedLink"]

@@ -1,0 +1,3188 @@
+{
+  "user": "ubuntu",
+  "uid": 1000,
+  "roots": [
+    "/home/ubuntu",
+    "/tmp",
+    "/var/tmp",
+    "/mnt/home",
+    "/mnt/old_data/home/ubuntu",
+    "/data"
+  ],
+  "elapsed_seconds": 205.8,
+  "scanned_unique_files": 3445426,
+  "groups": [
+    [
+      "/mnt/home/model",
+      797287649280,
+      797285778996,
+      588,
+      434198597632
+    ],
+    [
+      "/mnt/home/ztr",
+      585148284928,
+      585129702479,
+      8531,
+      0
+    ],
+    [
+      "/mnt/home/rodinia_trace_swift",
+      341319938048,
+      341301352610,
+      12450,
+      0
+    ],
+    [
+      "/mnt/home/tango_collect_accelsim",
+      198500798464,
+      198499315885,
+      601,
+      0
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train",
+      153904418816,
+      152120974288,
+      708291,
+      153904418816
+    ],
+    [
+      "/home/ubuntu/.cache",
+      141236248576,
+      141202605417,
+      15167,
+      75688202240
+    ],
+    [
+      "/mnt/home/fwyw",
+      88921075712,
+      88673283288,
+      118223,
+      0
+    ],
+    [
+      "/home/ubuntu/miniconda3",
+      86503763968,
+      84616920637,
+      773929,
+      86503763968
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets",
+      82234494976,
+      81959505093,
+      116161,
+      82234494976
+    ],
+    [
+      "/mnt/home/Lossless",
+      58802823168,
+      58801496183,
+      592,
+      58802823168
+    ],
+    [
+      "/home/ubuntu/srz",
+      58093105152,
+      57576168948,
+      220374,
+      58093105152
+    ],
+    [
+      "/mnt/home/agenticInfra",
+      54488743936,
+      55443882262,
+      247889,
+      54488743936
+    ],
+    [
+      "/mnt/home/wyc",
+      50095984640,
+      49690742508,
+      148398,
+      0
+    ],
+    [
+      "/mnt/home/Amove",
+      34720718848,
+      34718339888,
+      1051,
+      34720718848
+    ],
+    [
+      "/home/ubuntu/ced_train",
+      25545461760,
+      25280181364,
+      115654,
+      25535967232
+    ],
+    [
+      "/home/ubuntu/.vscode-server",
+      17957953536,
+      17638470882,
+      109498,
+      17957953536
+    ],
+    [
+      "/tmp/[direct files]",
+      14131052544,
+      14107409359,
+      7698,
+      12396449792
+    ],
+    [
+      "/mnt/home/zhanghao",
+      11946364928,
+      10983458252,
+      404273,
+      0
+    ],
+    [
+      "/home/ubuntu/[direct files]",
+      5421768704,
+      5421648632,
+      36,
+      5421768704
+    ],
+    [
+      "/tmp/SimAI-queue-lineage-7bae00ecf6971d4f4f47b5a54c8442ba03a7c02d",
+      3363201024,
+      3340907097,
+      9428,
+      3363201024
+    ],
+    [
+      "/home/ubuntu/.local",
+      2694115328,
+      2527408228,
+      60929,
+      2694115328
+    ],
+    [
+      "/home/ubuntu/SimAI-tcp-holdout-20260829",
+      1789116416,
+      1766884435,
+      9410,
+      1789116416
+    ],
+    [
+      "/home/ubuntu/.conan",
+      1358303232,
+      1141229296,
+      90565,
+      1358303232
+    ],
+    [
+      "/mnt/home/SSY",
+      1041166336,
+      971741161,
+      25534,
+      1041166336
+    ],
+    [
+      "/tmp/cedfs-phy-phy-bench",
+      749748224,
+      749549307,
+      98,
+      749748224
+    ],
+    [
+      "/home/ubuntu/verilator",
+      637784064,
+      623666739,
+      4627,
+      637784064
+    ],
+    [
+      "/tmp/SimAI-queue-lineage-261607b3",
+      604749824,
+      582595537,
+      9376,
+      604749824
+    ],
+    [
+      "/tmp/SimAI-queue-lineage-261607b3af75941d13f0d24187c7c1e8c59b1d29",
+      604700672,
+      582548480,
+      9376,
+      604700672
+    ],
+    [
+      "/tmp/SimAI-queue-lineage-52a66845",
+      604651520,
+      582505569,
+      9376,
+      604651520
+    ],
+    [
+      "/home/ubuntu/.codex",
+      523350016,
+      501664764,
+      8751,
+      523350016
+    ],
+    [
+      "/tmp/simai_git_sync",
+      407228416,
+      407223239,
+      1,
+      407228416
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.vscode-server",
+      347488256,
+      342894843,
+      1805,
+      347488256
+    ],
+    [
+      "/tmp/shard5-parts",
+      337625088,
+      337589266,
+      8,
+      0
+    ],
+    [
+      "/home/ubuntu/.gemini",
+      268967936,
+      131573872,
+      44546,
+      268967936
+    ],
+    [
+      "/home/ubuntu/.sbt",
+      225648640,
+      225276156,
+      177,
+      225648640
+    ],
+    [
+      "/tmp/mudnacsim-phase2a-dev",
+      206475264,
+      206328611,
+      67,
+      0
+    ],
+    [
+      "/home/ubuntu/cedfs_deploy",
+      204648448,
+      204393073,
+      347,
+      204648448
+    ],
+    [
+      "/home/ubuntu/.config",
+      199876608,
+      197432177,
+      788,
+      199876608
+    ],
+    [
+      "/tmp/mudnacsim-phase15-dev",
+      168214528,
+      168096756,
+      60,
+      0
+    ],
+    [
+      "/home/ubuntu/CedTrainScheduler",
+      160694272,
+      160200339,
+      201,
+      160694272
+    ],
+    [
+      "/tmp/torchinductor_sx",
+      153829376,
+      144721535,
+      3970,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-resnet-cache-verify-20260903",
+      123088896,
+      60581696,
+      60102,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-resnet-cache-miss-20260903",
+      122425344,
+      60207635,
+      59778,
+      0
+    ],
+    [
+      "/home/ubuntu/joint_ppdp_20260804",
+      90734592,
+      90281509,
+      217,
+      90734592
+    ],
+    [
+      "/home/ubuntu/snap",
+      86822912,
+      82059912,
+      2256,
+      86822912
+    ],
+    [
+      "/tmp/cedfs-http-phy-fixed-1692773",
+      67108864,
+      67108864,
+      3,
+      67108864
+    ],
+    [
+      "/home/ubuntu/.mem0",
+      62668800,
+      62653040,
+      5,
+      62668800
+    ],
+    [
+      "/mnt/home/sz",
+      56737792,
+      56400109,
+      143,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-phase1-review-build",
+      43917312,
+      43734854,
+      86,
+      0
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/snap",
+      39849984,
+      39576830,
+      285,
+      39849984
+    ],
+    [
+      "/tmp/mudnacsim-phase2a-release",
+      39673856,
+      39460451,
+      95,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-phase2a6-release",
+      39669760,
+      39462859,
+      95,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-phase2a5-release",
+      39063552,
+      38855828,
+      95,
+      0
+    ],
+    [
+      "/tmp/cedfs-http-phy-1585753",
+      33558528,
+      33554695,
+      3,
+      33558528
+    ],
+    [
+      "/tmp/cedfs-http-phy-retry-1593209",
+      33558528,
+      33554695,
+      3,
+      33558528
+    ],
+    [
+      "/tmp/simai_rerun_sync_20260620_205925_735452",
+      32514048,
+      32500601,
+      7,
+      32514048
+    ],
+    [
+      "/tmp/mudnacsim-phase15-release",
+      32460800,
+      32266580,
+      90,
+      0
+    ],
+    [
+      "/home/ubuntu/.triton",
+      27664384,
+      26184718,
+      636,
+      27664384
+    ],
+    [
+      "/tmp/node-compile-cache",
+      27213824,
+      24395408,
+      1190,
+      0
+    ],
+    [
+      "/tmp/torchinductor_ubuntu",
+      23601152,
+      22086116,
+      674,
+      23601152
+    ],
+    [
+      "/mnt/home/TTT-Serve",
+      21323776,
+      21052492,
+      91,
+      21323776
+    ],
+    [
+      "/home/ubuntu/joint_ppdp_20260804_strict_smoke",
+      17739776,
+      17650441,
+      41,
+      17739776
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.cache",
+      15114240,
+      14596010,
+      301,
+      15114240
+    ],
+    [
+      "/home/ubuntu/ray_vidur",
+      14782464,
+      9332819,
+      9025,
+      14782464
+    ],
+    [
+      "/home/ubuntu/r4090",
+      11366400,
+      6375487,
+      6005,
+      11366400
+    ],
+    [
+      "/tmp/nandsim-cmake-build",
+      10944512,
+      10310188,
+      210,
+      0
+    ],
+    [
+      "/tmp/nandsim-cmake-build-tools",
+      10924032,
+      10299981,
+      206,
+      0
+    ],
+    [
+      "/tmp/nandsim-cmake-build-root3",
+      10723328,
+      10093742,
+      207,
+      0
+    ],
+    [
+      "/tmp/nandsim-cmake-build-root2",
+      10723328,
+      10093742,
+      207,
+      0
+    ],
+    [
+      "/tmp/tcad_latex_redundancy_01a00456",
+      10489856,
+      10431937,
+      36,
+      0
+    ],
+    [
+      "/tmp/igb-clean-r36-20260829",
+      10399744,
+      10382811,
+      8,
+      20480
+    ],
+    [
+      "/tmp/nandsim-cmake-build-tools2",
+      10129408,
+      9514447,
+      203,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-partial-sram-smoke",
+      9875456,
+      9753536,
+      60,
+      0
+    ],
+    [
+      "/tmp/vqsmooth_kv_weighted_smoke",
+      8523776,
+      8512472,
+      33,
+      0
+    ],
+    [
+      "/tmp/vqsmooth-custom-ops-build",
+      8404992,
+      8279312,
+      53,
+      0
+    ],
+    [
+      "/tmp/jiti",
+      5562368,
+      3792710,
+      692,
+      0
+    ],
+    [
+      "/tmp/rp1_rp2_archive_check",
+      5431296,
+      5256400,
+      84,
+      0
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r13",
+      4911104,
+      4889989,
+      9,
+      24576
+    ],
+    [
+      "/tmp/npusim-build-trace",
+      4837376,
+      4081672,
+      228,
+      0
+    ],
+    [
+      "/tmp/tcp-driver-ring-pcap-r29",
+      4800512,
+      4784200,
+      8,
+      20480
+    ],
+    [
+      "/tmp/tcp-pcap-egress-r26",
+      4583424,
+      4566762,
+      8,
+      20480
+    ],
+    [
+      "/tmp/dramsim3-lp5-test-build",
+      4530176,
+      4284463,
+      86,
+      0
+    ],
+    [
+      "/tmp/npusim-build-pe",
+      4452352,
+      3689589,
+      231,
+      0
+    ],
+    [
+      "/tmp/vq-kv-sampler-smoke-20260820",
+      4329472,
+      4244230,
+      33,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-main-expr-layout-smoke-env",
+      4284416,
+      4168725,
+      52,
+      0
+    ],
+    [
+      "/tmp/torch_extensions_lossless_slowcheck1",
+      3575808,
+      3552521,
+      10,
+      3575808
+    ],
+    [
+      "/tmp/torch_extensions_lossless_speed_opt3",
+      3563520,
+      3540329,
+      10,
+      3563520
+    ],
+    [
+      "/tmp/torch_extensions_lossless_posstream2",
+      3563520,
+      3536633,
+      10,
+      3563520
+    ],
+    [
+      "/tmp/torch_extensions_lossless_speed_opt2",
+      3563520,
+      3540177,
+      10,
+      3563520
+    ],
+    [
+      "/tmp/torch_extensions_lossless_posstream_fix1",
+      3555328,
+      3529081,
+      10,
+      3555328
+    ],
+    [
+      "/tmp/torch_extensions_lossless_posstream",
+      3555328,
+      3529081,
+      10,
+      3555328
+    ],
+    [
+      "/tmp/torch_extensions_lossless_fix_remainder",
+      3547136,
+      3520761,
+      10,
+      3547136
+    ],
+    [
+      "/tmp/torch_extensions_lossless_fix_remainder2",
+      3547136,
+      3520761,
+      10,
+      3547136
+    ],
+    [
+      "/tmp/torch_extensions_lossless_uint32fix",
+      3538944,
+      3513825,
+      10,
+      3538944
+    ],
+    [
+      "/tmp/torch_extensions_lossless_compactmask",
+      3538944,
+      3513217,
+      10,
+      3538944
+    ],
+    [
+      "/tmp/torch_extensions_lossless_finalmask",
+      3538944,
+      3513505,
+      10,
+      3538944
+    ],
+    [
+      "/tmp/torch_extensions_lossless_maskprefix",
+      3538944,
+      3513505,
+      10,
+      3538944
+    ],
+    [
+      "/tmp/torch_extensions_lossless_sparse2",
+      3530752,
+      3507305,
+      10,
+      3530752
+    ],
+    [
+      "/tmp/torch_extensions_lossless_sparse",
+      3530752,
+      3507305,
+      10,
+      3530752
+    ],
+    [
+      "/tmp/torch_extensions_lossless",
+      3457024,
+      3433137,
+      10,
+      3457024
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r12",
+      3112960,
+      3093403,
+      9,
+      24576
+    ],
+    [
+      "/tmp/bp-pages",
+      2871296,
+      2862123,
+      5,
+      0
+    ],
+    [
+      "/tmp/npusim-build-warnings",
+      2650112,
+      1927869,
+      216,
+      0
+    ],
+    [
+      "/tmp/npusim-build",
+      2551808,
+      1833463,
+      213,
+      0
+    ],
+    [
+      "/tmp/cedfs-fuse-phy-1m-1881987",
+      2183168,
+      2173380,
+      3,
+      2183168
+    ],
+    [
+      "/tmp/mudnacsim-dramsim3-build",
+      2158592,
+      1915347,
+      87,
+      0
+    ],
+    [
+      "/tmp/vllm_fastapi_compat_20260827",
+      1916928,
+      1490333,
+      172,
+      1916928
+    ],
+    [
+      "/tmp/torch_extensions_lossless_speed_decode_debug2",
+      1896448,
+      1885938,
+      5,
+      1896448
+    ],
+    [
+      "/tmp/torch_extensions_lossless_speed_opt1",
+      1671168,
+      1656393,
+      6,
+      1671168
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r11",
+      1363968,
+      1342363,
+      9,
+      24576
+    ],
+    [
+      "/tmp/vq-kv-sampler-weight-vq-smoke-20260820",
+      1183744,
+      1098697,
+      33,
+      0
+    ],
+    [
+      "/tmp/vq-kv-fineweb-smoke-20260820",
+      1183744,
+      1098615,
+      33,
+      0
+    ],
+    [
+      "/home/ubuntu/LLM-Infra",
+      1122304,
+      851380,
+      102,
+      1122304
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r10",
+      1110016,
+      1090754,
+      9,
+      24576
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r8",
+      1056768,
+      1033684,
+      9,
+      24576
+    ],
+    [
+      "/home/ubuntu/k8s",
+      851968,
+      467094,
+      144,
+      851968
+    ],
+    [
+      "/tmp/opencode",
+      790528,
+      708712,
+      30,
+      0
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_runs",
+      765952,
+      593767,
+      84,
+      765952
+    ],
+    [
+      "/tmp/vq-kv-codebook-runtime-smoke-20260820",
+      700416,
+      654892,
+      19,
+      0
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.local",
+      630784,
+      580956,
+      21,
+      630784
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r7",
+      610304,
+      588893,
+      10,
+      24576
+    ],
+    [
+      "/tmp/mudnacsim_cmake_perf_ninja_20260824",
+      593920,
+      486174,
+      48,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-matplotlib",
+      475136,
+      472056,
+      1,
+      0
+    ],
+    [
+      "/tmp/dramsim3_cmake_perf_ninja_retry_20260824",
+      462848,
+      361722,
+      46,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-main-expr-layout-smoke",
+      417792,
+      387364,
+      17,
+      0
+    ],
+    [
+      "/tmp/mudnacsim_cmake_default_ninja_20260824",
+      405504,
+      375524,
+      18,
+      0
+    ],
+    [
+      "/tmp/mplconfig",
+      364544,
+      362521,
+      1,
+      0
+    ],
+    [
+      "/tmp/npusim_perf",
+      290816,
+      166846,
+      47,
+      0
+    ],
+    [
+      "/home/ubuntu/.dotnet",
+      270336,
+      252987,
+      6,
+      270336
+    ],
+    [
+      "/tmp/igb-clean-r34-20260829",
+      270336,
+      250149,
+      8,
+      20480
+    ],
+    [
+      "/home/ubuntu/.claude",
+      237568,
+      168071,
+      18,
+      237568
+    ],
+    [
+      "/tmp/pyright-3924526-n0PasgQiBNTW",
+      229376,
+      225304,
+      1,
+      229376
+    ],
+    [
+      "/tmp/tiny_llama_rice_compressed",
+      229376,
+      162578,
+      26,
+      229376
+    ],
+    [
+      "/tmp/mudnacsim_cmake_default_20260824",
+      221184,
+      206479,
+      12,
+      0
+    ],
+    [
+      "/tmp/dramsim3_cmake_perf_ninja_20260824",
+      221184,
+      203823,
+      12,
+      0
+    ],
+    [
+      "/tmp/hybridmapper_pipeline_mapping_logs",
+      217088,
+      115673,
+      34,
+      0
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.dotnet",
+      200704,
+      185216,
+      5,
+      200704
+    ],
+    [
+      "/tmp/date-page",
+      196608,
+      160091,
+      12,
+      0
+    ],
+    [
+      "/tmp/igb-clean-r35-20260829",
+      184320,
+      162901,
+      8,
+      20480
+    ],
+    [
+      "/tmp/JFs0orNJ3LE0v7Y3FRoZO",
+      172032,
+      155488,
+      8,
+      0
+    ],
+    [
+      "/tmp/ak4GzubOTY7xa6Iq9jwsG",
+      172032,
+      155488,
+      8,
+      0
+    ],
+    [
+      "/tmp/ncNW-EU1CsfH3XQLR0Eor",
+      172032,
+      155488,
+      8,
+      0
+    ],
+    [
+      "/tmp/mn3u1mcECnN3pL8tMRHL1",
+      172032,
+      156467,
+      8,
+      0
+    ],
+    [
+      "/tmp/xhp4n6iBBBopGdHQa-Pf8",
+      163840,
+      148919,
+      7,
+      0
+    ],
+    [
+      "/tmp/igb-clean-r31",
+      163840,
+      141546,
+      8,
+      20480
+    ],
+    [
+      "/tmp/zj_C6npkPb0PItO6Lewhy",
+      163840,
+      148919,
+      7,
+      0
+    ],
+    [
+      "/tmp/dramsim3-lp5x",
+      155648,
+      152004,
+      2,
+      0
+    ],
+    [
+      "/tmp/igb-ring-r28",
+      139264,
+      118278,
+      8,
+      20480
+    ],
+    [
+      "/tmp/vqsmooth_kv_both_weighted_codebook_smoke_cb3",
+      139264,
+      136774,
+      2,
+      0
+    ],
+    [
+      "/tmp/vqsmooth_kv_weighted_codebook_smoke_cb3",
+      139264,
+      136651,
+      2,
+      0
+    ],
+    [
+      "/tmp/igb-ring-r27",
+      135168,
+      115276,
+      8,
+      20480
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-8-write-bg",
+      131072,
+      92688,
+      16,
+      0
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-8-read-sequential",
+      131072,
+      109016,
+      16,
+      0
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-8-read-bg",
+      131072,
+      101336,
+      16,
+      0
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.config",
+      110592,
+      57741,
+      19,
+      110592
+    ],
+    [
+      "/tmp/dramsim3-lp5",
+      94208,
+      86290,
+      3,
+      0
+    ],
+    [
+      "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r8",
+      94208,
+      69816,
+      8,
+      94208
+    ],
+    [
+      "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r7",
+      94208,
+      69306,
+      8,
+      94208
+    ],
+    [
+      "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r6",
+      94208,
+      69089,
+      8,
+      94208
+    ],
+    [
+      "/tmp/npusim_sram_sweep",
+      81920,
+      52415,
+      22,
+      0
+    ],
+    [
+      "/tmp/vq-kv-codebook-smoke-20260820",
+      81920,
+      73405,
+      3,
+      0
+    ],
+    [
+      "/home/ubuntu/.java",
+      73728,
+      6715,
+      20,
+      73728
+    ],
+    [
+      "/tmp/tiny_llama_rice_model",
+      73728,
+      60427,
+      5,
+      73728
+    ],
+    [
+      "/tmp/tmpdcewl8j5",
+      73728,
+      65668,
+      3,
+      73728
+    ],
+    [
+      "/home/ubuntu/.pki",
+      69632,
+      65983,
+      3,
+      69632
+    ],
+    [
+      "/tmp/tmpaolcmgz9",
+      65536,
+      63033,
+      3,
+      65536
+    ],
+    [
+      "/tmp/tmp4dna_ynu",
+      65536,
+      63033,
+      3,
+      65536
+    ],
+    [
+      "/home/ubuntu/sglang-pd-logs",
+      61440,
+      53073,
+      4,
+      61440
+    ],
+    [
+      "/home/ubuntu/.fontconfig",
+      53248,
+      47536,
+      2,
+      53248
+    ],
+    [
+      "/home/ubuntu/.npm",
+      40960,
+      9913,
+      11,
+      40960
+    ],
+    [
+      "/tmp/tmpk0wm4spe",
+      36864,
+      34520,
+      1,
+      36864
+    ],
+    [
+      "/tmp/mudnacsim-pipeline-v2-9597394008599479490",
+      36864,
+      20816,
+      5,
+      0
+    ],
+    [
+      "/home/ubuntu/.ssh",
+      32768,
+      18202,
+      6,
+      32768
+    ],
+    [
+      "/tmp/mudnacsim-review-payload-type.d3UPEN",
+      32768,
+      17564,
+      5,
+      0
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r3",
+      32768,
+      9059,
+      11,
+      28672
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r4",
+      32768,
+      9022,
+      11,
+      28672
+    ],
+    [
+      "/tmp/mudnacsim-review-storage-size.U78S1N",
+      32768,
+      17560,
+      5,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-cost.Dg1bsq",
+      32768,
+      17560,
+      5,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-storage-layout.SoJHWz",
+      32768,
+      17566,
+      5,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-space.LzG9Ao",
+      32768,
+      17561,
+      5,
+      0
+    ],
+    [
+      "/tmp/hsperfdata_root",
+      32768,
+      32768,
+      1,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-mapping-key.ePtyD2",
+      32768,
+      17501,
+      5,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-consumers.SF9JoT",
+      32768,
+      17566,
+      5,
+      0
+    ],
+    [
+      "/tmp/mudnacsim-review-dram-overlap.i2F57j",
+      32768,
+      17560,
+      5,
+      0
+    ],
+    [
+      "/tmp/dramsim3-lp5x-stream",
+      28672,
+      25338,
+      2,
+      0
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r5",
+      28672,
+      9032,
+      10,
+      24576
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r15",
+      28672,
+      6756,
+      6,
+      24576
+    ],
+    [
+      "/home/ubuntu/.copilot",
+      24576,
+      3893,
+      6,
+      24576
+    ],
+    [
+      "/tmp/dramsim3-lp5-stream",
+      24576,
+      18226,
+      2,
+      0
+    ],
+    [
+      "/tmp/igb-clean-r30",
+      24576,
+      2162,
+      8,
+      20480
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r14",
+      24576,
+      6272,
+      8,
+      20480
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/[direct files]",
+      24576,
+      6977,
+      7,
+      24576
+    ],
+    [
+      "/tmp/llama_compress_smoke_decode_ready",
+      20480,
+      13941,
+      2,
+      20480
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r16",
+      16384,
+      5606,
+      3,
+      16384
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-1-write-bg",
+      16384,
+      12440,
+      2,
+      0
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-1-read-sequential",
+      16384,
+      14651,
+      2,
+      0
+    ],
+    [
+      "/tmp/llama_compress_smoke",
+      16384,
+      12911,
+      2,
+      16384
+    ],
+    [
+      "/tmp/llama_compress_smoke_qcompact",
+      16384,
+      11153,
+      2,
+      16384
+    ],
+    [
+      "/tmp/memctrl-lp5x-probe-1-read-bg",
+      12288,
+      8999,
+      2,
+      0
+    ],
+    [
+      "/tmp/tcp-pcap-dualhost-20260829-r25",
+      12288,
+      5008,
+      5,
+      12288
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r18",
+      12288,
+      5104,
+      5,
+      12288
+    ],
+    [
+      "/tmp/mudnacsim_rp1_rp2_path_audit",
+      12288,
+      8802,
+      1,
+      0
+    ],
+    [
+      "/tmp/rp_plan_out",
+      12288,
+      8700,
+      1,
+      0
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r17",
+      12288,
+      5792,
+      2,
+      12288
+    ],
+    [
+      "/home/ubuntu/.conda",
+      8192,
+      561,
+      2,
+      8192
+    ],
+    [
+      "/home/ubuntu/logs",
+      8192,
+      153,
+      2,
+      8192
+    ],
+    [
+      "/tmp/kv-key-weight-unit",
+      8192,
+      2623,
+      2,
+      0
+    ],
+    [
+      "/tmp/resnet-cache-miss-inspect",
+      8192,
+      7620,
+      1,
+      0
+    ],
+    [
+      "/tmp/rx-payload-r22",
+      8192,
+      455,
+      3,
+      8192
+    ],
+    [
+      "/tmp/rx-pcap-r24",
+      8192,
+      458,
+      4,
+      8192
+    ],
+    [
+      "/tmp/Rjavareconf.FmVTNO",
+      8192,
+      195,
+      2,
+      8192
+    ],
+    [
+      "/tmp/cedfs-multibench-phy-3874707",
+      8192,
+      3910,
+      2,
+      8192
+    ],
+    [
+      "/tmp/__pycache__",
+      8192,
+      4603,
+      1,
+      0
+    ],
+    [
+      "/tmp/cedfs-fuse-phy-repeat-1898830",
+      8192,
+      1439,
+      2,
+      8192
+    ],
+    [
+      "/tmp/p2wall",
+      8192,
+      2774,
+      2,
+      8192
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r1",
+      8192,
+      5528,
+      1,
+      8192
+    ],
+    [
+      "/tmp/rx-payload-r23",
+      8192,
+      461,
+      4,
+      8192
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/.gnupg",
+      8192,
+      1232,
+      2,
+      8192
+    ],
+    [
+      "/home/ubuntu/.bundle",
+      4096,
+      33,
+      1,
+      4096
+    ],
+    [
+      "/home/ubuntu/.pip",
+      4096,
+      167,
+      1,
+      4096
+    ],
+    [
+      "/home/ubuntu/.modelscope",
+      4096,
+      32,
+      1,
+      4096
+    ],
+    [
+      "/tmp/rx-payload-r20",
+      4096,
+      447,
+      1,
+      4096
+    ],
+    [
+      "/tmp/torch_extensions_lossless_speed_decode_debug",
+      4096,
+      1928,
+      1,
+      4096
+    ],
+    [
+      "/tmp/queue-lineage-dualhost-20260829-r6",
+      4096,
+      578,
+      1,
+      4096
+    ],
+    [
+      "/tmp/rx-debug-flow",
+      4096,
+      450,
+      1,
+      4096
+    ],
+    [
+      "/tmp/Rjavareconf.KrvjxI",
+      4096,
+      19,
+      1,
+      4096
+    ],
+    [
+      "/tmp/wyc-tmp4567893vgfvsbhu",
+      4096,
+      921,
+      1,
+      0
+    ],
+    [
+      "/tmp/openclaw-996",
+      4096,
+      124,
+      1,
+      0
+    ],
+    [
+      "/tmp/rx-payload-r21",
+      4096,
+      447,
+      1,
+      4096
+    ],
+    [
+      "/tmp/codex-bwrap-synthetic-mount-targets-994",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/tmp/hybridmapper-test-mapping",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/tmp/codex-bwrap-synthetic-mount-targets-996",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/tmp/codex-bwrap-synthetic-mount-targets-1002",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/tmp/cpptools",
+      0,
+      0,
+      4,
+      0
+    ],
+    [
+      "/tmp/codex-bwrap-synthetic-mount-targets-1000",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/tmp/python-languageserver-cancellation",
+      0,
+      0,
+      559,
+      0
+    ],
+    [
+      "/var/tmp/[direct files]",
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      "/var/tmp/.guestfs-996",
+      0,
+      0,
+      1,
+      0
+    ]
+  ],
+  "owned_groups": [
+    [
+      "/mnt/home/model",
+      434198597632,
+      434197353000,
+      444
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train",
+      153904418816,
+      152120974288,
+      708291
+    ],
+    [
+      "/mnt/home/model/Llama-3.3-70B-Instruct",
+      141125066752,
+      141124877867,
+      42
+    ],
+    [
+      "/home/ubuntu/miniconda3",
+      86503763968,
+      84616920637,
+      773929
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets",
+      82234494976,
+      81959505093,
+      116161
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs",
+      77064073216,
+      75432583305,
+      672457
+    ],
+    [
+      "/home/ubuntu/.cache",
+      75688202240,
+      75654773000,
+      15030
+    ],
+    [
+      "/mnt/home/model/qwen3-32b",
+      65540423680,
+      65540299199,
+      29
+    ],
+    [
+      "/home/ubuntu/.cache/huggingface",
+      65057517568,
+      65057347112,
+      56
+    ],
+    [
+      "/home/ubuntu/.cache/huggingface/hub",
+      65056739328,
+      65056580757,
+      51
+    ],
+    [
+      "/mnt/home/Lossless",
+      58802823168,
+      58801496183,
+      592
+    ],
+    [
+      "/mnt/home/Lossless/checkpoint",
+      58706964480,
+      58706202702,
+      319
+    ],
+    [
+      "/mnt/home/Lossless/checkpoint/llama",
+      58706964480,
+      58706202702,
+      319
+    ],
+    [
+      "/home/ubuntu/srz",
+      58093105152,
+      57576168948,
+      220374
+    ],
+    [
+      "/mnt/home/agenticInfra",
+      54488743936,
+      55443882262,
+      247889
+    ],
+    [
+      "/mnt/home/model/llama2",
+      52991868928,
+      52991757160,
+      32
+    ],
+    [
+      "/mnt/home/model/llama3",
+      48202469376,
+      48202348830,
+      33
+    ],
+    [
+      "/mnt/home/model/opt",
+      41661292544,
+      41661119957,
+      65
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/vllm0102_pd_strict_20260827",
+      39657951232,
+      39533471368,
+      52148
+    ],
+    [
+      "/mnt/home/model/vicuna",
+      39509987328,
+      39509895728,
+      23
+    ],
+    [
+      "/mnt/home/Amove",
+      34720718848,
+      34718339888,
+      1051
+    ],
+    [
+      "/mnt/home/Amove/train",
+      34531045376,
+      34529656231,
+      620
+    ],
+    [
+      "/mnt/home/Amove/train/nanoGPT",
+      34500067328,
+      34499590207,
+      216
+    ],
+    [
+      "/mnt/home/model/llama3/8B_Instruct",
+      32132644864,
+      32132580852,
+      17
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/DeepSeek-V2-Lite-Chat",
+      31418937344,
+      31418842503,
+      30
+    ],
+    [
+      "/mnt/home/agenticInfra/simulation",
+      30733004800,
+      32249534383,
+      30794
+    ],
+    [
+      "/mnt/home/agenticInfra/simulation/PyTorchSim",
+      30733000704,
+      32249533544,
+      30793
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/vllm0102_pd_strict_20260827/model",
+      29551833088,
+      29551690874,
+      55
+    ],
+    [
+      "/mnt/home/model/llama2/7B_hf",
+      26957561856,
+      26957501199,
+      19
+    ],
+    [
+      "/mnt/home/model/llama2/13B_hf",
+      26034307072,
+      26034255961,
+      13
+    ],
+    [
+      "/mnt/home/model/vicuna/13B",
+      26032459776,
+      26032414301,
+      11
+    ],
+    [
+      "/mnt/home/model/opt/13B",
+      25708822528,
+      25708707707,
+      46
+    ],
+    [
+      "/home/ubuntu/ced_train",
+      25535967232,
+      25270737791,
+      115631
+    ],
+    [
+      "/home/ubuntu/.vscode-server",
+      17957953536,
+      17638470882,
+      109498
+    ],
+    [
+      "/mnt/home/agenticInfra/libs",
+      17543233536,
+      16999332002,
+      209767
+    ],
+    [
+      "/mnt/home/model/llama3/8B",
+      16069816320,
+      16069766628,
+      14
+    ],
+    [
+      "/mnt/home/model/llada",
+      16037523456,
+      16037450298,
+      19
+    ],
+    [
+      "/mnt/home/model/llada/LLaDA-8B-Instruct",
+      16037523456,
+      16037450298,
+      19
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/agent_py311",
+      15902310400,
+      15590901173,
+      123875
+    ],
+    [
+      "/mnt/home/model/dream",
+      15236513792,
+      15236443151,
+      20
+    ],
+    [
+      "/mnt/home/model/llama",
+      13500334080,
+      13500286073,
+      46
+    ],
+    [
+      "/mnt/home/model/llama/7B",
+      13500334080,
+      13500286073,
+      46
+    ],
+    [
+      "/mnt/home/model/vicuna/7B",
+      13477527552,
+      13477481427,
+      12
+    ],
+    [
+      "/mnt/home/model/opt/6.7B",
+      13318668288,
+      13318629987,
+      13
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-git-replay-20260801",
+      11845263360,
+      11817145050,
+      11935
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/TTT-Serve",
+      11368435712,
+      11219878987,
+      65756
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/sglang-pd",
+      10495303680,
+      10256286014,
+      101428
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/vllm0102_pd_strict_20260827/runtime",
+      10106118144,
+      9981780494,
+      52093
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/vllm_main_cu130_runtime_20260821",
+      10080849920,
+      9935477591,
+      61644
+    ],
+    [
+      "/home/ubuntu/.cache/pip",
+      9217392640,
+      9211869531,
+      2084
+    ],
+    [
+      "/home/ubuntu/.cache/pip/http-v2",
+      9207894016,
+      9202413364,
+      2068
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/reflexion",
+      8870637568,
+      8676066012,
+      80033
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/memory_agent",
+      8797843456,
+      8610102527,
+      76645
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/agent",
+      8764215296,
+      8579466494,
+      75375
+    ],
+    [
+      "/home/ubuntu/miniconda3/envs/tensor_core",
+      8737701888,
+      8593178267,
+      60796
+    ],
+    [
+      "/home/ubuntu/.vscode-server/extensions",
+      8453005312,
+      8229438562,
+      73392
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/SimAI",
+      7856386048,
+      7794159371,
+      28761
+    ],
+    [
+      "/home/ubuntu/srz/strict_v30_e1e2_all_paper_replay_20260801",
+      7711023104,
+      7693290050,
+      9511
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-vllm-native-first-token-29510762",
+      7420948480,
+      7398069039,
+      9648
+    ],
+    [
+      "/mnt/home/agenticInfra/libs/llvm-project",
+      7095599104,
+      6614432881,
+      184073
+    ],
+    [
+      "/home/ubuntu/ced_train_runtime_assets/vllm_main_cu130_runtime_20260821/lib",
+      6995853312,
+      6862602605,
+      57195
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-vllm-native-first-token-29510762/.git",
+      6970052608,
+      6969521008,
+      182
+    ],
+    [
+      "/home/ubuntu/ced_train/hetero_profile4090",
+      6920900608,
+      6752762106,
+      68996
+    ],
+    [
+      "/home/ubuntu/ced_train/hetero_profile4090/env",
+      6891253760,
+      6723809533,
+      68709
+    ],
+    [
+      "/home/ubuntu/srz/hetero_profile_4090",
+      6658093056,
+      6489713554,
+      68366
+    ],
+    [
+      "/home/ubuntu/srz/hetero_profile_4090/env",
+      6627983360,
+      6460400603,
+      68048
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-git-replay-20260801/tmp",
+      5871792128,
+      5868982431,
+      1195
+    ],
+    [
+      "/mnt/home/agenticInfra/libs/gem5",
+      5750980608,
+      5717514196,
+      15011
+    ],
+    [
+      "/home/ubuntu/.vscode-server/cli",
+      5701902336,
+      5625803006,
+      28979
+    ],
+    [
+      "/home/ubuntu/.vscode-server/cli/servers",
+      5701586944,
+      5625503548,
+      28976
+    ],
+    [
+      "/home/ubuntu/ced_train/vllm_nixl_controlled_admission_r12_progress_8x2_20260826",
+      5624889344,
+      5624867120,
+      7
+    ],
+    [
+      "/mnt/home/agenticInfra/build",
+      5343383552,
+      5332715274,
+      4469
+    ],
+    [
+      "/mnt/home/agenticInfra/build/RISCV",
+      5343383552,
+      5332715274,
+      4469
+    ],
+    [
+      "/home/ubuntu/miniconda3/pkgs",
+      5256884224,
+      5106105127,
+      58785
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/hpcc_1f1b_dpall3_exp7_20260706_110741",
+      4914651136,
+      4909513591,
+      2440
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/hpcc_1f1b_dpall3_exp7_20260706_110741/ubuntu_10_212_67_167",
+      4905762816,
+      4903427158,
+      1358
+    ],
+    [
+      "/home/ubuntu/srz/strict_v30_e1e2_all_paper_replay_20260801/strategy_candidates",
+      4798296064,
+      4792096616,
+      3314
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/hpcc_1f1b_dpall3_exp6_20260706_110740",
+      4756283392,
+      4751225254,
+      2487
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/hpcc_1f1b_dpall3_exp6_20260706_110740/ubuntu_10_212_67_167",
+      4747321344,
+      4745022746,
+      1381
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/rerun_exp18_1c1e_full_realbulk_20260627_212059",
+      4664459264,
+      4657921947,
+      2716
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/rerun_exp18_1c1e_full_realbulk_20260627_212059/ubuntu_10_212_67_167",
+      4653670400,
+      4650766977,
+      1506
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp3_1cloud3edge_20260610_233646",
+      4634820608,
+      4617733917,
+      6869
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp3_1cloud3edge_20260610_233646/ubuntu_10_212_67_167",
+      4569858048,
+      4564102401,
+      2858
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-p2-replay-20260803",
+      4558540800,
+      4538779855,
+      8663
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp2_1cloud3edge_20260610_233646",
+      4535066624,
+      4518652505,
+      6871
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp2_1cloud3edge_20260610_233646/ubuntu_10_212_67_167",
+      4471009280,
+      4465317698,
+      2860
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp4_1cloud3edge_20260610_233646",
+      4422123520,
+      4405181238,
+      6869
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp26_dpall3_1bit_beats_crosspp_1f1b_wan20_with_prefetch_20260621_200225",
+      4359000064,
+      4354166544,
+      1974
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp25_dpall3_beats_crosspp_1f1b_wan20_with_prefetch_20260621_195802",
+      4358332416,
+      4353522853,
+      1974
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp4_1cloud3edge_20260610_233646/ubuntu_10_212_67_167",
+      4357201920,
+      4351237867,
+      2858
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp26_dpall3_1bit_beats_crosspp_1f1b_wan20_with_prefetch_20260621_200225/ubuntu_10_212_67_167",
+      4350558208,
+      4348486330,
+      1036
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp25_dpall3_beats_crosspp_1f1b_wan20_with_prefetch_20260621_195802/ubuntu_10_212_67_167",
+      4349890560,
+      4347844316,
+      1036
+    ],
+    [
+      "/home/ubuntu/srz/p2_wallclock_effective_pool_20260803",
+      4252745728,
+      4244836577,
+      4535
+    ],
+    [
+      "/home/ubuntu/srz/p2_wallclock_effective_pool_20260803/cases",
+      4252688384,
+      4244808682,
+      4526
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-git-replay-20260801/.git",
+      4194119680,
+      4192778591,
+      435
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp5_1cloud3edge_20260610_233646",
+      4176875520,
+      4159932223,
+      6870
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_modified_exp5_1cloud3edge_20260610_233646/ubuntu_10_212_67_167",
+      4111888384,
+      4105930277,
+      2859
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-e1-replay-20260803",
+      4062568448,
+      4041542089,
+      9278
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp2_no93_20260611_114724",
+      3952857088,
+      3934610212,
+      7460
+    ],
+    [
+      "/home/ubuntu/ced_train/dp_pp_four_axis_full_matrix_20260802",
+      3942490112,
+      3918696806,
+      12416
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp4_no93_20260611_114724",
+      3938529280,
+      3920228972,
+      7329
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp3_no93_20260611_114724",
+      3894423552,
+      3876153801,
+      7349
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp2_no93_20260611_114724/ubuntu_10_212_67_167",
+      3888164864,
+      3881033428,
+      3449
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/strict_v29_dp_bits_full_20260801_host167_shard1",
+      3886161920,
+      3846822164,
+      17193
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp4_no93_20260611_114724/ubuntu_10_212_67_167",
+      3873587200,
+      3866043645,
+      3318
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp3_no93_20260611_114724/ubuntu_10_212_67_167",
+      3829440512,
+      3822280323,
+      3338
+    ],
+    [
+      "/home/ubuntu/srz/SimAI-p2-replay-20260803/tmp",
+      3817570304,
+      3814750725,
+      1282
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/strict_v29_dp_bits_full_20260801_host167_shard1/raw",
+      3732434944,
+      3707147036,
+      10576
+    ],
+    [
+      "/home/ubuntu/ced_train/dp_pp_four_axis_empty_prefetch_parallel_clean_20260803_host167",
+      3707125760,
+      3681589769,
+      12603
+    ],
+    [
+      "/home/ubuntu/ced_train/dp_pp_four_axis_empty_prefetch_parallel_clean_20260803_host167/contexts",
+      3706183680,
+      3680655247,
+      12600
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp5_no93_20260611_114724",
+      3706064896,
+      3687741151,
+      7355
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/crosspipe_full_v2prefetch_exp5_no93_20260611_114724/ubuntu_10_212_67_167",
+      3641057280,
+      3633497259,
+      3344
+    ],
+    [
+      "/home/ubuntu/.vscode-server/data",
+      3638415360,
+      3618710556,
+      7096
+    ],
+    [
+      "/home/ubuntu/ced_train/dp_pp_four_axis_full_matrix_20260802/generated_workloads",
+      3581210624,
+      3577320997,
+      2160
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp34_representative_closest_wan800_330gb_16bit_1f1b_with_prefetch_20260621_211256",
+      3464773632,
+      3459334822,
+      2230
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp34_representative_closest_wan800_330gb_16bit_1f1b_with_prefetch_20260621_211256/ubuntu_10_212_67_167",
+      3455131648,
+      3452843254,
+      1164
+    ],
+    [
+      "/tmp/SimAI-queue-lineage-7bae00ecf6971d4f4f47b5a54c8442ba03a7c02d",
+      3363201024,
+      3340907097,
+      9428
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/strict_v29_dp_bits_full_20260801_host167",
+      3334602752,
+      3299701180,
+      15277
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp27_transition_dp_pp_nocross_wan100_90gb_with_prefetch_20260621_201135",
+      3232608256,
+      3227822423,
+      1974
+    ],
+    [
+      "/mnt/old_data/home/ubuntu/ced_train/exp27_transition_dp_pp_nocross_wan100_90gb_with_prefetch_20260621_201135/ubuntu_10_212_67_167",
+      3224166400,
+      3222143556,
+      1036
+    ]
+  ],
+  "largest_owned_files": [
+    {
+      "allocated": 32847601664,
+      "apparent": 32847596946,
+      "path": "/mnt/home/Amove/train/nanoGPT/data/openwebtext/train.bin",
+      "modified": "2026-01-23T11:48:13.503819",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 16060624896,
+      "apparent": 16060617592,
+      "path": "/mnt/home/model/llama3/8B_Instruct/original/consolidated.00.pth",
+      "modified": "2025-12-11T14:53:14.364917",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 11597185024,
+      "apparent": 11597179373,
+      "path": "/mnt/home/Lossless/checkpoint/llama/llama3_8B_bf16_rice_k3_b32_sparseq/fast_payloads.safetensors",
+      "modified": "2026-08-20T13:11:27.161535",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 11596816384,
+      "apparent": 11596808469,
+      "path": "/mnt/home/Lossless/checkpoint/llama/llama3_8B_bf16_rice_k3_b32_sparseq/fast_payloads_multidev_3bf35f9420ffb460_cuda_0.safetensors",
+      "modified": "2026-08-21T11:30:57.331406",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9976639488,
+      "apparent": 9976634558,
+      "path": "/mnt/home/model/vicuna/7B/pytorch_model-00001-of-00002.bin",
+      "modified": "2025-06-24T11:16:45.130747",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9976639488,
+      "apparent": 9976634558,
+      "path": "/mnt/home/model/llama2/7B_hf/pytorch_model-00001-of-00002.bin",
+      "modified": "2025-06-24T11:29:43.094428",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9976586240,
+      "apparent": 9976578928,
+      "path": "/mnt/home/model/llama2/7B_hf/model-00001-of-00002.safetensors",
+      "modified": "2025-06-24T11:28:16.014066",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9975062528,
+      "apparent": 9975056349,
+      "path": "/mnt/home/model/opt/13B/pytorch_model-00001-of-00003.bin",
+      "modified": "2025-06-24T11:15:18.513571",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9960755200,
+      "apparent": 9960750957,
+      "path": "/mnt/home/model/opt/6.7B/pytorch_model-00001-of-00002.bin",
+      "modified": "2025-06-24T11:11:06.911677",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9948733440,
+      "apparent": 9948728430,
+      "path": "/mnt/home/model/vicuna/13B/pytorch_model-00001-of-00003.bin",
+      "modified": "2025-06-24T11:21:02.157385",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9948733440,
+      "apparent": 9948728430,
+      "path": "/mnt/home/model/llama2/13B_hf/pytorch_model-00001-of-00003.bin",
+      "modified": "2025-06-24T11:26:49.219543",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9904173056,
+      "apparent": 9904165024,
+      "path": "/mnt/home/model/vicuna/13B/pytorch_model-00002-of-00003.bin",
+      "modified": "2025-06-24T11:19:35.508619",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9904173056,
+      "apparent": 9904165024,
+      "path": "/mnt/home/model/llama2/13B_hf/pytorch_model-00002-of-00003.bin",
+      "modified": "2025-06-24T11:25:22.704834",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 9858801664,
+      "apparent": 9858794113,
+      "path": "/mnt/home/model/opt/13B/pytorch_model-00002-of-00003.bin",
+      "modified": "2025-06-24T11:13:51.796737",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8594894848,
+      "apparent": 8594887408,
+      "path": "/home/ubuntu/ced_train_runtime_assets/DeepSeek-V2-Lite-Chat/model-00001-of-000004.safetensors",
+      "modified": "2026-08-22T15:29:18.810152",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8594894848,
+      "apparent": 8594887408,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V2-Lite-Chat/blobs/a314b79a30810b1038f9db08345178e16fb5742aa266c4a3dc05054c59800082",
+      "modified": "2026-08-13T13:22:12.566788",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8591769600,
+      "apparent": 8591757448,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V2-Lite-Chat/blobs/b0bd088feada0af954614da3a5b179c4d4d5d8bb2482ec83194d101f3fe91796",
+      "modified": "2026-08-13T13:20:56.059495",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8591765504,
+      "apparent": 8591757448,
+      "path": "/home/ubuntu/ced_train_runtime_assets/DeepSeek-V2-Lite-Chat/model-00002-of-000004.safetensors",
+      "modified": "2026-08-22T15:37:30.107933",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8590729216,
+      "apparent": 8590718520,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V2-Lite-Chat/blobs/d31b192e488f0b3a04e007d842c3c9ba5783d944cb1cc27402fe8b8bb837c490",
+      "modified": "2026-08-13T13:50:24.038899",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 8590725120,
+      "apparent": 8590718520,
+      "path": "/home/ubuntu/ced_train_runtime_assets/DeepSeek-V2-Lite-Chat/model-00003-of-000004.safetensors",
+      "modified": "2026-08-22T15:47:15.500090",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 6178988032,
+      "apparent": 6178983625,
+      "path": "/mnt/home/model/vicuna/13B/pytorch_model-00003-of-00003.bin",
+      "modified": "2025-06-24T11:18:09.421438",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 6178988032,
+      "apparent": 6178983625,
+      "path": "/mnt/home/model/llama2/13B_hf/pytorch_model-00003-of-00003.bin",
+      "modified": "2025-06-24T11:23:56.394916",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5873307648,
+      "apparent": 5873300557,
+      "path": "/mnt/home/model/opt/13B/pytorch_model-00003-of-00003.bin",
+      "modified": "2025-06-24T11:12:26.855122",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5636268032,
+      "apparent": 5636263200,
+      "path": "/home/ubuntu/ced_train_runtime_assets/DeepSeek-V2-Lite-Chat/model-00004-of-000004.safetensors",
+      "modified": "2026-08-22T15:52:54.090867",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5636268032,
+      "apparent": 5636263200,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V2-Lite-Chat/blobs/304499be0ea06bf8a3937d7a3cc515bc3738dbd288bdd0bbc1b2d3560fce4930",
+      "modified": "2026-08-13T13:16:16.614117",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5624766464,
+      "apparent": 5624759984,
+      "path": "/home/ubuntu/ced_train/vllm_nixl_controlled_admission_r12_progress_8x2_20260826/prefill.ucx_api.jsonl",
+      "modified": "2026-08-26T18:00:04.961590",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5000507392,
+      "apparent": 5000501200,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/f35748c5c8bfcbfe970f34897004ce17ca5f9d7eeae192088e7c96492f7d19c9",
+      "modified": "2026-08-13T10:52:07.657063",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5000495104,
+      "apparent": 5000490864,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/6ce28ca2c2c4989bb8920d4161b2e510ecc851b76d707d5ac39813fe5642e396",
+      "modified": "2026-08-13T10:52:09.636088",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5000376320,
+      "apparent": 5000369848,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/570347383d8f33792bf1342328c0b457dbf561921968c54761dc98a7d1989cca",
+      "modified": "2026-08-13T10:51:56.588923",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 5000372224,
+      "apparent": 5000367704,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/d4a54b30d007e4c41d053fa575a16c58222444ffc4f69933139c9774ef5243d8",
+      "modified": "2026-08-13T10:52:10.275096",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999929856,
+      "apparent": 4999923056,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/c8df10150106668d99e963459dde01a4b7220182e8cac4c89cbfaa357ac532bc",
+      "modified": "2026-08-13T10:52:10.207095",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999806976,
+      "apparent": 4999802720,
+      "path": "/mnt/home/model/llama3/8B_Instruct/model-00002-of-00004.safetensors",
+      "modified": "2025-12-11T14:49:08.744448",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999806976,
+      "apparent": 4999802720,
+      "path": "/mnt/home/model/llama3/8B/model-00002-of-00004.safetensors",
+      "modified": "2025-06-24T11:09:18.345305",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711728,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00028-of-00030.safetensors",
+      "modified": "2026-05-13T17:36:17.018679",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711728,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00023-of-00030.safetensors",
+      "modified": "2026-05-13T17:31:56.240518",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711728,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00018-of-00030.safetensors",
+      "modified": "2026-05-13T17:31:38.255476",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711728,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00013-of-00030.safetensors",
+      "modified": "2026-05-13T17:25:06.979517",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711728,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00008-of-00030.safetensors",
+      "modified": "2026-05-13T17:18:41.841853",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4999716864,
+      "apparent": 4999711704,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00003-of-00030.safetensors",
+      "modified": "2026-05-13T17:18:56.528022",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4976705536,
+      "apparent": 4976698672,
+      "path": "/mnt/home/model/llama3/8B_Instruct/model-00001-of-00004.safetensors",
+      "modified": "2025-12-11T14:48:20.470070",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4976705536,
+      "apparent": 4976698672,
+      "path": "/mnt/home/model/llama3/8B/model-00001-of-00004.safetensors",
+      "modified": "2025-06-24T11:08:35.292366",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966178816,
+      "apparent": 4966173536,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00029-of-00030.safetensors",
+      "modified": "2026-05-13T17:36:21.524441",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966162432,
+      "apparent": 4966157056,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00024-of-00030.safetensors",
+      "modified": "2026-05-13T17:32:17.591381",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966162432,
+      "apparent": 4966157056,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00019-of-00030.safetensors",
+      "modified": "2026-05-13T17:31:24.354217",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966162432,
+      "apparent": 4966157056,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00014-of-00030.safetensors",
+      "modified": "2026-05-13T17:25:25.789495",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966162432,
+      "apparent": 4966157056,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00009-of-00030.safetensors",
+      "modified": "2026-05-13T17:24:57.344042",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4966162432,
+      "apparent": 4966157032,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00004-of-00030.safetensors",
+      "modified": "2026-05-13T17:18:47.138553",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4932755456,
+      "apparent": 4932751008,
+      "path": "/mnt/home/model/dream/model-00002-of-00004.safetensors",
+      "modified": "2025-12-10T15:37:04.378803",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4915920896,
+      "apparent": 4915916176,
+      "path": "/mnt/home/model/llama3/8B_Instruct/model-00003-of-00004.safetensors",
+      "modified": "2025-12-11T14:49:18.970293",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4915920896,
+      "apparent": 4915916176,
+      "path": "/mnt/home/model/llama3/8B/model-00003-of-00004.safetensors",
+      "modified": "2025-06-24T11:07:52.327417",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4877668352,
+      "apparent": 4877660776,
+      "path": "/mnt/home/model/dream/model-00001-of-00004.safetensors",
+      "modified": "2025-12-10T15:36:36.637406",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4775878656,
+      "apparent": 4775872992,
+      "path": "/home/ubuntu/.cache/huggingface/hub/models--cyankiwi--Kimi-Linear-48B-A3B-Instruct-AWQ-4bit/blobs/9424715f117eb3b3a087e309c1b328ba0781f6fff35c30bd6e838c3327e4b41d",
+      "modified": "2026-08-13T10:52:05.898041",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00027-of-00030.safetensors",
+      "modified": "2026-05-13T17:36:13.330874",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00026-of-00030.safetensors",
+      "modified": "2026-05-13T17:36:08.030155",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00022-of-00030.safetensors",
+      "modified": "2026-05-13T17:31:25.324166",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00021-of-00030.safetensors",
+      "modified": "2026-05-13T17:31:40.926334",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00017-of-00030.safetensors",
+      "modified": "2026-05-13T17:30:44.460346",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00016-of-00030.safetensors",
+      "modified": "2026-05-13T17:25:01.539813",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00012-of-00030.safetensors",
+      "modified": "2026-05-13T17:24:28.796597",
+      "hardlinks": 1
+    },
+    {
+      "allocated": 4664172544,
+      "apparent": 4664167408,
+      "path": "/mnt/home/model/Llama-3.3-70B-Instruct/model-00011-of-00030.safetensors",
+      "modified": "2026-05-13T17:24:29.068583",
+      "hardlinks": 1
+    }
+  ],
+  "errors": {
+    "PermissionError": 2060
+  },
+  "error_samples": [
+    [
+      "/tmp/ssh-XXXXXXKpZhjI",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXpWuBeX",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXQQ478l",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXEB3g3l",
+      "PermissionError"
+    ],
+    [
+      "/tmp/trace-viewer-e4YDgG",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXOBeyeA",
+      "PermissionError"
+    ],
+    [
+      "/tmp/trace-viewer-SlMO7x",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXB87erZ",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXX5Ylpuf",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXSJHxz9",
+      "PermissionError"
+    ],
+    [
+      "/tmp/mcp-ixoy2k",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXY1WpPu",
+      "PermissionError"
+    ],
+    [
+      "/tmp/mcp-OXL8Xd",
+      "PermissionError"
+    ],
+    [
+      "/tmp/ssh-XXXXXXFVLVL0",
+      "PermissionError"
+    ],
+    [
+      "/tmp/trace-viewer-CLkTDC",
+      "PermissionError"
+    ]
+  ],
+  "owned_topdirs": [
+    "/home/ubuntu/checkpoints",
+    "/home/ubuntu/Music",
+    "/home/ubuntu/cedfs_deploy",
+    "/home/ubuntu/Downloads",
+    "/home/ubuntu/miniconda3",
+    "/home/ubuntu/verilator",
+    "/home/ubuntu/srz",
+    "/home/ubuntu/.java",
+    "/home/ubuntu/CedTrainScheduler",
+    "/home/ubuntu/.android",
+    "/home/ubuntu/Desktop",
+    "/home/ubuntu/Videos",
+    "/home/ubuntu/.conda",
+    "/home/ubuntu/snap",
+    "/home/ubuntu/.cache",
+    "/home/ubuntu/logs",
+    "/home/ubuntu/.vscode-server",
+    "/home/ubuntu/sglang-pd-logs",
+    "/home/ubuntu/LLM-Infra",
+    "/home/ubuntu/.pki",
+    "/home/ubuntu/ced_train",
+    "/home/ubuntu/.dotnet",
+    "/home/ubuntu/joint_ppdp_20260804_strict_smoke",
+    "/home/ubuntu/.npm",
+    "/home/ubuntu/Documents",
+    "/home/ubuntu/k8s",
+    "/home/ubuntu/.local",
+    "/home/ubuntu/.conan",
+    "/home/ubuntu/.codex",
+    "/home/ubuntu/.cedfs",
+    "/home/ubuntu/Public",
+    "/home/ubuntu/.config",
+    "/home/ubuntu/.triton",
+    "/home/ubuntu/Pictures",
+    "/home/ubuntu/SimAI-tcp-holdout-20260829",
+    "/home/ubuntu/.gemini",
+    "/home/ubuntu/r4090",
+    "/home/ubuntu/ced_train_runtime_runs",
+    "/home/ubuntu/joint_ppdp_20260804",
+    "/home/ubuntu/.sbt",
+    "/home/ubuntu/ray_vidur",
+    "/home/ubuntu/.claude",
+    "/home/ubuntu/.bundle",
+    "/home/ubuntu/.pip",
+    "/home/ubuntu/Templates",
+    "/home/ubuntu/ubuntu@10.212.67.167:",
+    "/home/ubuntu/.copilot",
+    "/home/ubuntu/ced_train_runtime_assets",
+    "/home/ubuntu/.fontconfig",
+    "/home/ubuntu/.mem0",
+    "/home/ubuntu/.nv",
+    "/home/ubuntu/.ssh",
+    "/home/ubuntu/.modelscope",
+    "/tmp/torch_extensions_lossless_speed_decode_debug2",
+    "/tmp/tmp7u_czysa",
+    "/tmp/igb-clean-r34-20260829",
+    "/tmp/tmp88isrqsm",
+    "/tmp/tmpcqm9chxt",
+    "/tmp/tmp2gkzthsu",
+    "/tmp/tmpmwt839v0",
+    "/tmp/igb-ring-r28",
+    "/tmp/cedfs-http-phy-1585753",
+    "/tmp/llama_compress_smoke_decode_ready",
+    "/tmp/torchinductor_ubuntu",
+    "/tmp/tmpy30wxjr5",
+    "/tmp/tmpfuuq46es",
+    "/tmp/SimAI-queue-lineage-261607b3",
+    "/tmp/tmpwou6_rdj",
+    "/tmp/mcp-xcBYzi",
+    "/tmp/tmpa2f5y8sz",
+    "/tmp/rx-payload-r20",
+    "/tmp/queue-lineage-dualhost-20260829-r12",
+    "/tmp/igb-clean-r31",
+    "/tmp/tmp3_15jau2",
+    "/tmp/queue-lineage-dualhost-20260829-r5",
+    "/tmp/torch_extensions_lossless_speed_decode_debug",
+    "/tmp/tmpz2kaf0ty",
+    "/tmp/queue-lineage-dualhost-20260829-r3",
+    "/tmp/queue-lineage-dualhost-20260829-r16",
+    "/tmp/tmpv_o5nfb_",
+    "/tmp/tmpwe8e_cbqwandb-media",
+    "/tmp/SimAI-queue-lineage-261607b3af75941d13f0d24187c7c1e8c59b1d29",
+    "/tmp/torch_extensions_lossless_slowcheck1",
+    "/tmp/tmpyd2xqju_",
+    "/tmp/tmps_qajwmd",
+    "/tmp/tmpmctes7sf",
+    "/tmp/tmpadx29fsa",
+    "/tmp/tmp7mxc0c_o",
+    "/tmp/hsperfdata_ubuntu",
+    "/tmp/tmp_ofbla51",
+    "/tmp/tmp_g873z9x",
+    "/tmp/queue-lineage-dualhost-20260829-r10",
+    "/tmp/SimAI-queue-lineage-7bae00ecf6971d4f4f47b5a54c8442ba03a7c02d",
+    "/tmp/tmp10ijlprc",
+    "/tmp/tmpaolcmgz9",
+    "/tmp/tmpfwwsqfin",
+    "/tmp/tmp23owprl3",
+    "/tmp/tmpj6uyh3y6",
+    "/tmp/tmpm72l_wkp",
+    "/tmp/mcp-uf8Wdp",
+    "/tmp/tmpr1p99_75",
+    "/tmp/tmpvfqa21ux",
+    "/tmp/tmpoxxhuty0",
+    "/tmp/tmpcuirqq7s",
+    "/tmp/rx-payload-r22",
+    "/tmp/cedfs_transfer_cache",
+    "/tmp/cedfs-http-phy-fixed-1692773",
+    "/tmp/rx-pcap-r24",
+    "/tmp/tmpkhixr8gn",
+    "/tmp/queue-lineage-dualhost-20260829-r2",
+    "/tmp/tmpxnl9_fhw",
+    "/tmp/pyright-822267-gAgG9zH1x7p3",
+    "/tmp/mcp-IJLQGl",
+    "/tmp/queue-lineage-dualhost-20260829-r8",
+    "/tmp/tmp9jlkl4hi",
+    "/tmp/torch_extensions_lossless_uint32fix",
+    "/tmp/queue-lineage-dualhost-20260829-r15",
+    "/tmp/tmp3ilfhp66",
+    "/tmp/tmpril91k01",
+    "/tmp/tmpg15_5mmn",
+    "/tmp/cedfs-fuse-phy-1m-1881987",
+    "/tmp/tmpk5fmex7m",
+    "/tmp/igb-clean-r36-20260829",
+    "/tmp/mcp-Dj3ETN",
+    "/tmp/tmpy5vewuh2",
+    "/tmp/tmpaex4m00k",
+    "/tmp/mcp-lrMYEZ",
+    "/tmp/tmp2is1w48k",
+    "/tmp/tmpikb61529",
+    "/tmp/tmpngosp6qm",
+    "/tmp/tiny_llama_rice_model",
+    "/tmp/tmpvqeyehof",
+    "/tmp/tmpg7r6sw8i",
+    "/tmp/mcp-SDzFFL",
+    "/tmp/queue-lineage-dualhost-20260829-r11",
+    "/tmp/queue-lineage-dualhost-20260829-r4",
+    "/tmp/tmpevzrzp3p",
+    "/tmp/queue-lineage-dualhost-20260829-r6",
+    "/tmp/tmpkvl7onft",
+    "/tmp/tmpk0wm4spe",
+    "/tmp/tmpkftdo6st",
+    "/tmp/tmp0_ys957q",
+    "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r8",
+    "/tmp/tmpk7v7daw0",
+    "/tmp/Rjavareconf.FmVTNO",
+    "/tmp/torch_extensions_lossless_fix_remainder",
+    "/tmp/tmpe08917zx",
+    "/tmp/tmpyswd0vcj",
+    "/tmp/tcp-pcap-egress-r26",
+    "/tmp/tmp2jldfsadwandb-media",
+    "/tmp/tmp4ewdwpru",
+    "/tmp/pyright-3443456-V7xoAR0wP8lF",
+    "/tmp/tmpnf8sdki3",
+    "/tmp/torch_extensions_lossless_fix_remainder2",
+    "/tmp/tmpswqqac7x",
+    "/tmp/cedfs-multibench-phy-3874707",
+    "/tmp/torch_extensions_lossless_compactmask",
+    "/tmp/tmp7i_b08z7",
+    "/tmp/mcp-Efi5i3",
+    "/tmp/torch_extensions_lossless_finalmask",
+    "/tmp/tmpjaee3kt7wandb-artifacts",
+    "/tmp/mcp-cmcF8o",
+    "/tmp/tmprv42f049",
+    "/tmp/tmp1951mzc6",
+    "/tmp/tmpvh8tt0ky",
+    "/tmp/tmp5ejj_uol",
+    "/tmp/tmp8lud3kv2",
+    "/tmp/rx-debug-flow",
+    "/tmp/torch_extensions_lossless_posstream_fix1",
+    "/tmp/cedfs-fuse-phy-repeat-1898830",
+    "/tmp/tmpiwx0cp9t",
+    "/tmp/mcp-ZnltHD",
+    "/tmp/tmpdfo9al8a",
+    "/tmp/mcp-dlysHT",
+    "/tmp/tmpytguajv1wandb-artifacts",
+    "/tmp/queue-lineage-dualhost-20260829-r13",
+    "/tmp/mcp-SvvREG",
+    "/tmp/Rjavareconf.KrvjxI",
+    "/tmp/tmph958klsn",
+    "/tmp/tmp9x5cxxze",
+    "/tmp/tmpc7zaqu2q",
+    "/tmp/tmp4dmzosb9",
+    "/tmp/pyright-1769958-L1V4VUIkVOge",
+    "/tmp/tmp1r6306o5",
+    "/tmp/mcp-179VwR",
+    "/tmp/tmp2cb490d6",
+    "/tmp/tmp2afnxb8i",
+    "/tmp/mcp-OKUKZU",
+    "/tmp/tcp-pcap-dualhost-20260829-r25",
+    "/tmp/tmp95ui1n9q",
+    "/tmp/pyright-3924526-n0PasgQiBNTW",
+    "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r7",
+    "/tmp/tmp1ltcr140",
+    "/tmp/cedfs-http-phy-retry-1593209",
+    "/tmp/tmpe32b6v5l",
+    "/tmp/nixl_ucx_api_handle_attribution_4mb_4x_20260825_r6",
+    "/tmp/torch_extensions_lossless_sparse2",
+    "/tmp/torch_extensions_lossless",
+    "/tmp/tmphbefknqg",
+    "/tmp/tmprl5xjv29",
+    "/tmp/p2wall",
+    "/tmp/queue-lineage-dualhost-20260829-r18",
+    "/tmp/tmpsv2crm2f",
+    "/tmp/claude-1000",
+    "/tmp/tmptzfg21px",
+    "/tmp/tmpgj5jrhk2",
+    "/tmp/tmpuz71y2ri",
+    "/tmp/tmpp1r8vala",
+    "/tmp/tiny_llama_rice_compressed",
+    "/tmp/tmpzgr4ie8k",
+    "/tmp/simai_git_sync",
+    "/tmp/tmpcj159syo",
+    "/tmp/vllm_fastapi_compat_20260827",
+    "/tmp/tmplrhc5wer",
+    "/tmp/queue-lineage-dualhost-20260829-r7",
+    "/tmp/torch_extensions_lossless_posstream",
+    "/tmp/tmp6pg99mle",
+    "/tmp/tmpu_1l0vwvwandb-media",
+    "/tmp/torch_extensions_lossless_speed_opt3",
+    "/tmp/llama_compress_smoke",
+    "/tmp/torch_extensions_lossless_sparse",
+    "/tmp/tmpjou9pk71",
+    "/tmp/queue-lineage-dualhost-20260829-r1",
+    "/tmp/rx-payload-r23",
+    "/tmp/torch_extensions_lossless_maskprefix",
+    "/tmp/tmp4dna_ynu",
+    "/tmp/tmp83amz8xv",
+    "/tmp/tmpihpadxjd",
+    "/tmp/tmpqdj_13xc",
+    "/tmp/torch_extensions_lossless_posstream2",
+    "/tmp/tmpi2954xtb",
+    "/tmp/mcp-7pOoLc",
+    "/tmp/rx-payload-r21",
+    "/tmp/tmpdl73a001wandb-artifacts",
+    "/tmp/igb-clean-r30",
+    "/tmp/SimAI-queue-lineage-52a66845",
+    "/tmp/tmphvm4jxvj",
+    "/tmp/tmphk9s5udx",
+    "/tmp/tmpb4fp5afa",
+    "/tmp/igb-ring-r27",
+    "/tmp/tmpf2ry_wj0",
+    "/tmp/tmpynob7e7m",
+    "/tmp/codex-bwrap-synthetic-mount-targets-1000",
+    "/tmp/tmp5at4imxk",
+    "/tmp/tcp-driver-ring-pcap-r29",
+    "/tmp/tmpas5qv_t8",
+    "/tmp/queue-lineage-dualhost-20260829-r14",
+    "/tmp/mcp-NKb8zK",
+    "/tmp/tmp6zdmx8lv",
+    "/tmp/tmp3wti4da1",
+    "/tmp/mcp-6euScQ",
+    "/tmp/llama_compress_smoke_qcompact",
+    "/tmp/tmpy4ykb9tg",
+    "/tmp/ubuntu",
+    "/tmp/tmpfwhqns2g",
+    "/tmp/tmpvm1a50qh",
+    "/tmp/torch_extensions_lossless_speed_opt1",
+    "/tmp/tmpjlzu4xb8",
+    "/tmp/cedfs-phy-phy-bench",
+    "/tmp/simai_rerun_sync_20260620_205925_735452",
+    "/tmp/queue-lineage-dualhost-20260829-r17",
+    "/tmp/tmpdcewl8j5",
+    "/tmp/torch_extensions_lossless_speed_opt2",
+    "/tmp/tmp6ppnp1ur",
+    "/tmp/tmp_wvj0enc",
+    "/tmp/mcp-4cKoOB",
+    "/tmp/tmprfvga41h",
+    "/tmp/tmp67wgx72c",
+    "/tmp/tmpe8coha06",
+    "/tmp/vscode-typescript1000",
+    "/tmp/tmpluzaxkym",
+    "/tmp/tmpyk4i4exx",
+    "/tmp/queue-lineage-dualhost-20260829-r19",
+    "/tmp/tmpfpudt6nw",
+    "/tmp/tmpx5d68gkk",
+    "/tmp/igb-clean-r35-20260829",
+    "/mnt/home/Amove",
+    "/mnt/old_data/home/ubuntu/下载",
+    "/mnt/old_data/home/ubuntu/.dotnet",
+    "/mnt/old_data/home/ubuntu/音乐",
+    "/mnt/old_data/home/ubuntu/ced_train",
+    "/mnt/old_data/home/ubuntu/文档",
+    "/mnt/old_data/home/ubuntu/snap",
+    "/mnt/old_data/home/ubuntu/.local",
+    "/mnt/old_data/home/ubuntu/.gnupg",
+    "/mnt/old_data/home/ubuntu/桌面",
+    "/mnt/old_data/home/ubuntu/模板",
+    "/mnt/old_data/home/ubuntu/图片",
+    "/mnt/old_data/home/ubuntu/.ssh",
+    "/mnt/old_data/home/ubuntu/视频",
+    "/mnt/old_data/home/ubuntu/.cache",
+    "/mnt/old_data/home/ubuntu/.vscode-server",
+    "/mnt/old_data/home/ubuntu/.config",
+    "/mnt/old_data/home/ubuntu/公共的"
+  ],
+  "skipped_mounts": []
+}

@@ -1,0 +1,23 @@
+Host casr-3090x2
+    HostName 10.212.67.68
+    User buaa
+
+Host casr-3090x1
+    HostName 10.212.70.38
+    User buaa
+
+Host casr-4090x4
+    HostName 10.212.67.167
+    User ubuntu
+
+Host casr-5090x4
+    HostName 10.212.70.196
+    User buaa
+
+Host casr-*
+    IdentityFile C:/Users/Administrator/AppData/Local/Temp/casr-ssh-1cf41c7bc72746d29195a0cbaf3700ae/id_ed25519
+    IdentitiesOnly yes
+    BatchMode yes
+    PasswordAuthentication no
+    StrictHostKeyChecking yes
+    ConnectTimeout 10
