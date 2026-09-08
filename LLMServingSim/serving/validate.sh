@@ -158,6 +158,7 @@ SCENARIOS=(
     # --- a second hardware profile ---
     "rtx4090_single|--cluster-config $C/rtx4090_single_instance.json --dataset $SG_L --num-reqs 20"
     "rtx4090_multi|--cluster-config $C/rtx4090_multi_instance.json --dataset $SG_L --num-reqs 20"
+    "rtx4090_tp2|--cluster-config $C/rtx4090_tp2_instance.json --dataset $SG_L --num-reqs 20"
 )
 
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then

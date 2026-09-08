@@ -59,6 +59,7 @@ agentic_single 55330378613
 agentic_moe_dp_ep 36551191391
 rtx4090_single 20107668060
 rtx4090_multi 17757249475
+rtx4090_tp2 15578642415
 accuracy:RTX4090/Llama-3.1-8B b14a11d0ff5f1b297b7d0cb5886c53af
 summary:RTX4090/Llama-3.1-8B b6bc99d66b384e5f4bba7db17f47ad6f
 accuracy:RTXPRO6000/Llama-3.1-8B 204ba6114792e27dcfe8a733512d9775
