@@ -4,6 +4,17 @@
   "link_latency": 20000,
   "casr": {
     "solver": "lp",
+    "lifecycle": {
+      "min_active_prefill": 1,
+      "max_active_prefill": 2,
+      "warmup_ms": 100,
+      "prefill_capacity": {"0": 100, "1": 100}
+    },
+    "resources": {
+      "startup_ms": 250,
+      "reclaim_ms": 50,
+      "nodes": {"0": {"gpu_count": 4, "gpu_mem_gb": [24, 24, 96, 24]}}
+    },
     "prefill_capacity": {
       "0": 200,
       "1": 200

@@ -319,7 +319,7 @@ python -m serving \
 
 每张 trace 仍只表达一个 Decode receiver，但 scheduler 已按目标分桶并逐 batch 执行；因此不同 class 可以在同一个 P worker 上进入不同 D，只是不会混入同一 batch。P/D 的 TP NPU 数目前必须相等，避免 KV rank 映射歧义。
 
-尚未实现：OR-Tools LP 的 overflow/link shared-capacity 约束、逻辑 domain/shared-link 配置、显式 warmup 请求与 cache loss、P 生命周期及结构性扩缩容。它们仍按第 6 节的 B→E 顺序推进。
+尚未实现：逻辑 domain/shared-link 配置、显式远端 warmup 请求与 cache loss。P 生命周期及资源级扩缩容已在下一轮实现；仍未接入真实 Kubernetes/Ray 进程编排。
 
 ## 9. 第二轮实现状态：可执行 f_ijk 与动态 P→D（2026-09-07）
 
@@ -365,6 +365,12 @@ cluster JSON 可选增加 `casr` 段。容量单位是控制窗口中的 flow �
 控制器根据 flow demand 与 `prefill_capacity` 选择目标 ACTIVE 数。空闲 worker 可 `deactivate`；有在途请求的 worker 先进入 `DRAINING`，排空后才 `INACTIVE`；重新启用会经过 `WARMING`。这只模拟 admission/预热时间和容量，不创建或销毁真实进程。每个 tick 的 `lifecycle` 字段记录动作。
 
 控制器还会对 flow 指向 P 的已知 class 执行 prefix warmup：以代表性 token 序列写入完整的未固定 NPU KV block，后续请求照常经过 cache lookup、命中和 eviction。`warmups` 记录写入字节数；token IDs 仅驻留进程内用于构造 cache hash，绝不写入 snapshot。
+
+### 10.1 资源级编排
+
+当 `casr.resources` 存在时，生命周期动作由 `ResourceOrchestrator` 执行节点级资源账本，而不只是切换 admission flag。每个 worker 必须获得满足其 `num_npus` 和逐卡显存需求的 GPU allocation；资源不足时 scale-out 被拒绝并记录原因。scale-in 先 drain，随后经过 `reclaim_ms` 才释放 GPU；scale-out 获得资源后经过 `startup_ms` 进入 `WARMING`，完成后才能接收新请求。
+
+资源快照记录每个 worker 的 `gpu_ids`、显存占用、节点剩余 GPU/显存、pending reclaim 和 acquire/release/reject 事件。当前实现是模拟器内置的确定性本地编排后端，真实进程创建仍属于部署层，不会在静态 ASTRA-Sim 拓扑中伪造动态 CUDA worker。
 
 ## 11. 精确 LP 后端
 

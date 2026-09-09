@@ -62,6 +62,8 @@ class Scheduler:
         # CASR models scale actions as admission-state transitions before it
         # grows a real orchestration backend around worker processes.
         self.admission_state = "ACTIVE"
+        self.resource_gpu_ids = ()
+        self.resource_mem_gb = 0.0
         self.decode_npu_offsets = {}
         self.decode_npu_counts = {}
 

@@ -24,6 +24,7 @@ serving/                        Python package
 │   ├── kv_cache_manager.py     tiered KV cache manager (block hashing, allocation)
 │   ├── logger.py               Rich-based logger + stdio capture
 │   └── utils.py                model config loading, formatting helpers
+├── casr/                       CASR controller, policies, lifecycle, resources
 ├── run.sh                      one runnable example per feature (a menu, not a suite)
 ├── validate.sh                 every scenario vs recorded clocks + bench/examples digests
 └── validate-baselines.txt      the recorded values; refresh with validate.sh --update
@@ -56,6 +57,34 @@ The simulation loop in `serving/__main__.py` orchestrates these modules per iter
 4. **Graph generator** converts traces to Chakra protobuf graphs
 5. **Controller** feeds graphs to ASTRA-Sim and reads back timing results
 6. **Memory model** tracks KV cache allocation, eviction, and prefix cache hits
+
+### Resource-level CASR orchestration
+
+When `casr.resources` is present in the cluster configuration, lifecycle actions
+use a node resource ledger instead of only toggling admission flags. Each
+worker acquires the configured number of GPU slots and its modeled GPU memory;
+scale-in marks the worker for drain, then releases the allocation after
+`reclaim_ms`. Scale-out is rejected when the node lacks free GPU slots or
+memory, and `startup_ms` keeps the worker in `WARMING` until resources are
+ready. Resource ownership, free capacity, pending reclamation, and every
+acquire/release/reject event are included in `--casr-state-output` snapshots.
+
+Example:
+
+```json
+"casr": {
+  "resources": {
+    "startup_ms": 250,
+    "reclaim_ms": 50,
+    "nodes": {"0": {"gpu_count": 4, "gpu_mem_gb": [24, 24, 96, 24]}}
+  }
+}
+```
+
+This is a deterministic local orchestrator for simulation runs: it models
+resource ownership and scheduling consequences without pretending to create
+real CUDA processes inside a static ASTRA-Sim topology. A cluster backend can
+replace `ResourceOrchestrator` behind the same lifecycle boundary later.
 
 ### Trace generation pipeline
 

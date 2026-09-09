@@ -737,6 +737,7 @@ def main():
                 snapshot["lifecycle"] = list(casr_controller.last_lifecycle)
                 snapshot["warmups"] = list(casr_controller.last_warmups)
                 snapshot["solver"] = casr_controller.last_solver_diagnostics
+                snapshot["resources"] = casr_controller.last_resource_snapshot
                 casr_profiler.append_snapshot(args.casr_state_output, snapshot)
 
         instance_id = npu2inst_mapping[sys]  # get instance id from NPU id
@@ -1352,6 +1353,7 @@ def main():
         snapshot["lifecycle"] = list(casr_controller.last_lifecycle)
         snapshot["warmups"] = list(casr_controller.last_warmups)
         snapshot["solver"] = casr_controller.last_solver_diagnostics
+        snapshot["resources"] = casr_controller.lifecycle.resources.snapshot()
         casr_profiler.append_snapshot(args.casr_state_output, snapshot)
 
     # --save-trace-text writes the text into the run directory, so keeping it

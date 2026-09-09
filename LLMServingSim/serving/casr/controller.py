@@ -28,11 +28,13 @@ class CASRController:
         self.policy_spec = policy_spec
         lifecycle_policy = dict((policy or {}).get("lifecycle", {}))
         lifecycle_policy.setdefault("prefill_capacity", (policy or {}).get("prefill_capacity", {}))
+        lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
         self.last_flows = ()
         self.last_lifecycle = ()
         self.last_warmups = ()
         self.last_solver_diagnostics = {}
+        self.last_resource_snapshot = {}
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
@@ -40,7 +42,8 @@ class CASRController:
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         snapshot = profiler.snapshot(current_ns, schedulers)
         all_prefill = [s for s in schedulers if s.pd_type == "prefill"]
-        self.last_lifecycle = self.lifecycle.update(current_ns, snapshot["prefix_states"], all_prefill)
+        self.last_lifecycle = self.lifecycle.update(current_ns, snapshot["prefix_states"], schedulers)
+        self.last_resource_snapshot = self.lifecycle.resources.snapshot()
         prefill = [s for s in all_prefill if s.accepts_new_requests]
         decode = [s for s in schedulers if s.pd_type == "decode" and s.accepts_new_requests]
         # A colocated deployment has neither role.  Treat its instances as both

@@ -125,6 +125,8 @@ class PrefixProfiler:
                 "running": len(scheduler.running),
                 "waiting": len(scheduler.waiting),
                 "admission_state": scheduler.admission_state,
+                "resource_gpu_ids": list(getattr(scheduler, "resource_gpu_ids", ())),
+                "resource_mem_gb": getattr(scheduler, "resource_mem_gb", 0.0),
             }
         rows = []
         for (instance_id, class_id), state in sorted(self._states.items()):

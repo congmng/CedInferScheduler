@@ -3,6 +3,7 @@ import unittest
 from serving.casr.affinity import AffinityPlan
 from serving.casr.flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from serving.casr.prefix_profiler import PrefixProfiler
+from serving.casr.resources import ResourceOrchestrator
 
 
 class _Scheduler:
@@ -10,6 +11,25 @@ class _Scheduler:
         self.instance_id = instance_id
         self.start_npu = start_npu
         self.max_num_seqs = 8
+
+
+class _Memory:
+    def __init__(self, gb):
+        self.npu_mem = gb * 1024 ** 3
+
+
+class _ResourceScheduler:
+    def __init__(self, instance_id, state="ACTIVE", node_id=0):
+        self.instance_id = instance_id
+        self.node_id = node_id
+        self.num_npus = 1
+        self.memory = _Memory(24)
+        self.admission_state = state
+        self.running = []
+        self.waiting = []
+
+    def set_admission_state(self, state):
+        self.admission_state = state
 
 
 class CasrTests(unittest.TestCase):
@@ -58,6 +78,36 @@ class CasrTests(unittest.TestCase):
         except ImportError:
             self.skipTest("OR-Tools is optional")
         self.assertAlmostEqual(sum(flow.flow for flow in flows), 5.0)
+
+    def test_resource_pool_releases_before_scale_out(self):
+        pool = ResourceOrchestrator({
+            "startup_ms": 10,
+            "reclaim_ms": 5,
+            "nodes": {"0": {"gpu_count": 1, "gpu_mem_gb": 24}},
+        })
+        first = _ResourceScheduler(0)
+        second = _ResourceScheduler(1)
+        events = pool.bootstrap([first, second], 0)
+        self.assertEqual(first.admission_state, "ACTIVE")
+        self.assertEqual(second.admission_state, "INACTIVE")
+        self.assertTrue(any(e.action == "resource_reject" for e in events))
+
+        pool.reconcile([first], {1}, 0)
+        self.assertIn(0, pool._pending_release)
+        events = pool.reconcile([second], {1}, 5_000_000)
+        self.assertEqual(second.admission_state, "WARMING")
+        self.assertEqual(pool.snapshot()["allocations"]["1"]["gpu_ids"], [0])
+        self.assertTrue(any(e.action == "resource_release" for e in events))
+
+    def test_resource_pool_matches_per_gpu_memory(self):
+        pool = ResourceOrchestrator({
+            "nodes": {"0": {"gpu_count": 2, "gpu_mem_gb": [24, 48]}},
+        })
+        large = _ResourceScheduler(0)
+        large.memory = _Memory(96)
+        events = pool.bootstrap([large], 0)
+        self.assertEqual(large.admission_state, "INACTIVE")
+        self.assertEqual(events[0].action, "resource_reject")
 
 
 if __name__ == "__main__":
