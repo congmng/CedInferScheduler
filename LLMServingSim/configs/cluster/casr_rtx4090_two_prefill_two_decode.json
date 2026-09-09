@@ -1,0 +1,26 @@
+{
+  "num_nodes": 1,
+  "link_bw": 16,
+  "link_latency": 20000,
+  "casr": {
+    "solver": "lp",
+    "prefill_capacity": {"0": 1, "1": 1},
+    "decode_capacity": {"2": 1, "3": 1},
+    "overflow_penalty": 10,
+    "shared_links": [
+      {"id": "constrained-d2-uplink", "capacity": 0.5, "pairs": [[0, 2], [1, 2]]}
+    ]
+  },
+  "nodes": [
+    {
+      "num_instances": 4,
+      "cpu_mem": {"mem_size": 64, "mem_bw": 50, "mem_latency": 0},
+      "instances": [
+        {"instance_id": 0, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "prefill", "tp_size": 1},
+        {"instance_id": 1, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "prefill", "tp_size": 1},
+        {"instance_id": 2, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "decode", "tp_size": 1},
+        {"instance_id": 3, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "decode", "tp_size": 1}
+      ]
+    }
+  ]
+}

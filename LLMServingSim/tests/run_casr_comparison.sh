@@ -8,7 +8,9 @@ cd "$repo_root"
 result_dir="${1:-$(mktemp -d /tmp/llmservingsim-casr.XXXXXX)}"
 mkdir -p "$result_dir"
 
-common=(--cluster-config configs/cluster/casr_two_prefill_two_decode.json
+cluster_config="${CLUSTER_CONFIG:-configs/cluster/casr_two_prefill_two_decode.json}"
+
+common=(--cluster-config "$cluster_config"
         --dataset workloads/casr_hotspot_two_class.jsonl --num-reqs 8
         --dtype bfloat16 --block-size 16 --log-level WARNING)
 

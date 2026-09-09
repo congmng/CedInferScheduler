@@ -228,6 +228,8 @@ scheduling. MoE expert weights are sharded by `ep_size` (each instance holds
 | `rtx4090_single_instance.json` | RTX 4090 (24 GB), Llama-3.1-8B TP=1. `mem_util` calibrated to the validated bench run |
 | `rtx4090_tp2_instance.json` | Two RTX 4090s as TP=2, Llama-3.1-8B. Requires the profiled RTX4090 `tp2` bundle under `profiler/perf/RTX4090/meta-llama/Llama-3.1-8B/bf16/tp2/`. `mem_util` is left at the default because there is no validated bench run |
 | `rtx4090_multi_instance.json` | Two independent TP=1 RTX 4090 instances behind the router |
+| `casr_two_prefill_two_decode.json` | CASR 2P×2D topology on RTXPRO6000 with shared-link and capacity constraints |
+| `casr_rtx4090_two_prefill_two_decode.json` | CASR 2P×2D topology on four RTX 4090 instances for local 4090 testing |
 | `single_node_moe_dp_tp_instance.json` | Single node, DP=2 x TP=2 MoE (EP=2, 4 GPUs) |
 | `single_node_moe_dp_pp_instance.json` | Single node, DP=2 x PP=2 MoE (EP=2, 4 GPUs) |
 | `single_node_moe_dp_tp_pp_instance.json` | Single node, DP=2 x TP=2 x PP=2 MoE (EP=4, 8 GPUs) |
