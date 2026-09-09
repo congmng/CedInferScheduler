@@ -323,8 +323,7 @@ def _compute_network_dims(instances):
             factors = _prime_factors(max_tp)
             unsupported = sorted(
                 tp for tp in tp_degrees
-                if _product(_prime_factors(tp)) != tp
-                or not _is_prefix_product(tp, factors)
+                if not _is_prefix_product(tp, factors)
             )
             if unsupported:
                 raise ValueError(
@@ -343,13 +342,6 @@ def _compute_network_dims(instances):
     while len(dims) > 1 and dims[-1] == 1:
         dims.pop()
     return dims
-
-
-def _product(values):
-    result = 1
-    for value in values:
-        result *= value
-    return result
 
 
 def _is_prefix_product(value, factors):
