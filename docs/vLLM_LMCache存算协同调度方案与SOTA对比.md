@@ -302,6 +302,7 @@ CASR 对同一位置生成两个候选：`+P3@Edge(cold)` 和 `+P3@Edge(warm)`�
 - `PrefixProfiler` 生成 block-aligned prefix class，并维护每个 P/class 的到达率、命中 token、缓存占用和衰减状态。
 - `CapacityAwareFlowSolver` 支持按 P/class 命中工作量计算容量，并提供 deterministic greedy 和 OR-Tools GLOP 两种内层求解器。
 - flow objective 支持按 P-D pair 配置 RTT、KV 传输带宽和 Decode queue 权重；共享链路可用 `capacity_bytes_per_s` 按 KV 字节约束。
+- 可选 `PrometheusStateCollector` 读取 Prometheus-compatible exporter；worker 的 `queue`、`queue_depth` 或 `vllm_num_requests_waiting` 会进入下一轮 pair cost，并原样写入 telemetry snapshot。
 - `StructuralEvaluator` 对 `keep`、`+P(cold)`、`+P(warm)` 和 `-P` 做单步反事实重求解，使用窗口收益、绝对/相对阈值和 dwell time 选择动作。
 - warm 候选按 prefix 热度排序，并受 `warm_top_k` 与 `warm_budget_bytes` 限制；只有被选中的 warm action 才会在新 P ready 后执行预热。
 - `PrefillLifecycle` 和 `ResourceOrchestrator` 执行单步目标集合，保留 WARMING worker，支持 GPU allocation、drain、reclaim 和资源拒绝。
@@ -317,6 +318,21 @@ tests/run_casr_structural_experiment.sh /tmp/casr-structural
 该实验使用 `configs/cluster/casr_structural_mismatch.json`：生命周期按高容量配置认为只需一个 P，
 但 flow solver 对当前 P 施加较小容量，候选 P 可修复 overflow。当前运行在约 108 ms 处选择一次
 `+P(warm)`，objective 从 `1.012` 降至 `0.264`，窗口收益为 `0.748`，之后没有重复结构动作。
+
+真实 exporter 接入可在 `casr` 配置中增加：
+
+```json
+"telemetry": {
+  "timeout_ms": 100,
+  "endpoints": [
+    {"id": "2", "role": "worker", "url": "http://decode-0:8000/metrics"},
+    {"id": "wan-0", "role": "link", "url": "http://network-exporter:9100/metrics"}
+  ]
+}
+```
+
+端点失败不会中断仿真，错误会记录在 `telemetry.errors`；当前实现已完成采集和 worker queue 映射，
+link exporter 的动态带宽映射仍需按实际指标名称配置到 pair/link cost。
 
 现有低/高/低 baseline 与消融仍由 `tests/run_casr_ablation.sh` 驱动；7 项 CASR 单元测试和完整消融脚本均已通过。
 热点漂移实验可用 `tests/run_casr_hotspot_drift.sh` 运行：在恒定 30 req/s 下，前半段

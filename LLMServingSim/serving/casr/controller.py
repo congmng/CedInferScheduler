@@ -13,6 +13,7 @@ from .flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
 from .evaluator import StructuralEvaluator
+from .state import PrometheusStateCollector
 
 
 class CASRController:
@@ -32,6 +33,7 @@ class CASRController:
         lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
         self.evaluator = StructuralEvaluator((policy or {}).get("structural", {}))
+        self.state_collector = PrometheusStateCollector((policy or {}).get("telemetry", {}))
         self.last_action_ns = -1
         self.last_flows = ()
         self.last_lifecycle = ()
@@ -40,12 +42,17 @@ class CASRController:
         self.last_resource_snapshot = {}
         self.last_structural_decision = {}
         self.pending_warm_classes = {}
+        self.last_telemetry = {}
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
 
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         snapshot = profiler.snapshot(current_ns, schedulers)
+        if self.state_collector.enabled:
+            self.last_telemetry = self.state_collector.collect()
+            snapshot["telemetry"] = self.last_telemetry
+            self.solver.set_telemetry(self.last_telemetry)
         all_prefill = [s for s in schedulers if s.pd_type == "prefill"]
         self.last_lifecycle = self.lifecycle.update(current_ns, snapshot["prefix_states"], schedulers)
         self.last_resource_snapshot = self.lifecycle.resources.snapshot()

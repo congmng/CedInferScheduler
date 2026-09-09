@@ -5,6 +5,7 @@ from serving.casr.flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from serving.casr.prefix_profiler import PrefixProfiler
 from serving.casr.resources import ResourceOrchestrator
 from serving.casr.evaluator import StructuralEvaluator
+from serving.casr.state import parse_prometheus_text
 
 
 class _Scheduler:
@@ -153,6 +154,26 @@ class CasrTests(unittest.TestCase):
         flows = solver.solve(rows, prefill, decode)
         self.assertEqual(len(flows), 1)
         self.assertEqual((flows[0].prefill_id, flows[0].decode_id), (1, 3))
+
+    def test_prometheus_parser_handles_comments_labels_and_invalid_values(self):
+        metrics = parse_prometheus_text("""
+        # HELP queue queue depth
+        queue{worker=\"p0\"} 4
+        kv_read_bytes_total 1.5e3
+        broken not-a-number
+        """)
+        self.assertEqual(metrics["queue"], 4.0)
+        self.assertEqual(metrics["kv_read_bytes_total"], 1500.0)
+        self.assertNotIn("broken", metrics)
+
+    def test_external_queue_telemetry_is_used_by_pair_cost(self):
+        decode = _Scheduler(2, 2)
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "queue_weight": 1.0,
+        }))
+        solver.set_telemetry({"workers": {"2": {"queue": 8}}})
+        cost = solver._pair_cost(_Scheduler(0, 0), decode, "c", {})
+        self.assertGreaterEqual(cost, 8.0 / decode.max_num_seqs)
 
 
 if __name__ == "__main__":

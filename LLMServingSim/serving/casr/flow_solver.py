@@ -88,6 +88,20 @@ class CapacityAwareFlowSolver:
         self.backend = "greedy"
         self.diagnostics = {}
         self._fallback = None
+        self._runtime_queue = {}
+
+    def set_telemetry(self, telemetry):
+        """Install best-effort exporter queue samples for the next solve."""
+        self._runtime_queue = {}
+        for worker_id, metrics in (telemetry or {}).get("workers", {}).items():
+            try:
+                instance_id = int(worker_id)
+            except (TypeError, ValueError):
+                continue
+            for name in ("vllm_num_requests_waiting", "queue", "queue_depth"):
+                if name in metrics:
+                    self._runtime_queue[instance_id] = max(0.0, float(metrics[name]))
+                    break
 
     def solve(self, rows, prefill, decode, work_overrides=None):
         if self.config.solver == "lp":
@@ -138,7 +152,8 @@ class CapacityAwareFlowSolver:
         bandwidth = config.get("bandwidth_bytes_per_s", 0.0)
         kv_bytes = self._class_kv_bytes(class_id, entry)
         transfer = kv_bytes / bandwidth if bandwidth > 0 else 0.0
-        waiting = len(getattr(decode, "waiting", ()))
+        waiting = max(float(len(getattr(decode, "waiting", ()))),
+                      self._runtime_queue.get(int(decode.instance_id), 0.0))
         running = len(getattr(decode, "running", ()))
         max_num_seqs = getattr(decode, "max_num_seqs", 1)
         queue = self.config.queue_weight * ((waiting * 4 + running) /
