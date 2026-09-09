@@ -149,3 +149,18 @@ NoHysteresis 运行记录到 `warm_start: 5`、`warm_complete: 4`、`resource_re
 - `/tmp/casr-test-report-structural/casr.jsonl`
 - `/tmp/casr-test-report-drift/casr.jsonl`
 
+## 11. 当前复现实验
+
+2026-09-09 在当前工作区重新运行 `tests/run_casr_ablation.sh`，结果产物位于 `/tmp/casr-current-ablation`。本轮使用同一条 `111` 请求低/高/低 workload，固定 2P、固定 1P、动态 CASR（LP/greedy）、仅路由和无 prefix 复用配置均完成，无请求被拒绝。
+
+| 配置 | 高负载平均 latency | 高负载 P95 | 平均 GPU | GPU-seconds | 资源动作 |
+|---|---:|---:|---:|---:|---|
+| Fixed 2P | `940.161 ms` | `1210.446 ms` | `4.000` | `20.294` | 无 |
+| Fixed 1P | `940.061 ms` | `1208.582 ms` | `3.000` | `15.265` | 无 |
+| Dynamic CASR (LP) | `790.572 ms` | `805.098 ms` | `3.553` | `16.904` | `1` 次扩容，`2` 次释放 |
+| Dynamic CASR (greedy) | `790.572 ms` | `805.098 ms` | `3.553` | `16.904` | `1` 次扩容，`2` 次释放 |
+| Routing-only | `790.572 ms` | `805.098 ms` | `4.000` | `18.947` | 无 |
+
+相对 Fixed 2P，当前 Dynamic CASR 的高负载平均 latency 下降约 `15.9%`，P95 下降约 `33.5%`；相对 Routing-only，资源生命周期使 GPU-seconds 下降约 `10.8%`。本轮 LP 与 greedy 结果相同，说明该 workload 的流量规模没有制造求解器差异。无 prefix 复用配置的高负载平均 latency 为 `941.886 ms`、P95 为 `1213.626 ms`，支持 prefix cache 对该 workload 有实际影响的判断。
+
+这轮仍是本地模拟器实验；真实 vLLM 已在 4090、5090 和单卡 3090 分别完成过链路验证，但尚未形成跨主机 P/D 服务。8×A100 节点 `10.70.251.47:2222` 当前 SSH 认证失败，待恢复登录后再补部署、链路测量和同 workload 实验。
