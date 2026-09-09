@@ -116,6 +116,7 @@ schema is above, and the format reference is
 | File | Description |
 | --- | --- |
 | `example_trace.jsonl` | Small example trace for quick testing |
+| `casr_hetero_hot_cold.jsonl` | Zipf hot/cold CASR trace used by `tests/run_casr_hetero_comparison.sh` |
 
 ## Generating workloads
 
