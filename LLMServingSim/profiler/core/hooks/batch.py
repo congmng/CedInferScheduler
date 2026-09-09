@@ -147,7 +147,17 @@ def assemble_scheduler_output(shot: Shot, model_runner):
     # vLLM may have multiple KV-cache groups (cross-layer managers,
     # hybrid architectures). We honor all of them by reading the
     # worker's live block_table list.
-    block_tables = model_runner.input_batch.block_table.block_tables
+    input_batch = getattr(model_runner, "input_batch", None)
+    if input_batch is None:
+        available = sorted(
+            name for name in vars(model_runner)
+            if "batch" in name.lower() or "input" in name.lower()
+        )
+        raise RuntimeError(
+            "vLLM worker has no input_batch; profiler requires a V1 "
+            f"GPUModelRunner input batch (available fields: {available})"
+        )
+    block_tables = input_batch.block_table.block_tables
     block_sizes = [
         bt.block_size * bt.blocks_per_kv_block
         for bt in block_tables
