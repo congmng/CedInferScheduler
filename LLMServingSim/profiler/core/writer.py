@@ -255,6 +255,7 @@ _KEY_FIELDS_BY_CATEGORY: dict[str, list[str]] = {
 # CSV filename under tp{N}/ that holds the per-bucket alpha table.
 # The meta.yaml skew_fit.per_tp[tp] block points at this file instead
 # of inlining the (usually 1-2k) bucket rows as a YAML mapping.
+_SKEW_CSV_NAME = "skew.csv"
 _SKEW_FIT_CSV_NAME = "skew_fit.csv"
 
 
@@ -318,6 +319,12 @@ def _skew_fit_block(variant_root: Path, tp_degrees: list[int]) -> dict:
     profile grid). If TPs disagree, each entry keeps its own axes; the
     simulator handles both shapes.
     """
+    if not any(
+        (variant_root / f"tp{int(tp)}" / _SKEW_CSV_NAME).is_file()
+        for tp in tp_degrees
+    ):
+        return {"enabled": False}
+
     from profiler.core.fit_alpha import fit_alpha_per_tp
     fit = fit_alpha_per_tp(variant_root, tp_degrees)
     if not fit.get("enabled"):

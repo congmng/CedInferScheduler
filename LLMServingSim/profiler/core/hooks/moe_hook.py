@@ -72,7 +72,9 @@ class ExpertRoute:
                 at least one token. Must satisfy
                 ``top_k <= activated_experts <= num_tokens * top_k``.
         """
-        top_k = layer.top_k
+        top_k = getattr(layer, "top_k", None)
+        if top_k is None:
+            top_k = layer.moe_config.experts_per_token
         if activated_experts < top_k:
             raise ValueError(
                 f"activated_experts ({activated_experts}) must be >= "
@@ -88,7 +90,8 @@ class ExpertRoute:
 
         # vLLM's router cares about the dtype of topk_ids: some kernels
         # expect int32, others a specific dtype reported by the router.
-        indices_dtype = layer.router._get_indices_type()
+        get_indices_type = getattr(layer.router, "_get_indices_type", None)
+        indices_dtype = get_indices_type() if get_indices_type else None
         device = next(layer.parameters()).device
 
         ids = torch.tensor(
@@ -164,22 +167,30 @@ def force_moe_routing(route: ExpertRoute | None) -> Iterator[None]:
 
     # Local import so that host-side code doesn't pay the vLLM import
     # cost just to read this module.
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe import layer as fused_moe
 
-    original_forward_native = FusedMoE.forward_native
+    moe_type = getattr(fused_moe, "FusedMoE", None)
+    method_name = "forward_native"
+    if moe_type is None:
+        moe_type = fused_moe.MoERunner
+        method_name = "forward"
+    original_forward = getattr(moe_type, method_name)
 
-    @wraps(original_forward_native)
-    def hooked_forward_native(self, hidden_states, router_logits):
+    @wraps(original_forward)
+    def hooked_forward(self, hidden_states, router_logits, *args, **kwargs):
         # Only patch the specific layer we care about. Any other
         # FusedMoE encountered during this forward pass uses its
         # normal routing.
         if self.layer_name != route.layer_name:
-            return original_forward_native(self, hidden_states, router_logits)
+            return original_forward(self, hidden_states, router_logits, *args, **kwargs)
 
         # We also sanity-check that our forged topk_ids matches the
         # actual per-call token count. If hidden_states is padded
         # differently than expected, bail.
-        expected_shape = (hidden_states.shape[0], self.top_k)
+        top_k = getattr(self, "top_k", None)
+        if top_k is None:
+            top_k = self.moe_config.experts_per_token
+        expected_shape = (hidden_states.shape[0], top_k)
         if tuple(route.ids.shape) != expected_shape:
             raise ValueError(
                 f"Forged topk_ids shape mismatch for {self.layer_name}: "
@@ -193,43 +204,42 @@ def force_moe_routing(route: ExpertRoute | None) -> Iterator[None]:
         # select_experts does normalization / validation around
         # _compute_routing that we still want to run.
         original_select_experts = self.router.select_experts
-        original_compute_routing = self.router._compute_routing
+        original_compute_routing = getattr(self.router, "_compute_routing", None)
 
         @wraps(original_select_experts)
         def hooked_select_experts(*args, **kwargs):
-            @wraps(original_compute_routing)
-            def forced_compute_routing(
-                _hidden_states: torch.Tensor,
-                _router_logits: torch.Tensor,
-                _indices_type: torch.dtype | None,
-            ):
-                # Args are deliberately ignored — the whole point of
-                # forced routing is that we return pre-forged values
-                # regardless of the learned gate's logits.
-                return route.weights, route.ids
+            if original_compute_routing is not None:
+                @wraps(original_compute_routing)
+                def forced_compute_routing(*_args, **_kwargs):
+                    return route.weights, route.ids
 
-            self.router._compute_routing = forced_compute_routing
+                self.router._compute_routing = forced_compute_routing
+            else:
+                def forced_select_experts(*_args, **_kwargs):
+                    return route.weights, route.ids
+
+                self.router.select_experts = forced_select_experts
             try:
                 return original_select_experts(*args, **kwargs)
             finally:
-                # Always restore _compute_routing, even if select_experts
-                # raises (otherwise subsequent MoE calls in the same
-                # profile session would keep returning our forged values).
-                self.router._compute_routing = original_compute_routing
+                if original_compute_routing is not None:
+                    self.router._compute_routing = original_compute_routing
+                else:
+                    self.router.select_experts = original_select_experts
 
         self.router.select_experts = hooked_select_experts
         try:
-            return original_forward_native(self, hidden_states, router_logits)
+            return original_forward(self, hidden_states, router_logits, *args, **kwargs)
         finally:
             self.router.select_experts = original_select_experts
 
-    FusedMoE.forward_native = hooked_forward_native
+    setattr(moe_type, method_name, hooked_forward)
     try:
         yield
     finally:
         # Restore the original class method so future calls (in tests,
         # or after this profile session ends) behave normally.
-        FusedMoE.forward_native = original_forward_native
+        setattr(moe_type, method_name, original_forward)
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +254,11 @@ def single_moe_layer(model_runner):
     If for some reason there are zero or more-than-one, raise so the
     caller can investigate rather than forge the wrong route.
     """
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe import layer as fused_moe
+    moe_type = getattr(fused_moe, "FusedMoE", fused_moe.MoERunner)
 
     model = model_runner.get_model()
-    moe_layers = [m for m in model.modules() if isinstance(m, FusedMoE)]
+    moe_layers = [m for m in model.modules() if isinstance(m, moe_type)]
     if len(moe_layers) != 1:
         raise RuntimeError(
             f"Expected exactly one FusedMoE layer in the test model, "
