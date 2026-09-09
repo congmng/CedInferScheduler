@@ -20,14 +20,14 @@ def _rows(path):
 
 def _phase(arrival_ns, boundaries):
     if arrival_ns < boundaries[0]:
-        return "low"
+        return "low-1"
     if arrival_ns < boundaries[1]:
         return "high"
-    return "low"
+    return "low-2"
 
 
 def _latency_metrics(rows, boundaries):
-    grouped = {"low": [], "high": []}
+    grouped = {"low-1": [], "high": [], "low-2": []}
     for row in rows:
         grouped[_phase(int(row["arrival"]), boundaries)].append(
             float(row["latency"]) / 1_000_000)
@@ -67,6 +67,8 @@ def _dynamic_resources(rows, state_path):
     snapshots.sort(key=lambda value: int(value["time_ns"]))
     if not snapshots:
         raise ValueError(f"no resource snapshots in {state_path}")
+    if not snapshots[0].get("resources", {}).get("enabled", False):
+        return _static_resources(rows, 4, 168)
     gpu_counts = []
     mem_counts = []
     gpu_seconds = 0.0
@@ -100,7 +102,7 @@ def _dynamic_resources(rows, state_path):
 def report(label, rows, boundaries, resources):
     metrics = _latency_metrics(rows, boundaries)
     print(f"[{label}]")
-    for phase in ("low", "high"):
+    for phase in ("low-1", "high", "low-2"):
         item = metrics[phase]
         print(f"{phase:5s} requests={item['requests']:3d} "
               f"mean_latency_ms={item['mean_ms']:.3f} "

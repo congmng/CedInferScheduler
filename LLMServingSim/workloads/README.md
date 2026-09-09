@@ -118,6 +118,7 @@ schema is above, and the format reference is
 | `example_trace.jsonl` | Small example trace for quick testing |
 | `casr_hetero_hot_cold.jsonl` | Zipf hot/cold CASR trace used by `tests/run_casr_hetero_comparison.sh` |
 | `casr_elasticity_low_high_low.jsonl` | Deterministic 1s low / 2s high / 1s low trace for fixed-vs-elastic experiments |
+| `casr_elasticity_no_prefix.jsonl` | Same phase timing and lengths as the elasticity trace, but every request has a unique prefix |
 
 ## Generating workloads
 

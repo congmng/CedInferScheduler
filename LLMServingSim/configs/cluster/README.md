@@ -232,6 +232,7 @@ scheduling. MoE expert weights are sharded by `ep_size` (each instance holds
 | `casr_rtx4090_two_prefill_two_decode.json` | CASR 2P×2D topology on four RTX 4090 instances for local 4090 testing |
 | `casr_hetero_rtx4090_rtxpro6000.json` | Heterogeneous CASR topology with resource-accounted Prefill lifecycle: RTX4090 Prefill, fast RTXPRO6000 Decode + slow RTX4090 Decode |
 | `casr_hetero_fixed1p_rtx4090_rtxpro6000.json` | Fixed 1P baseline matching the heterogeneous Decode resources |
+| `casr_hetero_no_elasticity.json` | CASR routing/prefix-state ablation with fixed heterogeneous workers and no resource lifecycle |
 | `single_node_moe_dp_tp_instance.json` | Single node, DP=2 x TP=2 MoE (EP=2, 4 GPUs) |
 | `single_node_moe_dp_pp_instance.json` | Single node, DP=2 x PP=2 MoE (EP=2, 4 GPUs) |
 | `single_node_moe_dp_tp_pp_instance.json` | Single node, DP=2 x TP=2 x PP=2 MoE (EP=4, 8 GPUs) |

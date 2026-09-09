@@ -386,6 +386,29 @@ Prefill GPU；相对于固定 2P，GPU-seconds 从约 20.29 降至 16.90，平�
 从约 940.16 ms 降至 790.57 ms。启动成本为一次 250 ms，应在论文结果中
 单独报告，不能并入静态吞吐收益。
 
+### 10.3 基线与消融
+
+`tests/run_casr_ablation.sh` 在同一条低/高/低 trace 上运行以下矩阵：
+
+| Case | 去掉的能力 | 平均 latency | 高峰 P95 | GPU-seconds |
+| --- | --- | ---: | ---: | ---: |
+| fixed2 | CASR，固定 2P | 929.179 ms | 1210.446 ms | 20.294 |
+| fixed1 | CASR，固定 1P | 929.346 ms | 1208.582 ms | 15.265 |
+| dynamic_lp | 无 | 785.159 ms | 804.702 ms | 16.904 |
+| dynamic_greedy | LP，仅保留 greedy | 785.159 ms | 804.702 ms | 16.904 |
+| routing_only | 资源级扩缩容 | 785.159 ms | 804.702 ms | 18.947 |
+| no_prefix | prefix 复用信息 | 924.704 ms | 1213.234 ms | 14.417 |
+
+完整 CASR LP 相对固定 2P 将平均 latency 降低约 15.5%，高峰 P95 降低
+约 33.5%，同时 GPU-seconds 降低约 16.7%；动态资源动作包含一次
+250 ms scale-out 和两次 resource release。`routing_only` 与完整 CASR 延迟
+接近但资源消耗更高，说明异构路由贡献了主要性能收益，资源编排贡献了
+容量释放收益。`no_prefix` 的 111 个请求各自形成独立 prefix class，控制器
+无法从历史复用中估计稳定需求，因而高峰 P95 回到约 1.21 s；这是 prefix
+状态对弹性决策作用的消融证据。LP 与 greedy 在这条 workload 上结果相同，
+说明该负载没有触发精确 LP 相比贪心的额外分流收益，后续应增加容量临界和
+共享链路竞争场景单独评估 solver 差异。
+
 ## 11. 精确 LP 后端
 
 `requirements-casr.txt` 提供可选 OR-Tools GLOP 后端。安装后，在 `casr` 段设置 `"solver": "lp"` 即可求解连续变量 `f[class, P, D]`：
