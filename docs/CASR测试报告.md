@@ -126,17 +126,17 @@ NoHysteresis 运行记录到 `warm_start: 5`、`warm_complete: 4`、`resource_re
 
 ## 9. 当前限制与下一步
 
-当前测试不能代表真实服务性能，主要缺口是：
+当前测试不能代表完整五节点真实服务性能，主要缺口是：
 
 - 未安装并运行真实 vLLM、LMCache 和 Prometheus exporter。
 - warmup 仍是模拟器内 KV 状态操作，未测量真实 GPU/NVMe/网络 I/O 时间。
 - 资源编排尚未连接真实 Kubernetes/Ray worker manager。
 - 消融 trace 对 cache capacity、warm 和 structural gain 的压力不足。
-- 尚未报告真实模型上的 TPOT、吞吐、SLO attainment、goodput 和 GPU utilization。
+- 尚未在 8×A100 上完成同模型真实服务；真实模型上的 TPOT、吞吐、SLO attainment、goodput 和 GPU utilization 仍需补齐。
 
 建议下一阶段按以下顺序推进：
 
-1. 在小规模真实 vLLM + LMCache 环境校准 Prefill/Decode 延迟、KV bytes、RTT 和带宽参数。
+1. 在已恢复互信的五节点环境中完成小规模真实 vLLM + LMCache 部署，校准 Prefill/Decode 延迟、KV bytes、RTT 和带宽参数。
 2. 构造容量临界、共享 WAN 瓶颈和热点迁移 workload，重复完整消融矩阵。
 3. 接入 Prometheus exporter 和 Ray/Kubernetes executor，验证 telemetry 到扩缩容动作的闭环。
 4. 在真实集群补充 P50/P95/P99 TTFT、TPOT、吞吐、SLO 和 GPU-seconds 报告。
