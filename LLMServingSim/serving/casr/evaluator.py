@@ -14,6 +14,7 @@ class StructuralDecision:
     candidate_objective: float
     wanted_ids: tuple[int, ...]
     reason: str
+    warm_classes: tuple[str, ...] = ()
 
     def as_dict(self):
         return {
@@ -24,6 +25,7 @@ class StructuralDecision:
             "candidate_objective": self.candidate_objective,
             "wanted_ids": list(self.wanted_ids),
             "reason": self.reason,
+            "warm_classes": list(self.warm_classes),
         }
 
 
@@ -38,6 +40,8 @@ class StructuralEvaluator:
         self.dwell_ns = max(0, int(float(config.get("dwell_time_ms", 0)) * 1_000_000))
         self.startup_cost = float(config.get("startup_cost", 0.0))
         self.warm_cost = float(config.get("warm_cost", 0.0))
+        self.warm_top_k = max(0, int(config.get("warm_top_k", 8)))
+        self.warm_budget_bytes = max(0.0, float(config.get("warm_budget_bytes", 0.0)))
 
     @staticmethod
     def _hit_work(rows, class_id):
@@ -48,6 +52,29 @@ class StructuralEvaluator:
             requested = max(1.0, float(row.get("requested_tokens", 0.0)))
             ratios.append(min(0.95, float(row.get("hit_tokens_ewma", 0.0)) / requested))
         return max(0.05, 1.0 - max(ratios or [0.0]))
+
+    def _warm_classes(self, rows):
+        grouped = {}
+        for row in rows:
+            class_id = row["class_id"]
+            grouped.setdefault(class_id, []).append(row)
+        ranked = []
+        for class_id, class_rows in grouped.items():
+            demand = sum(float(row.get("arrival_rate_ewma", 0.0)) for row in class_rows)
+            hit = 1.0 - self._hit_work(rows, class_id)
+            bytes_per_request = max(float(row.get("kv_bytes_per_request", 0.0))
+                                    for row in class_rows)
+            ranked.append((demand * hit, class_id, bytes_per_request))
+        selected = []
+        used_bytes = 0.0
+        for _, class_id, bytes_per_request in sorted(ranked, reverse=True):
+            if len(selected) >= self.warm_top_k:
+                break
+            if self.warm_budget_bytes and used_bytes + bytes_per_request > self.warm_budget_bytes:
+                continue
+            selected.append(class_id)
+            used_bytes += bytes_per_request
+        return tuple(selected)
 
     def evaluate(self, snapshot, active_prefill, all_prefill, decode, solver,
                  current_ns, last_action_ns=-1, min_active=1):
@@ -67,6 +94,7 @@ class StructuralEvaluator:
         base_objective = float(solver.diagnostics.get("objective", 0.0))
         demand_scale = max(1.0, sum(float(row.get("arrival_rate_ewma", 0.0)) for row in rows))
         candidates = []
+        warm_classes = self._warm_classes(rows)
 
         inactive = [s for s in all_prefill if s not in active_prefill and
                     s.admission_state == "INACTIVE"]
@@ -85,7 +113,8 @@ class StructuralEvaluator:
                 candidates.append(StructuralDecision(
                     "+P", mode, gain, base_objective, candidate_objective,
                     tuple(item.instance_id for item in candidate_prefill),
-                    f"counterfactual add Prefill {candidate.instance_id}"))
+                    f"counterfactual add Prefill {candidate.instance_id}",
+                    warm_classes if mode == "warm" else ()))
 
         if len(active_prefill) > min_active:
             for candidate in sorted(active_prefill, key=lambda item: item.instance_id, reverse=True)[:1]:

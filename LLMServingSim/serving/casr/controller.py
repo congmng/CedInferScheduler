@@ -39,6 +39,7 @@ class CASRController:
         self.last_solver_diagnostics = {}
         self.last_resource_snapshot = {}
         self.last_structural_decision = {}
+        self.pending_warm_classes = {}
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
@@ -63,6 +64,10 @@ class CASRController:
         self.last_structural_decision = decision.as_dict()
         if decision.action != "keep":
             self.last_action_ns = int(current_ns)
+            if decision.action == "+P" and decision.mode == "warm":
+                new_ids = set(decision.wanted_ids) - {item.instance_id for item in prefill}
+                for instance_id in new_ids:
+                    self.pending_warm_classes[instance_id] = set(decision.warm_classes)
             self.last_lifecycle = self.lifecycle.update(
                 current_ns, snapshot["prefix_states"], schedulers,
                 wanted_override=set(decision.wanted_ids))
@@ -94,12 +99,17 @@ class CASRController:
                 d_weights.get(key, {}).get(flow.decode_id, 0.0) +
                 flow.flow / p_class_flow[key])
             candidate = profiler.warm_candidate(flow.class_id)
-            if candidate is not None and flow.prefill_id in by_id:
+            pending = self.pending_warm_classes.get(flow.prefill_id, set())
+            if candidate is not None and flow.prefill_id in by_id and flow.class_id in pending:
                 warmed_bytes = by_id[flow.prefill_id].warm_prefix(*candidate)
                 if warmed_bytes:
                     warmups.append({"class_id": flow.class_id,
                                     "prefill_id": flow.prefill_id,
                                     "bytes": warmed_bytes})
+                pending.discard(flow.class_id)
+        for instance_id, classes in list(self.pending_warm_classes.items()):
+            if not classes:
+                self.pending_warm_classes.pop(instance_id, None)
         for (prefill_id, class_id), weights in d_weights.items():
             fallbacks[prefill_id, class_id] = tuple(s.instance_id for s in decode
                                                     if s.instance_id not in weights)

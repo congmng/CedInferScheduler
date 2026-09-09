@@ -301,7 +301,9 @@ CASR 对同一位置生成两个候选：`+P3@Edge(cold)` 和 `+P3@Edge(warm)`�
 
 - `PrefixProfiler` 生成 block-aligned prefix class，并维护每个 P/class 的到达率、命中 token、缓存占用和衰减状态。
 - `CapacityAwareFlowSolver` 支持按 P/class 命中工作量计算容量，并提供 deterministic greedy 和 OR-Tools GLOP 两种内层求解器。
+- flow objective 支持按 P-D pair 配置 RTT、KV 传输带宽和 Decode queue 权重；共享链路可用 `capacity_bytes_per_s` 按 KV 字节约束。
 - `StructuralEvaluator` 对 `keep`、`+P(cold)`、`+P(warm)` 和 `-P` 做单步反事实重求解，使用窗口收益、绝对/相对阈值和 dwell time 选择动作。
+- warm 候选按 prefix 热度排序，并受 `warm_top_k` 与 `warm_budget_bytes` 限制；只有被选中的 warm action 才会在新 P ready 后执行预热。
 - `PrefillLifecycle` 和 `ResourceOrchestrator` 执行单步目标集合，保留 WARMING worker，支持 GPU allocation、drain、reclaim 和资源拒绝。
 - 状态快照新增 `structural` 字段，记录动作、模式、基准 objective、候选 objective、收益和目标 worker。
 
@@ -318,5 +320,5 @@ tests/run_casr_structural_experiment.sh /tmp/casr-structural
 
 现有低/高/低 baseline 与消融仍由 `tests/run_casr_ablation.sh` 驱动；7 项 CASR 单元测试和完整消融脚本均已通过。
 需要注意，这些实验仍是模拟器内的逻辑资源和本地 KV warmup，不是实际 vLLM、LMCache、Prometheus 或 Kubernetes/Ray
-部署。下一阶段应补充 KV 字节/BW/RTT/queue 成本、真实 warm I/O 计时、热点漂移和 NoNetwork/NoHysteresis 对照，
-再将结果用于真实系统验证。
+部署。下一阶段应把 KV 字节/BW/RTT/queue 配置替换为真实遥测，补充真实 warm I/O 计时、热点漂移和
+NoNetwork/NoHysteresis 对照，再将结果用于真实系统验证。

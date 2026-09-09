@@ -19,7 +19,8 @@
       "evaluation_window_ms": 1000,
       "gain_threshold_abs": 0.01,
       "gain_threshold_rel": 0.0,
-      "dwell_time_ms": 1000
+      "dwell_time_ms": 1000,
+      "warm_top_k": 1
     },
     "prefill_capacity": {"0": 4, "1": 1},
     "decode_capacity": {"2": 100},

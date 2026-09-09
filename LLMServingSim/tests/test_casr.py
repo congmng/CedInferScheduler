@@ -136,6 +136,24 @@ class CasrTests(unittest.TestCase):
         self.assertIn(1, decision.wanted_ids)
         self.assertGreater(decision.gain, 0.01)
 
+    def test_pair_network_cost_changes_assignment(self):
+        rows = [{"class_id": "c", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 1.0, "request_count": 1,
+                 "hit_tokens_ewma": 0.0, "requested_tokens": 64}]
+        prefill = [_Scheduler(0, 0), _Scheduler(1, 1)]
+        decode = [_Scheduler(2, 2), _Scheduler(3, 3)]
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "pair_costs": {
+                "0,2": {"rtt_ms": 1000},
+                "0,3": {"rtt_ms": 1000},
+                "1,2": {"rtt_ms": 1000},
+                "1,3": {"rtt_ms": 0},
+            },
+        }))
+        flows = solver.solve(rows, prefill, decode)
+        self.assertEqual(len(flows), 1)
+        self.assertEqual((flows[0].prefill_id, flows[0].decode_id), (1, 3))
+
 
 if __name__ == "__main__":
     unittest.main()

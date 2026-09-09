@@ -24,6 +24,7 @@ class SharedLink:
     link_id: str
     capacity: float
     pairs: frozenset[tuple[int, int]] = frozenset()
+    capacity_bytes_per_s: float = 0.0
 
     def carries(self, prefill_id: int, decode_id: int) -> bool:
         return not self.pairs or (prefill_id, decode_id) in self.pairs
@@ -36,6 +37,10 @@ class FlowSolverConfig:
     shared_links: tuple[SharedLink, ...] = ()
     overflow_penalty: float = 10.0
     solver: str = "greedy"
+    pair_costs: Mapping[tuple[int, int], Mapping[str, float]] = field(default_factory=dict)
+    class_kv_bytes: Mapping[str, float] = field(default_factory=dict)
+    default_kv_bytes: float = 0.0
+    queue_weight: float = 0.0
 
     @classmethod
     def from_dict(cls, raw):
@@ -44,7 +49,16 @@ class FlowSolverConfig:
         for index, item in enumerate(raw.get("shared_links", ())):
             pairs = frozenset((int(pair[0]), int(pair[1])) for pair in item.get("pairs", ()))
             links.append(SharedLink(str(item.get("id", f"link-{index}")),
-                                    float(item["capacity"]), pairs))
+                                    float(item.get("capacity", float("inf"))), pairs,
+                                    float(item.get("capacity_bytes_per_s", 0.0))))
+        pair_costs = {}
+        for key, value in (raw.get("pair_costs") or {}).items():
+            if isinstance(key, str):
+                p_id, d_id = (int(part) for part in key.replace("/", ",").split(",", 1))
+            else:
+                p_id, d_id = (int(key[0]), int(key[1]))
+            pair_costs[p_id, d_id] = {str(name): float(amount)
+                                      for name, amount in (value or {}).items()}
         return cls(
             prefill_capacity={int(key): float(value)
                               for key, value in raw.get("prefill_capacity", {}).items()},
@@ -53,6 +67,11 @@ class FlowSolverConfig:
             shared_links=tuple(links),
             overflow_penalty=float(raw.get("overflow_penalty", 10.0)),
             solver=str(raw.get("solver", "greedy")).lower(),
+            pair_costs=pair_costs,
+            class_kv_bytes={str(key): float(value)
+                            for key, value in (raw.get("class_kv_bytes") or {}).items()},
+            default_kv_bytes=float(raw.get("default_kv_bytes", 0.0)),
+            queue_weight=float(raw.get("queue_weight", 0.0)),
         )
 
 
@@ -88,11 +107,14 @@ class CapacityAwareFlowSolver:
             entry = grouped.setdefault(class_id, {
                 "class_id": class_id, "arrival_rate_ewma": 0.0,
                 "hit_tokens_ewma": {}, "requested_tokens": {},
+                "kv_bytes_per_request": 0.0,
             })
             entry["arrival_rate_ewma"] += max(float(row.get("arrival_rate_ewma", 0.0)), 1.0)
             p_id = int(row.get("prefill_instance_id", next(iter(by_id), -1)))
             entry["hit_tokens_ewma"][p_id] = entry["hit_tokens_ewma"].get(p_id, 0.0) + float(row.get("hit_tokens_ewma", 0.0))
             entry["requested_tokens"][p_id] = entry["requested_tokens"].get(p_id, 0.0) + float(row.get("requested_tokens", 0.0))
+            entry["kv_bytes_per_request"] = max(
+                entry["kv_bytes_per_request"], float(row.get("kv_bytes_per_request", 0.0)))
         work = {}
         for class_id, entry in grouped.items():
             for scheduler in prefill:
@@ -104,6 +126,24 @@ class CapacityAwareFlowSolver:
                     value = max(0.05, min(1.0, float(work_overrides[p_id, class_id])))
                 work[p_id, class_id] = value
         return grouped, work
+
+    def _class_kv_bytes(self, class_id, entry):
+        return max(0.0, self.config.class_kv_bytes.get(
+            class_id, entry.get("kv_bytes_per_request", 0.0) or self.config.default_kv_bytes))
+
+    def _pair_cost(self, prefill, decode, class_id, entry):
+        config = self.config.pair_costs.get((prefill.instance_id, decode.instance_id), {})
+        distance = abs(prefill.start_npu - decode.start_npu) * 0.001
+        rtt = config.get("rtt_ms", 0.0) / 1000.0
+        bandwidth = config.get("bandwidth_bytes_per_s", 0.0)
+        kv_bytes = self._class_kv_bytes(class_id, entry)
+        transfer = kv_bytes / bandwidth if bandwidth > 0 else 0.0
+        waiting = len(getattr(decode, "waiting", ()))
+        running = len(getattr(decode, "running", ()))
+        max_num_seqs = getattr(decode, "max_num_seqs", 1)
+        queue = self.config.queue_weight * ((waiting * 4 + running) /
+                                            max(1, max_num_seqs))
+        return distance + rtt + transfer + queue
 
     def _solve_greedy(self, rows, prefill, decode, work_overrides=None):
         self.backend = "greedy"
@@ -122,13 +162,16 @@ class CapacityAwareFlowSolver:
                 for d_sched in decode:
                     d_capacity = max(1.0, self.config.decode_capacity.get(
                         d_sched.instance_id, float(d_sched.max_num_seqs)))
-                    link_cost = abs(p_sched.start_npu - d_sched.start_npu) * 0.001
+                    link_cost = self._pair_cost(p_sched, d_sched, class_id, entry)
                     p_overflow = max(0.0, p_load[p_sched.instance_id] + p_work - p_capacity)
                     d_overflow = max(0.0, d_load[d_sched.instance_id] + flow - d_capacity)
                     carried = tuple(link for link in self.config.shared_links
                                     if link.carries(p_sched.instance_id, d_sched.instance_id))
-                    link_overflow = sum(max(0.0, link_load[link.link_id] + flow - link.capacity)
-                                        for link in carried)
+                    kv_bytes = self._class_kv_bytes(class_id, entry)
+                    link_overflow = sum(max(
+                        0.0, link_load[link.link_id] + flow * (kv_bytes if link.capacity_bytes_per_s else 1.0) -
+                        (link.capacity_bytes_per_s if link.capacity_bytes_per_s else link.capacity))
+                        for link in carried)
                     cost = ((p_load[p_sched.instance_id] + p_work) / p_capacity +
                             (d_load[d_sched.instance_id] + flow) / d_capacity + link_cost +
                             self.config.overflow_penalty * (p_overflow + d_overflow + link_overflow))
@@ -141,7 +184,8 @@ class CapacityAwareFlowSolver:
             p_load[p_sched.instance_id] += selected_p_work
             d_load[d_sched.instance_id] += flow
             for link in carried:
-                link_load[link.link_id] += flow
+                link_load[link.link_id] += flow * (self._class_kv_bytes(class_id, entry)
+                                                   if link.capacity_bytes_per_s else 1.0)
             assignments.append(FlowAssignment(class_id, p_sched.instance_id,
                                               d_sched.instance_id, flow, cost,
                                               tuple(link.link_id for link in carried),
@@ -196,14 +240,19 @@ class CapacityAwareFlowSolver:
         for link in self.config.shared_links:
             link_slack[link.link_id] = solver.NumVar(0.0, solver.infinity(),
                                                       f"overflow_link_{link.link_id}")
-            solver.Add(sum(flows[class_id, p.instance_id, d.instance_id]
+            solver.Add(sum(flows[class_id, p.instance_id, d.instance_id] *
+                           (self._class_kv_bytes(class_id, grouped[class_id])
+                            if link.capacity_bytes_per_s else 1.0)
                            for class_id in work for p in prefill for d in decode
-                           if link.carries(p.instance_id, d.instance_id)) <= link.capacity + link_slack[link.link_id])
+                           if link.carries(p.instance_id, d.instance_id)) <=
+                       (link.capacity_bytes_per_s if link.capacity_bytes_per_s else link.capacity) +
+                       link_slack[link.link_id])
         objective = solver.Objective()
         for (class_id, p_id, d_id), variable in flows.items():
             p_sched = next(item for item in prefill if item.instance_id == p_id)
             d_sched = next(item for item in decode if item.instance_id == d_id)
-            objective.SetCoefficient(variable, abs(p_sched.start_npu - d_sched.start_npu) * 0.001)
+            objective.SetCoefficient(variable, self._pair_cost(
+                p_sched, d_sched, class_id, grouped[class_id]))
         for variable in (*p_slack.values(), *d_slack.values(), *link_slack.values()):
             objective.SetCoefficient(variable, self.config.overflow_penalty)
         objective.SetMinimization()
