@@ -210,21 +210,58 @@ def _resolve_dp_groups(all_instances):
             m["tp_dim"] = tp_dim
             m["ep_dim"] = ep_dim
 
-    # Non-DP instances. Independent multi-instance configs still use a
-    # multi-dimensional topology ([tp_size, num_groups]); local collectives
-    # must be scoped to dim 0 so they do not cross instance/PP groups.
+    # Non-DP instances. Independent multi-instance configs use a
+    # multi-dimensional topology. For a mixed TP deployment, the topology
+    # dimensions are the prime factors of the largest TP degree, so a smaller
+    # TP group can scope its collective to a prefix of those dimensions.
     network_dims = _compute_network_dims(all_instances)
-    local_dim = None
-    if len(network_dims) > 1:
-        local_dim = [True] + [False] * (len(network_dims) - 1)
 
     for inst in all_instances:
         if inst.get("dp_group") is None:
             inst["dp_group_size"] = 1
             inst["local_ep"] = inst["ep_size"]
             inst["ep_total"] = inst["ep_size"]
-            inst["tp_dim"] = local_dim
-            inst["ep_dim"] = local_dim if inst["ep_size"] > 1 else None
+            inst["tp_dim"] = _collective_prefix_dims(
+                inst["tp_size"], network_dims
+            )
+            inst["ep_dim"] = (
+                _collective_prefix_dims(inst["ep_size"], network_dims)
+                if inst["ep_size"] > 1 else None
+            )
+
+
+def _prime_factors(value):
+    """Return prime factors in topology order, smallest factor first."""
+    factors = []
+    divisor = 2
+    while divisor * divisor <= value:
+        while value % divisor == 0:
+            factors.append(divisor)
+            value //= divisor
+        divisor += 1
+    if value > 1:
+        factors.append(value)
+    return factors
+
+
+def _collective_prefix_dims(group_size, network_dims):
+    """Return dimensions whose product forms one local collective group."""
+    if group_size < 1:
+        raise ValueError(f"Collective group size must be positive: {group_size}")
+    product = 1
+    involved = [False] * len(network_dims)
+    for index, dimension in enumerate(network_dims):
+        if product == group_size:
+            break
+        product *= dimension
+        involved[index] = True
+    if product != group_size:
+        raise ValueError(
+            f"Collective group size {group_size} cannot be represented by "
+            f"topology dimensions {network_dims}; mixed TP groups must be "
+            "prefix products of the largest TP degree"
+        )
+    return involved
 
 
 def _compute_network_dims(instances):
@@ -251,7 +288,18 @@ def _compute_network_dims(instances):
         dims = ([tp_size, pp_size, len(first_group)] if pp_size > 1
                 else [tp_size, len(first_group)])
     else:
-        # Independent instances: standard topology.
+        # Independent instances: use the historical rectangular topology for
+        # homogeneous TP. Mixed TP is represented by factor dimensions, which
+        # preserves exact NPU count and lets each instance scope collectives to
+        # the dimensions that make up its own TP degree.
+        tp_degrees = {inst["tp_size"] for inst in instances}
+        pp_degrees = {inst["pp_size"] for inst in instances}
+        if len(pp_degrees) > 1 or (pp_degrees and next(iter(pp_degrees)) != 1):
+            if len(tp_degrees) > 1:
+                raise ValueError(
+                    "Independent mixed-TP topologies currently require "
+                    "pp_size=1 for every instance"
+                )
         total_npu = sum(
             inst["num_npus"] if inst.get("pd_type") != "prefill"
             else inst["num_npus"] * 2
@@ -265,7 +313,26 @@ def _compute_network_dims(instances):
         num_instances = len(instances) + sum(
             1 for inst in instances if inst.get("pd_type") == "prefill"
         )
-        if total_npu == total_pp:
+        if len(tp_degrees) > 1:
+            max_tp = max(tp_degrees)
+            if total_npu % max_tp != 0:
+                raise ValueError(
+                    f"Total NPU count {total_npu} is not divisible by the "
+                    f"largest TP degree {max_tp}; cannot build a mixed-TP topology"
+                )
+            factors = _prime_factors(max_tp)
+            unsupported = sorted(
+                tp for tp in tp_degrees
+                if _product(_prime_factors(tp)) != tp
+                or not _is_prefix_product(tp, factors)
+            )
+            if unsupported:
+                raise ValueError(
+                    f"Mixed TP degrees {sorted(tp_degrees)} cannot be represented "
+                    f"by factor topology of max TP {max_tp}; unsupported: {unsupported}"
+                )
+            dims = [*factors, total_npu // max_tp]
+        elif total_npu == total_pp:
             npus_per_group = total_npu // num_instances
             dims = [npus_per_group, num_instances]
         else:
@@ -276,6 +343,26 @@ def _compute_network_dims(instances):
     while len(dims) > 1 and dims[-1] == 1:
         dims.pop()
     return dims
+
+
+def _product(values):
+    result = 1
+    for value in values:
+        result *= value
+    return result
+
+
+def _is_prefix_product(value, factors):
+    product = 1
+    if value == 1:
+        return True
+    for factor in factors:
+        product *= factor
+        if product == value:
+            return True
+        if product > value:
+            return False
+    return False
 
 
 def _normalize_network_dim_values(raw_value, num_dims, field_name):

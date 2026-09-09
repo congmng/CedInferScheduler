@@ -171,7 +171,7 @@ def force_moe_routing(route: ExpertRoute | None) -> Iterator[None]:
 
     moe_type = getattr(fused_moe, "FusedMoE", None)
     method_name = "forward_native"
-    if moe_type is None:
+    if not isinstance(moe_type, type):
         moe_type = fused_moe.MoERunner
         method_name = "forward"
     original_forward = getattr(moe_type, method_name)
@@ -255,7 +255,9 @@ def single_moe_layer(model_runner):
     caller can investigate rather than forge the wrong route.
     """
     from vllm.model_executor.layers.fused_moe import layer as fused_moe
-    moe_type = getattr(fused_moe, "FusedMoE", fused_moe.MoERunner)
+    moe_type = getattr(fused_moe, "FusedMoE", None)
+    if not isinstance(moe_type, type):
+        moe_type = fused_moe.MoERunner
 
     model = model_runner.get_model()
     moe_layers = [m for m in model.modules() if isinstance(m, moe_type)]

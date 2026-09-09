@@ -149,6 +149,16 @@ NoHysteresis 运行记录到 `warm_start: 5`、`warm_complete: 4`、`resource_re
 - `/tmp/casr-test-report-structural/casr.jsonl`
 - `/tmp/casr-test-report-drift/casr.jsonl`
 
+## 10.1 真实 Qwen3 异构链路验证
+
+2026-09-10 使用真实 RTX5090/RTX4090 profile 运行 `configs/cluster/casr_real_qwen3_tp4_heterogeneous.json`。该配置对应 4×RTX5090 TP4 Prefill、4×RTX4090 TP4 Decode，ASTRA-Sim 拓扑为 `[4,3]`，1 请求 smoke test 完整退出：总输入 64 tokens、生成 127 tokens、TTFT `63.08 ms`、TPOT `19.22 ms`。
+
+随后使用 `tests/run_real_qwen3_hetero_comparison.sh` 完成 16 请求 Static、CASR Greedy 和 CASR LP 快速矩阵，三组均为 16/16 完成，平均 latency `5237.092 ms`、P95 `5279.882 ms`，Decode 实例只有一个，因此三组结果相同。这组实验只证明真实 profile、Qwen3 MoE trace 和 TP4 P/D handoff 可运行，不证明 CASR 的优势。
+
+多候选路由和结构调整的优势证据仍采用旧异构控制矩阵：80 请求实验中 LP 相比 baseline 平均 latency 从 `2067.042 ms` 降至 `1755.377 ms`（`15.1%`），P95 从 `2540.314 ms` 降至 `2256.963 ms`（`11.2%`），Decode 流量由 `40/40` 调整为 `71/9`；Greedy 平均 latency 为 `1844.020 ms`。该矩阵使用已验证的 heterogeneous hardware abstraction，待真实环境增加第二个可用 P/D 候选后复现。
+
+本轮还修复了混合 TP 配置的拓扑问题：原 Qwen3 TP2/TP4 配置总执行 NPU 数为 18，不能用单一矩形 topology 表示 TP2 和 TP4 的不同 collective 组。配置构建器现仅接受可由最大 TP 因子前缀表达的混合 TP，并对不满足条件的配置提前报错。
+
 ## 11. 当前复现实验
 
 2026-09-09 在当前工作区重新运行 `tests/run_casr_ablation.sh`，结果产物位于 `/tmp/casr-current-ablation`。本轮使用同一条 `111` 请求低/高/低 workload，固定 2P、固定 1P、动态 CASR（LP/greedy）、仅路由和无 prefix 复用配置均完成，无请求被拒绝。
@@ -163,4 +173,4 @@ NoHysteresis 运行记录到 `warm_start: 5`、`warm_complete: 4`、`resource_re
 
 相对 Fixed 2P，当前 Dynamic CASR 的高负载平均 latency 下降约 `15.9%`，P95 下降约 `33.5%`；相对 Routing-only，资源生命周期使 GPU-seconds 下降约 `10.8%`。本轮 LP 与 greedy 结果相同，说明该 workload 的流量规模没有制造求解器差异。无 prefix 复用配置的高负载平均 latency 为 `941.886 ms`、P95 为 `1213.626 ms`，支持 prefix cache 对该 workload 有实际影响的判断。
 
-这轮仍是本地模拟器实验；真实 vLLM 已在 4090、5090 和单卡 3090 分别完成过链路验证，但尚未形成跨主机 P/D 服务。8×A100 节点 `10.70.251.47:2222` 当前 SSH 认证失败，待恢复登录后再补部署、链路测量和同 workload 实验。
+这轮仍是本地模拟器实验；真实 vLLM 已在 4090、5090 和单卡 3090 分别完成过链路验证，并已完成真实 Qwen3 TP4 跨节点 P/D handoff smoke test。8×A100 节点 `10.70.251.47:2222` 已恢复 SSH 访问，但其完整 Qwen3 layerwise profile 仍只有 `tp1`，待维护窗口补齐后再纳入同一组精度对比。
