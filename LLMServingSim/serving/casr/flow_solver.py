@@ -70,29 +70,55 @@ class CapacityAwareFlowSolver:
         self.diagnostics = {}
         self._fallback = None
 
-    def solve(self, rows, prefill, decode):
+    def solve(self, rows, prefill, decode, work_overrides=None):
         if self.config.solver == "lp":
             try:
-                return self._solve_lp(rows, prefill, decode)
+                return self._solve_lp(rows, prefill, decode, work_overrides)
             except ImportError:
                 self._fallback = "ortools unavailable"
-        return self._solve_greedy(rows, prefill, decode)
+        return self._solve_greedy(rows, prefill, decode, work_overrides)
 
-    def _solve_greedy(self, rows, prefill, decode):
+    @staticmethod
+    def _aggregate_rows(rows, prefill, work_overrides=None):
+        """Aggregate demand once while retaining cache state per P and class."""
+        by_id = {int(scheduler.instance_id): scheduler for scheduler in prefill}
+        grouped = {}
+        for row in rows:
+            class_id = row["class_id"]
+            entry = grouped.setdefault(class_id, {
+                "class_id": class_id, "arrival_rate_ewma": 0.0,
+                "hit_tokens_ewma": {}, "requested_tokens": {},
+            })
+            entry["arrival_rate_ewma"] += max(float(row.get("arrival_rate_ewma", 0.0)), 1.0)
+            p_id = int(row.get("prefill_instance_id", next(iter(by_id), -1)))
+            entry["hit_tokens_ewma"][p_id] = entry["hit_tokens_ewma"].get(p_id, 0.0) + float(row.get("hit_tokens_ewma", 0.0))
+            entry["requested_tokens"][p_id] = entry["requested_tokens"].get(p_id, 0.0) + float(row.get("requested_tokens", 0.0))
+        work = {}
+        for class_id, entry in grouped.items():
+            for scheduler in prefill:
+                p_id = int(scheduler.instance_id)
+                requested = max(1.0, entry["requested_tokens"].get(p_id, 0.0))
+                hit = min(0.95, entry["hit_tokens_ewma"].get(p_id, 0.0) / requested)
+                value = max(0.05, 1.0 - hit)
+                if work_overrides and (p_id, class_id) in work_overrides:
+                    value = max(0.05, min(1.0, float(work_overrides[p_id, class_id])))
+                work[p_id, class_id] = value
+        return grouped, work
+
+    def _solve_greedy(self, rows, prefill, decode, work_overrides=None):
         self.backend = "greedy"
         p_load = {sched.instance_id: 0.0 for sched in prefill}
         d_load = {sched.instance_id: 0.0 for sched in decode}
         link_load = {link.link_id: 0.0 for link in self.config.shared_links}
         assignments = []
-        for row in sorted(rows, key=lambda value: (-value["arrival_rate_ewma"],
-                                                    -value["request_count"], value["class_id"])):
-            flow = max(float(row["arrival_rate_ewma"]), 1.0)
-            hit = min(0.95, row["hit_tokens_ewma"] / max(1, row["requested_tokens"]))
-            p_work = flow * max(0.05, 1.0 - hit)
+        grouped, work = self._aggregate_rows(rows, prefill, work_overrides)
+        for class_id, entry in sorted(grouped.items(), key=lambda item: (
+                -item[1]["arrival_rate_ewma"], item[0])):
+            flow = max(float(entry["arrival_rate_ewma"]), 1.0)
             best = None
             for p_sched in prefill:
-                p_capacity = max(1.0, self.config.prefill_capacity.get(
-                    p_sched.instance_id, float(p_sched.max_num_seqs)))
+                p_work = flow * work[p_sched.instance_id, class_id]
+                p_capacity = max(1.0, self.config.prefill_capacity.get(p_sched.instance_id, float(p_sched.max_num_seqs)))
                 for d_sched in decode:
                     d_capacity = max(1.0, self.config.decode_capacity.get(
                         d_sched.instance_id, float(d_sched.max_num_seqs)))
@@ -111,21 +137,23 @@ class CapacityAwareFlowSolver:
                     if best is None or candidate[:3] < best[:3]:
                         best = candidate
             cost, _, _, p_sched, d_sched, carried, p_overflow, d_overflow, link_overflow = best
-            p_load[p_sched.instance_id] += p_work
+            selected_p_work = flow * work[p_sched.instance_id, class_id]
+            p_load[p_sched.instance_id] += selected_p_work
             d_load[d_sched.instance_id] += flow
             for link in carried:
                 link_load[link.link_id] += flow
-            assignments.append(FlowAssignment(row["class_id"], p_sched.instance_id,
+            assignments.append(FlowAssignment(class_id, p_sched.instance_id,
                                               d_sched.instance_id, flow, cost,
                                               tuple(link.link_id for link in carried),
                                               p_overflow, d_overflow, link_overflow))
-        self.diagnostics = {"backend": self.backend, "overflow_penalty": self.config.overflow_penalty}
+        self.diagnostics = {"backend": self.backend, "overflow_penalty": self.config.overflow_penalty,
+                            "objective": sum(item.flow * item.cost for item in assignments)}
         if self._fallback is not None:
             self.diagnostics["fallback"] = self._fallback
             self._fallback = None
         return assignments
 
-    def _solve_lp(self, rows, prefill, decode):
+    def _solve_lp(self, rows, prefill, decode, work_overrides=None):
         """Solve continuous f_ijk with capacity and overflow slack variables."""
         from ortools.linear_solver import pywraplp
 
@@ -137,29 +165,17 @@ class CapacityAwareFlowSolver:
         # class may occur multiple times.  LP variables are keyed by class and
         # P/D pair; aggregate those rows before constructing variables instead
         # of silently letting the last row overwrite the demand.
-        grouped = {}
-        for row in rows:
-            class_id = row["class_id"]
-            entry = grouped.setdefault(class_id, {
-                "class_id": class_id, "arrival_rate_ewma": 0.0,
-                "hit_tokens_ewma": 0.0, "requested_tokens": 0.0,
-            })
-            entry["arrival_rate_ewma"] += max(float(row["arrival_rate_ewma"]), 1.0)
-            entry["hit_tokens_ewma"] += float(row.get("hit_tokens_ewma", 0.0))
-            entry["requested_tokens"] += float(row.get("requested_tokens", 0.0))
-        active_rows = list(grouped.values())
+        grouped, p_work = self._aggregate_rows(rows, prefill, work_overrides)
         flows = {}
         work = {}
-        for row in active_rows:
-            class_id = row["class_id"]
+        for class_id, row in grouped.items():
             demand = max(float(row["arrival_rate_ewma"]), 1.0)
-            hit = min(0.95, row["hit_tokens_ewma"] / max(1, row["requested_tokens"]))
-            work[class_id] = (demand, max(0.05, 1.0 - hit))
+            work[class_id] = demand
             for p_sched in prefill:
                 for d_sched in decode:
                     flows[class_id, p_sched.instance_id, d_sched.instance_id] = solver.NumVar(
                         0.0, solver.infinity(), f"f_{len(flows)}")
-        for class_id, (demand, _) in work.items():
+        for class_id, demand in work.items():
             solver.Add(sum(flows[class_id, p.instance_id, d.instance_id]
                            for p in prefill for d in decode) == demand)
         p_slack = {}
@@ -167,7 +183,7 @@ class CapacityAwareFlowSolver:
             p_slack[p_sched.instance_id] = solver.NumVar(0.0, solver.infinity(),
                                                           f"overflow_p_{p_sched.instance_id}")
             cap = self.config.prefill_capacity.get(p_sched.instance_id, float(p_sched.max_num_seqs))
-            solver.Add(sum(flows[class_id, p_sched.instance_id, d.instance_id] * work[class_id][1]
+            solver.Add(sum(flows[class_id, p_sched.instance_id, d.instance_id] * p_work[p_sched.instance_id, class_id]
                            for class_id in work for d in decode) <= cap + p_slack[p_sched.instance_id])
         d_slack = {}
         for d_sched in decode:
@@ -200,7 +216,7 @@ class CapacityAwareFlowSolver:
                 continue
             carried = tuple(link.link_id for link in self.config.shared_links if link.carries(p_id, d_id))
             assignments.append(FlowAssignment(class_id, p_id, d_id, value,
-                                              objective.Value() / max(1.0, work[class_id][0]), carried))
+                                              objective.Value() / max(1.0, work[class_id]), carried))
         self.diagnostics = {
             "backend": self.backend,
             "objective": objective.Value(),

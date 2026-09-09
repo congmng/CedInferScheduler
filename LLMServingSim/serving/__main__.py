@@ -737,6 +737,7 @@ def main():
                 snapshot["lifecycle"] = list(casr_controller.last_lifecycle)
                 snapshot["warmups"] = list(casr_controller.last_warmups)
                 snapshot["solver"] = casr_controller.last_solver_diagnostics
+                snapshot["structural"] = casr_controller.last_structural_decision
                 snapshot["resources"] = casr_controller.last_resource_snapshot
                 casr_profiler.append_snapshot(args.casr_state_output, snapshot)
 
@@ -1353,6 +1354,7 @@ def main():
         snapshot["lifecycle"] = list(casr_controller.last_lifecycle)
         snapshot["warmups"] = list(casr_controller.last_warmups)
         snapshot["solver"] = casr_controller.last_solver_diagnostics
+        snapshot["structural"] = casr_controller.last_structural_decision
         snapshot["resources"] = casr_controller.lifecycle.resources.snapshot()
         casr_profiler.append_snapshot(args.casr_state_output, snapshot)
 

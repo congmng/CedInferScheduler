@@ -4,6 +4,7 @@ from serving.casr.affinity import AffinityPlan
 from serving.casr.flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from serving.casr.prefix_profiler import PrefixProfiler
 from serving.casr.resources import ResourceOrchestrator
+from serving.casr.evaluator import StructuralEvaluator
 
 
 class _Scheduler:
@@ -108,6 +109,32 @@ class CasrTests(unittest.TestCase):
         events = pool.bootstrap([large], 0)
         self.assertEqual(large.admission_state, "INACTIVE")
         self.assertEqual(events[0].action, "resource_reject")
+
+    def test_structural_evaluator_selects_capacity_repair(self):
+        active = _Scheduler(0, 0)
+        candidate = _Scheduler(1, 1)
+        active.admission_state = "ACTIVE"
+        candidate.admission_state = "INACTIVE"
+        decode = _Scheduler(2, 2)
+        rows = [{"class_id": "hot", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 4.0, "request_count": 4,
+                 "hit_tokens_ewma": 0.0, "requested_tokens": 64}]
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "solver": "greedy",
+            "prefill_capacity": {"0": 1, "1": 4},
+            "decode_capacity": {"2": 8},
+        }))
+        decision = StructuralEvaluator({
+            "evaluation_window_ms": 1000,
+            "gain_threshold_abs": 0.01,
+            "gain_threshold_rel": 0.0,
+            "warm_cost": 2.0,
+        }).evaluate({"prefix_states": rows}, [active],
+                    [active, candidate], [decode], solver, 0)
+        self.assertEqual(decision.action, "+P")
+        self.assertEqual(decision.mode, "cold")
+        self.assertIn(1, decision.wanted_ids)
+        self.assertGreater(decision.gain, 0.01)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,39 @@
+{
+  "num_nodes": 1,
+  "link_bw": 16,
+  "link_latency": 20000,
+  "casr": {
+    "solver": "greedy",
+    "lifecycle": {
+      "min_active_prefill": 1,
+      "max_active_prefill": 2,
+      "warmup_ms": 100,
+      "prefill_capacity": {"0": 100, "1": 100}
+    },
+    "resources": {
+      "startup_ms": 100,
+      "reclaim_ms": 50,
+      "nodes": {"0": {"gpu_count": 3, "gpu_mem_gb": [24, 24, 96]}}
+    },
+    "structural": {
+      "evaluation_window_ms": 1000,
+      "gain_threshold_abs": 0.01,
+      "gain_threshold_rel": 0.0,
+      "dwell_time_ms": 1000
+    },
+    "prefill_capacity": {"0": 4, "1": 1},
+    "decode_capacity": {"2": 100},
+    "overflow_penalty": 10
+  },
+  "nodes": [
+    {
+      "num_instances": 3,
+      "cpu_mem": {"mem_size": 256, "mem_bw": 256, "mem_latency": 0},
+      "instances": [
+        {"instance_id": 0, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "prefill", "tp_size": 1},
+        {"instance_id": 1, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.833919}, "pd_type": "prefill", "tp_size": 1},
+        {"instance_id": 2, "model_name": "meta-llama/Llama-3.1-8B", "hardware": "RTXPRO6000", "npu_mem": {"mem_size": 96, "mem_bw": 1597, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1}
+      ]
+    }
+  ]
+}

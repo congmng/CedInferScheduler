@@ -12,6 +12,7 @@ from .affinity import AffinityPlan
 from .flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
+from .evaluator import StructuralEvaluator
 
 
 class CASRController:
@@ -30,11 +31,14 @@ class CASRController:
         lifecycle_policy.setdefault("prefill_capacity", (policy or {}).get("prefill_capacity", {}))
         lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
+        self.evaluator = StructuralEvaluator((policy or {}).get("structural", {}))
+        self.last_action_ns = -1
         self.last_flows = ()
         self.last_lifecycle = ()
         self.last_warmups = ()
         self.last_solver_diagnostics = {}
         self.last_resource_snapshot = {}
+        self.last_structural_decision = {}
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
@@ -53,6 +57,18 @@ class CASRController:
         if not decode:
             decode = [s for s in schedulers if s.accepts_new_requests]
 
+        decision = self.evaluator.evaluate(
+            snapshot, prefill, all_prefill, decode, self.solver, current_ns,
+            self.last_action_ns, self.lifecycle.min_active)
+        self.last_structural_decision = decision.as_dict()
+        if decision.action != "keep":
+            self.last_action_ns = int(current_ns)
+            self.last_lifecycle = self.lifecycle.update(
+                current_ns, snapshot["prefix_states"], schedulers,
+                wanted_override=set(decision.wanted_ids))
+            self.last_resource_snapshot = self.lifecycle.resources.snapshot()
+            prefill = [s for s in all_prefill if s.accepts_new_requests]
+
         p_weights = {}
         d_weights = {}
         fallbacks = {}
@@ -61,6 +77,7 @@ class CASRController:
         self.last_flows = tuple(self._validate_flows(proposed, snapshot, prefill, decode))
         self.last_solver_diagnostics = dict(self.solver.diagnostics)
         self.last_solver_diagnostics["policy"] = self.policy_spec
+        self.last_solver_diagnostics["structural"] = self.last_structural_decision
         by_id = {scheduler.instance_id: scheduler for scheduler in prefill}
         warmups = []
         class_demand = {}

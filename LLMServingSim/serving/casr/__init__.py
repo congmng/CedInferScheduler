@@ -6,12 +6,12 @@ publishes routing/lifecycle decisions at a slower control cadence.
 """
 
 from .affinity import AffinityPlan
-from .affinity import AffinityPlan
 from .controller import CASRController
+from .evaluator import StructuralDecision, StructuralEvaluator
 from .flow_solver import CapacityAwareFlowSolver, FlowAssignment, FlowSolverConfig, SharedLink
 from .lifecycle import PrefillLifecycle
 from .policy import BuiltinPolicy, PolicyError
 from .prefix_profiler import PrefixProfiler
 from .resources import ResourceEvent, ResourceOrchestrator
 
-__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink"]
+__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink", "StructuralDecision", "StructuralEvaluator"]

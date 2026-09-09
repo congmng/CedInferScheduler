@@ -20,8 +20,9 @@ class PrefillLifecycle:
         self.capacity = {int(key): float(value)
                          for key, value in config.get("prefill_capacity", {}).items()}
         self._warming_until = {}
+        self.last_wanted = set()
 
-    def update(self, current_ns, rows, schedulers):
+    def update(self, current_ns, rows, schedulers, wanted_override=None):
         all_schedulers = list(schedulers)
         schedulers = [s for s in all_schedulers if s.pd_type == "prefill"]
         if not schedulers:
@@ -40,7 +41,18 @@ class PrefillLifecycle:
         ranked = sorted(schedulers, key=lambda s: (
             0 if s.admission_state == "ACTIVE" else 1,
             len(s.running) + len(s.waiting), s.instance_id))
-        wanted = {scheduler.instance_id for scheduler in ranked[:desired]}
+        wanted = (set(wanted_override) if wanted_override is not None else
+                  {scheduler.instance_id for scheduler in ranked[:desired]})
+        # Keep an acquired worker alive until startup completes.  Otherwise a
+        # low-demand tick can immediately cancel a previous scale-out before
+        # the new worker becomes eligible for the next plan.
+        if wanted_override is None:
+            wanted.update(scheduler.instance_id for scheduler in schedulers
+                          if scheduler.admission_state == "WARMING")
+        wanted = {scheduler.instance_id for scheduler in schedulers
+                  if scheduler.instance_id in wanted}
+        if wanted_override is None:
+            self.last_wanted = set(wanted)
         for scheduler in schedulers:
             state = scheduler.admission_state
             if state == "WARMING" and current_ns >= self._warming_until.get(scheduler.instance_id, current_ns + startup_ns):
@@ -57,4 +69,5 @@ class PrefillLifecycle:
                 if scheduler is not None and scheduler.admission_state == "WARMING":
                     self._warming_until[event.instance_id] = current_ns + startup_ns
                     events.append({"instance_id": event.instance_id, "action": "warm_start"})
+        self.last_wanted = set(wanted)
         return tuple(events)
