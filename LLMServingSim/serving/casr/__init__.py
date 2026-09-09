@@ -14,5 +14,6 @@ from .policy import BuiltinPolicy, PolicyError
 from .prefix_profiler import PrefixProfiler
 from .resources import ResourceEvent, ResourceOrchestrator
 from .state import PrometheusStateCollector, parse_prometheus_text
+from .executor import ExecutionResult, ReconfigExecutor
 
-__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink", "StructuralDecision", "StructuralEvaluator", "PrometheusStateCollector", "parse_prometheus_text"]
+__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink", "StructuralDecision", "StructuralEvaluator", "PrometheusStateCollector", "parse_prometheus_text", "ExecutionResult", "ReconfigExecutor"]

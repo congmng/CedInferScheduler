@@ -64,7 +64,7 @@ class PrefillLifecycle:
         resource_events = self.resources.reconcile(schedulers, wanted, current_ns)
         for event in resource_events:
             events.append(event.as_dict())
-            if event.action == "resource_acquire":
+            if event.action in {"resource_acquire", "resource_reuse"}:
                 scheduler = next((s for s in schedulers if s.instance_id == event.instance_id), None)
                 if scheduler is not None and scheduler.admission_state == "WARMING":
                     self._warming_until[event.instance_id] = current_ns + startup_ns

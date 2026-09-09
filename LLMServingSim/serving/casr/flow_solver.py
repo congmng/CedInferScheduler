@@ -41,6 +41,8 @@ class FlowSolverConfig:
     class_kv_bytes: Mapping[str, float] = field(default_factory=dict)
     default_kv_bytes: float = 0.0
     queue_weight: float = 0.0
+    use_cache_capacity: bool = True
+    network_weight: float = 1.0
 
     @classmethod
     def from_dict(cls, raw):
@@ -72,6 +74,8 @@ class FlowSolverConfig:
                             for key, value in (raw.get("class_kv_bytes") or {}).items()},
             default_kv_bytes=float(raw.get("default_kv_bytes", 0.0)),
             queue_weight=float(raw.get("queue_weight", 0.0)),
+            use_cache_capacity=bool(raw.get("use_cache_capacity", True)),
+            network_weight=float(raw.get("network_weight", 1.0)),
         )
 
 
@@ -89,10 +93,12 @@ class CapacityAwareFlowSolver:
         self.diagnostics = {}
         self._fallback = None
         self._runtime_queue = {}
+        self._runtime_link_capacity = {}
 
     def set_telemetry(self, telemetry):
         """Install best-effort exporter queue samples for the next solve."""
         self._runtime_queue = {}
+        self._runtime_link_capacity = {}
         for worker_id, metrics in (telemetry or {}).get("workers", {}).items():
             try:
                 instance_id = int(worker_id)
@@ -102,6 +108,19 @@ class CapacityAwareFlowSolver:
                 if name in metrics:
                     self._runtime_queue[instance_id] = max(0.0, float(metrics[name]))
                     break
+        for link_id, metrics in (telemetry or {}).get("links", {}).items():
+            for name in ("capacity_bytes_per_s", "bandwidth_bytes_per_s",
+                         "link_bandwidth_bytes_per_s"):
+                if name in metrics:
+                    self._runtime_link_capacity[str(link_id)] = max(0.0, float(metrics[name]))
+                    break
+
+    def _link_capacity(self, link):
+        return self._runtime_link_capacity.get(link.link_id,
+                                               link.capacity_bytes_per_s or link.capacity)
+
+    def _link_uses_bytes(self, link):
+        return link.capacity_bytes_per_s > 0 or link.link_id in self._runtime_link_capacity
 
     def solve(self, rows, prefill, decode, work_overrides=None):
         if self.config.solver == "lp":
@@ -111,8 +130,7 @@ class CapacityAwareFlowSolver:
                 self._fallback = "ortools unavailable"
         return self._solve_greedy(rows, prefill, decode, work_overrides)
 
-    @staticmethod
-    def _aggregate_rows(rows, prefill, work_overrides=None):
+    def _aggregate_rows(self, rows, prefill, work_overrides=None):
         """Aggregate demand once while retaining cache state per P and class."""
         by_id = {int(scheduler.instance_id): scheduler for scheduler in prefill}
         grouped = {}
@@ -136,6 +154,8 @@ class CapacityAwareFlowSolver:
                 requested = max(1.0, entry["requested_tokens"].get(p_id, 0.0))
                 hit = min(0.95, entry["hit_tokens_ewma"].get(p_id, 0.0) / requested)
                 value = max(0.05, 1.0 - hit)
+                if not self.config.use_cache_capacity:
+                    value = 1.0
                 if work_overrides and (p_id, class_id) in work_overrides:
                     value = max(0.05, min(1.0, float(work_overrides[p_id, class_id])))
                 work[p_id, class_id] = value
@@ -158,7 +178,7 @@ class CapacityAwareFlowSolver:
         max_num_seqs = getattr(decode, "max_num_seqs", 1)
         queue = self.config.queue_weight * ((waiting * 4 + running) /
                                             max(1, max_num_seqs))
-        return distance + rtt + transfer + queue
+        return self.config.network_weight * (distance + rtt + transfer) + queue
 
     def _solve_greedy(self, rows, prefill, decode, work_overrides=None):
         self.backend = "greedy"
@@ -184,8 +204,8 @@ class CapacityAwareFlowSolver:
                                     if link.carries(p_sched.instance_id, d_sched.instance_id))
                     kv_bytes = self._class_kv_bytes(class_id, entry)
                     link_overflow = sum(max(
-                        0.0, link_load[link.link_id] + flow * (kv_bytes if link.capacity_bytes_per_s else 1.0) -
-                        (link.capacity_bytes_per_s if link.capacity_bytes_per_s else link.capacity))
+                        0.0, link_load[link.link_id] + flow * (kv_bytes if self._link_uses_bytes(link) else 1.0) -
+                        self._link_capacity(link))
                         for link in carried)
                     cost = ((p_load[p_sched.instance_id] + p_work) / p_capacity +
                             (d_load[d_sched.instance_id] + flow) / d_capacity + link_cost +
@@ -200,13 +220,15 @@ class CapacityAwareFlowSolver:
             d_load[d_sched.instance_id] += flow
             for link in carried:
                 link_load[link.link_id] += flow * (self._class_kv_bytes(class_id, entry)
-                                                   if link.capacity_bytes_per_s else 1.0)
+                                                   if self._link_uses_bytes(link) else 1.0)
             assignments.append(FlowAssignment(class_id, p_sched.instance_id,
                                               d_sched.instance_id, flow, cost,
                                               tuple(link.link_id for link in carried),
                                               p_overflow, d_overflow, link_overflow))
         self.diagnostics = {"backend": self.backend, "overflow_penalty": self.config.overflow_penalty,
-                            "objective": sum(item.flow * item.cost for item in assignments)}
+                            "objective": sum(item.flow * item.cost for item in assignments),
+                            "use_cache_capacity": self.config.use_cache_capacity,
+                            "network_weight": self.config.network_weight}
         if self._fallback is not None:
             self.diagnostics["fallback"] = self._fallback
             self._fallback = None
@@ -257,10 +279,10 @@ class CapacityAwareFlowSolver:
                                                       f"overflow_link_{link.link_id}")
             solver.Add(sum(flows[class_id, p.instance_id, d.instance_id] *
                            (self._class_kv_bytes(class_id, grouped[class_id])
-                            if link.capacity_bytes_per_s else 1.0)
+                            if self._link_uses_bytes(link) else 1.0)
                            for class_id in work for p in prefill for d in decode
                            if link.carries(p.instance_id, d.instance_id)) <=
-                       (link.capacity_bytes_per_s if link.capacity_bytes_per_s else link.capacity) +
+                       self._link_capacity(link) +
                        link_slack[link.link_id])
         objective = solver.Objective()
         for (class_id, p_id, d_id), variable in flows.items():
@@ -287,5 +309,7 @@ class CapacityAwareFlowSolver:
             "prefill_overflow": {key: value.solution_value() for key, value in p_slack.items()},
             "decode_overflow": {key: value.solution_value() for key, value in d_slack.items()},
             "link_overflow": {key: value.solution_value() for key, value in link_slack.items()},
+            "use_cache_capacity": self.config.use_cache_capacity,
+            "network_weight": self.config.network_weight,
         }
         return assignments

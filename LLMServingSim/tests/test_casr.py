@@ -6,6 +6,7 @@ from serving.casr.prefix_profiler import PrefixProfiler
 from serving.casr.resources import ResourceOrchestrator
 from serving.casr.evaluator import StructuralEvaluator
 from serving.casr.state import parse_prometheus_text
+from serving.casr.executor import ReconfigExecutor
 
 
 class _Scheduler:
@@ -89,6 +90,7 @@ class CasrTests(unittest.TestCase):
         })
         first = _ResourceScheduler(0)
         second = _ResourceScheduler(1)
+        first.pd_type = second.pd_type = "prefill"
         events = pool.bootstrap([first, second], 0)
         self.assertEqual(first.admission_state, "ACTIVE")
         self.assertEqual(second.admission_state, "INACTIVE")
@@ -100,6 +102,28 @@ class CasrTests(unittest.TestCase):
         self.assertEqual(second.admission_state, "WARMING")
         self.assertEqual(pool.snapshot()["allocations"]["1"]["gpu_ids"], [0])
         self.assertTrue(any(e.action == "resource_release" for e in events))
+
+    def test_lifecycle_completes_reused_worker_warmup(self):
+        from serving.casr.lifecycle import PrefillLifecycle
+
+        lifecycle = PrefillLifecycle({
+            "min_active_prefill": 1,
+            "warmup_ms": 10,
+            "resources": {
+                "startup_ms": 10,
+                "reclaim_ms": 5,
+                "nodes": {"0": {"gpu_count": 2, "gpu_mem_gb": [24, 24]}},
+            },
+        })
+        first = _ResourceScheduler(0)
+        second = _ResourceScheduler(1)
+        first.pd_type = second.pd_type = "prefill"
+        first.max_num_seqs = second.max_num_seqs = 8
+        lifecycle.update(0, [], [first, second])
+        demand = [{"arrival_rate_ewma": 100.0}]
+        lifecycle.update(4_000_000, demand, [first, second])
+        lifecycle.update(15_000_000, demand, [first, second])
+        self.assertEqual(second.admission_state, "ACTIVE")
 
     def test_resource_pool_matches_per_gpu_memory(self):
         pool = ResourceOrchestrator({
@@ -174,6 +198,61 @@ class CasrTests(unittest.TestCase):
         solver.set_telemetry({"workers": {"2": {"queue": 8}}})
         cost = solver._pair_cost(_Scheduler(0, 0), decode, "c", {})
         self.assertGreaterEqual(cost, 8.0 / decode.max_num_seqs)
+
+    def test_external_link_telemetry_overrides_static_capacity(self):
+        config = FlowSolverConfig.from_dict({
+            "shared_links": [{"id": "wan", "capacity": 100,
+                              "capacity_bytes_per_s": 1000}],
+        })
+        solver = CapacityAwareFlowSolver(config)
+        solver.set_telemetry({"links": {"wan": {"bandwidth_bytes_per_s": 250}}})
+        self.assertEqual(solver._link_capacity(config.shared_links[0]), 250.0)
+        self.assertTrue(solver._link_uses_bytes(config.shared_links[0]))
+
+    def test_cache_capacity_ablation_forces_full_prefill_work(self):
+        rows = [{"class_id": "hot", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 1.0, "hit_tokens_ewma": 95,
+                 "requested_tokens": 100}]
+        scheduler = _Scheduler(0, 0)
+        cache_solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({}))
+        no_cache_solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "use_cache_capacity": False,
+        }))
+        _, cache_work = cache_solver._aggregate_rows(rows, [scheduler])
+        _, no_cache_work = no_cache_solver._aggregate_rows(rows, [scheduler])
+        self.assertAlmostEqual(cache_work[0, "hot"], 0.05)
+        self.assertEqual(no_cache_work[0, "hot"], 1.0)
+
+    def test_structural_gain_can_be_disabled(self):
+        active = _Scheduler(0, 0)
+        candidate = _Scheduler(1, 1)
+        active.admission_state = "ACTIVE"
+        candidate.admission_state = "INACTIVE"
+        rows = [{"class_id": "hot", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 4.0, "request_count": 4,
+                 "hit_tokens_ewma": 0.0, "requested_tokens": 64}]
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "prefill_capacity": {"0": 1, "1": 4},
+        }))
+        decision = StructuralEvaluator({"enabled": False}).evaluate(
+            {"prefix_states": rows}, [active], [active, candidate],
+            [_Scheduler(2, 2)], solver, 0)
+        self.assertEqual(decision.action, "keep")
+        self.assertIn("disabled", decision.reason)
+
+    def test_reconfig_executor_formats_scale_command_without_shell(self):
+        decision = type("Decision", (), {
+            "action": "+P", "mode": "warm", "wanted_ids": (0, 1),
+        })()
+        executor = ReconfigExecutor({
+            "backend": "command",
+            "scale_out": ["workerctl", "add", "{instance_id}", "{mode}"],
+        })
+        result = executor.apply(decision, [0])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].instance_id, 1)
+        self.assertFalse(result[0].ok)
+        self.assertEqual(executor.apply(decision, [0], blocked_ids=[1]), ())
 
 
 if __name__ == "__main__":

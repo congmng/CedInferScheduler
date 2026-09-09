@@ -42,6 +42,8 @@ class StructuralEvaluator:
         self.warm_cost = float(config.get("warm_cost", 0.0))
         self.warm_top_k = max(0, int(config.get("warm_top_k", 8)))
         self.warm_budget_bytes = max(0.0, float(config.get("warm_budget_bytes", 0.0)))
+        self.enabled = bool(config.get("enabled", True))
+        self.enable_warm = bool(config.get("enable_warm_counterfactual", True))
 
     @staticmethod
     def _hit_work(rows, class_id):
@@ -83,6 +85,12 @@ class StructuralEvaluator:
             return StructuralDecision("keep", "none", 0.0, 0.0, 0.0,
                                       tuple(s.instance_id for s in active_prefill),
                                       "insufficient active workers or observed classes")
+        if not self.enabled:
+            solver.solve(rows, active_prefill, decode)
+            objective = float(solver.diagnostics.get("objective", 0.0))
+            return StructuralDecision("keep", "none", 0.0, objective, objective,
+                                      tuple(s.instance_id for s in active_prefill),
+                                      "structural gain evaluation disabled")
         if last_action_ns >= 0 and current_ns - last_action_ns < self.dwell_ns:
             solver.solve(rows, active_prefill, decode)
             objective = float(solver.diagnostics.get("objective", 0.0))
@@ -100,12 +108,15 @@ class StructuralEvaluator:
                     s.admission_state == "INACTIVE"]
         for candidate in sorted(inactive, key=lambda item: item.instance_id)[:1]:
             candidate_prefill = list(active_prefill) + [candidate]
-            for mode, default_cost, overrides in (
-                    ("cold", self.startup_cost, {(candidate.instance_id, row["class_id"]): 1.0
-                                                   for row in rows}),
-                    ("warm", self.startup_cost + self.warm_cost,
-                     {(candidate.instance_id, row["class_id"]): self._hit_work(rows, row["class_id"])
-                      for row in rows})):
+            modes = [("cold", self.startup_cost,
+                      {(candidate.instance_id, row["class_id"]): 1.0 for row in rows})]
+            if self.enable_warm and warm_classes:
+                modes.append(("warm", self.startup_cost + self.warm_cost,
+                              {(candidate.instance_id, row["class_id"]):
+                               (self._hit_work(rows, row["class_id"])
+                                if row["class_id"] in warm_classes else 1.0)
+                               for row in rows}))
+            for mode, default_cost, overrides in modes:
                 solver.solve(rows, candidate_prefill, decode, overrides)
                 candidate_objective = float(solver.diagnostics.get("objective", 0.0))
                 gain = (self.window_ns / 1_000_000_000.0) * (base_objective - candidate_objective)

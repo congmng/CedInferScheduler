@@ -14,6 +14,7 @@ from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
 from .evaluator import StructuralEvaluator
 from .state import PrometheusStateCollector
+from .executor import ReconfigExecutor
 
 
 class CASRController:
@@ -34,6 +35,7 @@ class CASRController:
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
         self.evaluator = StructuralEvaluator((policy or {}).get("structural", {}))
         self.state_collector = PrometheusStateCollector((policy or {}).get("telemetry", {}))
+        self.executor = ReconfigExecutor((policy or {}).get("executor", {}))
         self.last_action_ns = -1
         self.last_flows = ()
         self.last_lifecycle = ()
@@ -43,11 +45,13 @@ class CASRController:
         self.last_structural_decision = {}
         self.pending_warm_classes = {}
         self.last_telemetry = {}
+        self.last_execution = ()
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
 
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
+        self.last_execution = ()
         snapshot = profiler.snapshot(current_ns, schedulers)
         if self.state_collector.enabled:
             self.last_telemetry = self.state_collector.collect()
@@ -79,7 +83,41 @@ class CASRController:
                 current_ns, snapshot["prefix_states"], schedulers,
                 wanted_override=set(decision.wanted_ids))
             self.last_resource_snapshot = self.lifecycle.resources.snapshot()
+            blocked_ids = {event["instance_id"] for event in self.last_lifecycle
+                           if event.get("action") == "resource_reject"}
+            self.last_execution = tuple(item.as_dict() for item in self.executor.apply(
+                decision, [item.instance_id for item in prefill], blocked_ids))
+            self.last_lifecycle = tuple(self.last_lifecycle) + tuple(
+                {"action": "executor_" + item["action"],
+                 "instance_id": item["instance_id"], "ok": item["ok"],
+                 "detail": item["detail"]} for item in self.last_execution)
             prefill = [s for s in all_prefill if s.accepts_new_requests]
+
+        by_id = {scheduler.instance_id: scheduler for scheduler in prefill}
+        warmups = []
+        # A structural warm decision is made before the new worker is ready.
+        # Apply its selected prefixes once the worker becomes ACTIVE, even if
+        # the current flow solver sends no class to it during this tick.
+        for instance_id, classes in list(self.pending_warm_classes.items()):
+            scheduler = by_id.get(instance_id)
+            if scheduler is None:
+                continue
+            for class_id in tuple(classes):
+                candidate = profiler.warm_candidate(class_id)
+                if candidate is None:
+                    classes.discard(class_id)
+                    continue
+                warmed_bytes = scheduler.warm_prefix(*candidate)
+                requested_bytes = (int(candidate[0]) // max(1, scheduler.kv.block_size) *
+                                   scheduler.kv.npu_pool.bytes_per_block)
+                warmups.append({"class_id": class_id,
+                                "prefill_id": instance_id,
+                                "bytes": warmed_bytes,
+                                "requested_bytes": requested_bytes,
+                                "resident": warmed_bytes < requested_bytes})
+                classes.discard(class_id)
+            if not classes:
+                self.pending_warm_classes.pop(instance_id, None)
 
         p_weights = {}
         d_weights = {}
@@ -90,8 +128,6 @@ class CASRController:
         self.last_solver_diagnostics = dict(self.solver.diagnostics)
         self.last_solver_diagnostics["policy"] = self.policy_spec
         self.last_solver_diagnostics["structural"] = self.last_structural_decision
-        by_id = {scheduler.instance_id: scheduler for scheduler in prefill}
-        warmups = []
         class_demand = {}
         p_class_flow = {}
         for flow in self.last_flows:
@@ -105,18 +141,6 @@ class CASRController:
             d_weights.setdefault(key, {})[flow.decode_id] = (
                 d_weights.get(key, {}).get(flow.decode_id, 0.0) +
                 flow.flow / p_class_flow[key])
-            candidate = profiler.warm_candidate(flow.class_id)
-            pending = self.pending_warm_classes.get(flow.prefill_id, set())
-            if candidate is not None and flow.prefill_id in by_id and flow.class_id in pending:
-                warmed_bytes = by_id[flow.prefill_id].warm_prefix(*candidate)
-                if warmed_bytes:
-                    warmups.append({"class_id": flow.class_id,
-                                    "prefill_id": flow.prefill_id,
-                                    "bytes": warmed_bytes})
-                pending.discard(flow.class_id)
-        for instance_id, classes in list(self.pending_warm_classes.items()):
-            if not classes:
-                self.pending_warm_classes.pop(instance_id, None)
         for (prefill_id, class_id), weights in d_weights.items():
             fallbacks[prefill_id, class_id] = tuple(s.instance_id for s in decode
                                                     if s.instance_id not in weights)

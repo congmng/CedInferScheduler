@@ -305,6 +305,7 @@ CASR 对同一位置生成两个候选：`+P3@Edge(cold)` 和 `+P3@Edge(warm)`�
 - 可选 `PrometheusStateCollector` 读取 Prometheus-compatible exporter；worker 的 `queue`、`queue_depth` 或 `vllm_num_requests_waiting` 会进入下一轮 pair cost，并原样写入 telemetry snapshot。
 - `StructuralEvaluator` 对 `keep`、`+P(cold)`、`+P(warm)` 和 `-P` 做单步反事实重求解，使用窗口收益、绝对/相对阈值和 dwell time 选择动作。
 - warm 候选按 prefix 热度排序，并受 `warm_top_k` 与 `warm_budget_bytes` 限制；只有被选中的 warm action 才会在新 P ready 后执行预热。
+- `ReconfigExecutor` 提供可选 command backend，可将结构动作转发给 Ray/Kubernetes worker manager；默认 noop，执行结果写入 `execution`。
 - `PrefillLifecycle` 和 `ResourceOrchestrator` 执行单步目标集合，保留 WARMING worker，支持 GPU allocation、drain、reclaim 和资源拒绝。
 - 状态快照新增 `structural` 字段，记录动作、模式、基准 objective、候选 objective、收益和目标 worker。
 
@@ -318,6 +319,8 @@ tests/run_casr_structural_experiment.sh /tmp/casr-structural
 该实验使用 `configs/cluster/casr_structural_mismatch.json`：生命周期按高容量配置认为只需一个 P，
 但 flow solver 对当前 P 施加较小容量，候选 P 可修复 overflow。当前运行在约 108 ms 处选择一次
 `+P(warm)`，objective 从 `1.012` 降至 `0.264`，窗口收益为 `0.748`，之后没有重复结构动作。
+warm 记录为 `8 MiB requested / 0 new`，表示该候选 worker 已有目标 prefix 驻留；runner 会分别记录
+requested bytes 和实际新增 bytes，避免把“无需重复拷贝”误报为 warmup 未执行。
 
 真实 exporter 接入可在 `casr` 配置中增加：
 
@@ -331,10 +334,43 @@ tests/run_casr_structural_experiment.sh /tmp/casr-structural
 }
 ```
 
-端点失败不会中断仿真，错误会记录在 `telemetry.errors`；当前实现已完成采集和 worker queue 映射，
-link exporter 的动态带宽映射仍需按实际指标名称配置到 pair/link cost。
+端点失败不会中断仿真，错误会记录在 `telemetry.errors`；当前实现已完成采集、worker queue 映射和
+link bandwidth 覆盖静态共享链路容量，实际 exporter 的指标名称仍需按部署配置适配。
+
+外部 worker manager 可配置为：
+
+```json
+"executor": {
+  "backend": "command",
+  "timeout_ms": 1000,
+  "scale_out": ["workerctl", "scale-out", "{instance_id}", "--mode", "{mode}"],
+  "scale_in": ["workerctl", "drain", "{instance_id}"]
+}
+```
+
+命令失败会记录 `ok: false`，不会绕过本地生命周期状态机，也不会让控制 tick 抛出异常。
 
 现有低/高/低 baseline 与消融仍由 `tests/run_casr_ablation.sh` 驱动；7 项 CASR 单元测试和完整消融脚本均已通过。
+算法开关矩阵可用下面的命令复现：
+
+```bash
+python tests/run_casr_algorithm_ablation.py --result-dir /tmp/casr-algorithm-ablation
+```
+
+生成消融柱状图和控制时间线：
+
+```bash
+python tests/plot_casr_results.py \
+  --summary /tmp/casr-algorithm-ablation/summary.json \
+  --state /tmp/casr-algorithm-ablation/ours.jsonl \
+  --output-dir /tmp/casr-algorithm-ablation/plots
+```
+
+该矩阵固定低/高/低 trace，比较 `static`、完整 CASR、`NoCacheCapacity`、`NoWarmCounterfactual`、
+`NoStructuralGain`、`NoNetwork` 和 `NoHysteresis`。当前结果中完整 CASR 平均 latency 为 `785.159 ms`、
+高峰 P95 为 `804.702 ms`；`NoNetwork` 分别为 `839.796 ms` 和 `1126.634 ms`；`NoHysteresis`
+触发 4 次 `+P`，完整 CASR 没有重复结构动作。其余消融与完整 CASR 相同，是因为该 trace 的 P/D 容量较宽裕，
+后续需要用容量临界和热点迁移场景放大 cache capacity、warm 和 Structural Gain 的差异。
 热点漂移实验可用 `tests/run_casr_hotspot_drift.sh` 运行：在恒定 30 req/s 下，前半段
 `hotspot-0` 为主（46/60），后半段 `hotspot-1` 为主（40/60）；控制器首尾 objective
 分别为 `0.002` 和 `0.0126`，首尾活跃 Prefill 从 1 个变为 2 个。该实验验证了 Prefix class
