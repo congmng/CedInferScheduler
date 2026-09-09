@@ -319,6 +319,11 @@ tests/run_casr_structural_experiment.sh /tmp/casr-structural
 `+P(warm)`，objective 从 `1.012` 降至 `0.264`，窗口收益为 `0.748`，之后没有重复结构动作。
 
 现有低/高/低 baseline 与消融仍由 `tests/run_casr_ablation.sh` 驱动；7 项 CASR 单元测试和完整消融脚本均已通过。
+热点漂移实验可用 `tests/run_casr_hotspot_drift.sh` 运行：在恒定 30 req/s 下，前半段
+`hotspot-0` 为主（46/60），后半段 `hotspot-1` 为主（40/60）；控制器首尾 objective
+分别为 `0.002` 和 `0.0126`，首尾活跃 Prefill 从 1 个变为 2 个。该实验验证了 Prefix class
+状态随热点变化而更新，但在当前容量配置下没有触发额外结构动作，因此还不能作为 warm/cold
+收益的充分证据。
 需要注意，这些实验仍是模拟器内的逻辑资源和本地 KV warmup，不是实际 vLLM、LMCache、Prometheus 或 Kubernetes/Ray
 部署。下一阶段应把 KV 字节/BW/RTT/queue 配置替换为真实遥测，补充真实 warm I/O 计时、热点漂移和
 NoNetwork/NoHysteresis 对照，再将结果用于真实系统验证。

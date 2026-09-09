@@ -88,7 +88,7 @@ class PrefixProfiler:
         self._representatives: Dict[str, Tuple[int, list[int]]] = {}
 
     def assign(self, model_id: str, input_tokens: int, output_tokens: int,
-               token_ids: Optional[Iterable[int]]) -> Tuple[str, str]:
+               token_ids: Optional[Iterable[int]], kv_bytes_per_request: float = 0.0) -> Tuple[str, str]:
         prefix_id = derive_prefix_id(model_id, token_ids, self.block_size,
                                      self.max_prefix_tokens)
         class_id = derive_class_id(model_id, prefix_id, input_tokens, output_tokens)
@@ -98,7 +98,10 @@ class PrefixProfiler:
             "prefix_id": prefix_id,
             "input_bucket": _bucket(input_tokens),
             "output_bucket": _bucket(output_tokens),
+            "kv_bytes_per_request": max(0.0, float(kv_bytes_per_request)),
         })
+        self._classes[class_id]["kv_bytes_per_request"] = max(
+            self._classes[class_id]["kv_bytes_per_request"], float(kv_bytes_per_request))
         if token_ids:
             self._representatives.setdefault(class_id, (int(input_tokens), list(token_ids)))
         return class_id, prefix_id

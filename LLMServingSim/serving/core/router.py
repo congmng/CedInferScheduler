@@ -167,6 +167,7 @@ class Router:
             req_data['input_toks'],
             req_data['output_toks'] - req_data['input_toks'],
             req_data.get('input_hash_ids', []),
+            req_data.get('kv_bytes_per_request', 0.0),
         )
         req_data['class_id'] = class_id
         req_data['prefix_id'] = prefix_id
@@ -224,6 +225,7 @@ class Router:
             'model_id': row.get('model_id', self.prefill_schedulers[0].model),
             'input_hash_ids': row.get('input_tok_ids', []),
             'output_hash_ids': row.get('output_tok_ids', []),
+            'kv_bytes_per_request': row.get('kv_bytes_per_request', 0.0),
         }
         self._pending_requests.append(self._decorate_req_data(req_data))
 
@@ -255,7 +257,8 @@ class Router:
             'sub_request_index': 0,
             'model_id': first.get('model_id', self.prefill_schedulers[0].model),
             'input_hash_ids': first.get('input_tok_ids', []),
-            'output_hash_ids': first.get('output_tok_ids', []),
+                'output_hash_ids': first.get('output_tok_ids', []),
+                'kv_bytes_per_request': first.get('kv_bytes_per_request', 0.0),
         }
         self._pending_requests.append(self._decorate_req_data(req_data))
         self._request_to_session[base_id] = (session_id, 0)
@@ -356,6 +359,7 @@ class Router:
                 'model_id': next_sub.get('model_id', self.prefill_schedulers[0].model),
                 'input_hash_ids': next_sub.get('input_tok_ids', []),
                 'output_hash_ids': next_sub.get('output_tok_ids', []),
+                'kv_bytes_per_request': next_sub.get('kv_bytes_per_request', 0.0),
             }
             # Insert in sorted position after _pending_idx
             self._insert_pending_sorted(self._decorate_req_data(req_data))
