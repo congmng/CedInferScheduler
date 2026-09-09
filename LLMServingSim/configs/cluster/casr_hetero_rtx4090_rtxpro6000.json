@@ -8,7 +8,7 @@
       "min_active_prefill": 1,
       "max_active_prefill": 2,
       "warmup_ms": 100,
-      "prefill_capacity": {"0": 100, "1": 100}
+      "prefill_capacity": {"0": 20, "1": 20}
     },
     "resources": {
       "startup_ms": 250,

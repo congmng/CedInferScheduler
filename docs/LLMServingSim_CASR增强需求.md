@@ -372,6 +372,20 @@ cluster JSON 可选增加 `casr` 段。容量单位是控制窗口中的 flow �
 
 资源快照记录每个 worker 的 `gpu_ids`、显存占用、节点剩余 GPU/显存、pending reclaim 和 acquire/release/reject 事件。当前实现是模拟器内置的确定性本地编排后端，真实进程创建仍属于部署层，不会在静态 ASTRA-Sim 拓扑中伪造动态 CUDA worker。
 
+### 10.2 三阶段弹性实验
+
+已增加 `workloads/casr_elasticity_low_high_low.jsonl` 和
+`tests/run_casr_elasticity_comparison.sh`。实验固定模型和 prefix 复用，
+只改变到达率：前 1 秒为 5 req/s，中间 2 秒为 50 req/s，最后 1 秒恢复
+为 5 req/s。三组分别是固定 2P、固定 1P 和动态 CASR；动态组使用
+`startup_ms=250`、`reclaim_ms=50`，记录每个控制 tick 的 GPU allocation、
+WARMING、drain 和 release。
+
+当前运行结果：动态 CASR 在高峰期从 1P 扩展到 2P，高峰结束后回收一个
+Prefill GPU；相对于固定 2P，GPU-seconds 从约 20.29 降至 16.90，平均延迟
+从约 940.16 ms 降至 790.57 ms。启动成本为一次 250 ms，应在论文结果中
+单独报告，不能并入静态吞吐收益。
+
 ## 11. 精确 LP 后端
 
 `requirements-casr.txt` 提供可选 OR-Tools GLOP 后端。安装后，在 `casr` 段设置 `"solver": "lp"` 即可求解连续变量 `f[class, P, D]`：

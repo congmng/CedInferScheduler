@@ -117,6 +117,7 @@ schema is above, and the format reference is
 | --- | --- |
 | `example_trace.jsonl` | Small example trace for quick testing |
 | `casr_hetero_hot_cold.jsonl` | Zipf hot/cold CASR trace used by `tests/run_casr_hetero_comparison.sh` |
+| `casr_elasticity_low_high_low.jsonl` | Deterministic 1s low / 2s high / 1s low trace for fixed-vs-elastic experiments |
 
 ## Generating workloads
 
@@ -159,6 +160,23 @@ python -m workloads.generators casr \
     --edge-fraction 0.5 --link-degrade-at-sec 30 \
     --decode-tier-mode skewed --slow-fraction 0.3
 ```
+
+For resource elasticity experiments, generate a controlled three-phase trace:
+
+```bash
+python -m workloads.generators casr \
+    --output workloads/casr_elasticity_low_high_low.jsonl \
+    --num-reqs 111 --seed 42 --hotspot-mode stable --reuse-rate 1.0 \
+    --prefix-len 64 --input-len 64 --output-len 64 \
+    --phase-rates 5,50,5 --phase-durations-sec 1,2,1
+```
+
+`--phase-rates` changes the deterministic inter-arrival interval at each
+boundary. The phase workload used by
+`tests/run_casr_elasticity_comparison.sh` has 11 low-load requests and 100
+high-load requests. The script compares fixed 2P, fixed 1P, and resource-aware
+dynamic CASR, reporting per-phase latency plus GPU-seconds, peak/average GPU
+usage, startup cost, and resource release/rejection counts.
 
 `--use-vllm` drives a real vLLM `LLM` engine in offline batched mode to
 fill `output_tok_ids` with the model's natural responses (free

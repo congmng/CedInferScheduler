@@ -108,6 +108,12 @@ def register_args(p: argparse.ArgumentParser) -> None:
                    dest="burst_poisson",
                    help="(--arrival-model burst) keep Poisson spacing inside "
                         "each burst instead of spacing them by --sps.")
+    p.add_argument("--phase-rates", default=None, dest="phase_rates",
+                   help="Optional comma-separated rates for phases, e.g. 5,50,5.")
+    p.add_argument("--phase-durations-sec", default=None,
+                   dest="phase_durations_sec",
+                   help="Optional comma-separated phase durations in seconds. "
+                        "Requires --phase-rates.")
 
     # ---- Experiment labels ------------------------------------------------
     p.add_argument("--edge-fraction", type=float, default=0.5,
@@ -143,6 +149,40 @@ def _bounded(value: float, lower: float, upper: float, name: str) -> float:
     if not lower <= value <= upper:
         raise ValueError(f"{name} must be between {lower} and {upper}, got {value}")
     return value
+
+
+def _phase_schedule(args):
+    rates_raw = getattr(args, "phase_rates", None)
+    durations_raw = getattr(args, "phase_durations_sec", None)
+    if rates_raw is None and durations_raw is None:
+        return None
+    if not rates_raw or not durations_raw:
+        raise ValueError("--phase-rates and --phase-durations-sec must be provided together")
+    try:
+        rates = [float(value.strip()) for value in rates_raw.split(",")]
+        durations = [float(value.strip()) for value in durations_raw.split(",")]
+    except ValueError as exc:
+        raise ValueError("phase rates and durations must be numeric comma-separated values") from exc
+    if len(rates) != len(durations) or len(rates) < 2:
+        raise ValueError("phase rates and durations must have the same length (at least 2 phases)")
+    if any(rate <= 0 for rate in rates) or any(duration <= 0 for duration in durations):
+        raise ValueError("phase rates and durations must be positive")
+    boundaries = []
+    elapsed = 0.0
+    for duration in durations[:-1]:
+        elapsed += duration * 1_000_000_000
+        boundaries.append(int(elapsed))
+    return rates, boundaries
+
+
+def _phase_index(arrival_ns: int, schedule) -> int:
+    if schedule is None:
+        return 0
+    _, boundaries = schedule
+    for index, boundary in enumerate(boundaries):
+        if arrival_ns < boundary:
+            return index
+    return len(boundaries)
 
 
 def _make_prefix_tokens(index: int, length: int, vocab_size: int, seed: int) -> list[int]:
@@ -202,6 +242,15 @@ def _next_arrival_ns(previous_ns: int | None, index: int,
     first_ns = int(args.first_arrival_sec * 1_000_000_000)
     if previous_ns is None:
         return first_ns
+
+    schedule = _phase_schedule(args)
+    if schedule is not None:
+        rates, boundaries = schedule
+        phase = _phase_index(previous_ns, schedule)
+        candidate = previous_ns + int(1_000_000_000.0 / rates[phase])
+        if phase < len(boundaries) and candidate >= boundaries[phase]:
+            return boundaries[phase]
+        return candidate
 
     if args.arrival_model == "burst":
         burst_index, offset = divmod(index, args.burst_size)
@@ -270,6 +319,7 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("--drift-from is outside --num-prefixes")
     if not 0 <= args.drift_to < args.num_prefixes:
         raise ValueError("--drift-to is outside --num-prefixes")
+    phase_schedule = _phase_schedule(args)
 
     rng = random.Random(args.seed)
     out_path = Path(args.output)
@@ -309,6 +359,8 @@ def run(args: argparse.Namespace) -> int:
                 "link_state": link_state,
                 "decode_tier": decode_tier,
                 "hotspot_id": None if hotspot is None else f"hotspot-{hotspot}",
+                "phase": ("high" if _phase_index(arrival_ns, phase_schedule) == 1
+                           else "low"),
             }
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -326,6 +378,7 @@ def run(args: argparse.Namespace) -> int:
                     "region": region,
                     "link_state": link_state,
                     "decode_tier": decode_tier,
+                    "phase": row["phase"],
                 })
 
     if args.write_manifest:
@@ -338,6 +391,8 @@ def run(args: argparse.Namespace) -> int:
             "reuse_rate": args.reuse_rate,
             "arrival_model": args.arrival_model,
             "sps": args.sps,
+            "phase_rates": (None if phase_schedule is None else phase_schedule[0]),
+            "phase_boundaries_ns": (None if phase_schedule is None else phase_schedule[1]),
             "edge_fraction": args.edge_fraction,
             "prefixes": [
                 {

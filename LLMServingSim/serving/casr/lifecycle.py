@@ -29,7 +29,7 @@ class PrefillLifecycle:
         events = [event.as_dict() for event in self.resources.bootstrap(all_schedulers, current_ns)] if not self._bootstrapped else []
         self._bootstrapped = True
         startup_ns = max(self.warmup_ns, self.resources.startup_ns)
-        demand = sum(max(float(row["arrival_rate_ewma"]), 1.0) for row in rows)
+        demand = sum(max(float(row["arrival_rate_ewma"]), 0.0) for row in rows)
         average_capacity = max(1.0, sum(max(1.0, self.capacity.get(s.instance_id,
                                                                     float(s.max_num_seqs))) for s in schedulers) /
                                len(schedulers))

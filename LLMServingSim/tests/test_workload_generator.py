@@ -33,6 +33,8 @@ def _namespace(**overrides):
         burst_size=4,
         burst_gap_sec=10.0,
         burst_poisson=False,
+        phase_rates=None,
+        phase_durations_sec=None,
         edge_fraction=0.5,
         link_degrade_at_sec=-1.0,
         decode_tier_mode="homogeneous",
@@ -106,6 +108,26 @@ class WorkloadGeneratorTests(unittest.TestCase):
         for index in range(20):
             self.assertIsNone(_hot_choice(index, 20, args_zero, rng_zero))
             self.assertEqual(_hot_choice(index, 20, args_one, rng_one), 0)
+
+    def test_phase_schedule_emits_low_high_low_arrivals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = _namespace(
+                output=str(Path(tmp) / "phases.jsonl"),
+                num_reqs=7,
+                phase_rates="2,4,2",
+                phase_durations_sec="1,1,1",
+                arrival_model="uniform",
+            )
+            self.assertEqual(run(args), 0)
+            with Path(args.output).open() as handle:
+                rows = [json.loads(line) for line in handle]
+            self.assertEqual([row["phase"] for row in rows[:2]], ["low"] * 2)
+            self.assertIn("high", [row["phase"] for row in rows])
+            self.assertEqual(rows[-1]["phase"], "low")
+            self.assertEqual(rows[0]["arrival_time_ns"], 0)
+            self.assertEqual(rows[1]["arrival_time_ns"], 500_000_000)
+            self.assertEqual(rows[2]["arrival_time_ns"], 1_000_000_000)
+            self.assertEqual(rows[3]["arrival_time_ns"], 1_250_000_000)
 
 
 if __name__ == "__main__":

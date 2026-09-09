@@ -77,10 +77,12 @@ class PrefixProfiler:
     """Collect per-P, per-class observations and emit control-tick snapshots."""
 
     def __init__(self, block_size: int, ewma_alpha: float = 0.2,
-                 max_prefix_tokens: int = 512):
+                 max_prefix_tokens: int = 512,
+                 arrival_half_life_ms: float = 1000.0):
         self.block_size = int(block_size)
         self.ewma_alpha = float(ewma_alpha)
         self.max_prefix_tokens = int(max_prefix_tokens)
+        self.arrival_half_life_ns = max(1, int(float(arrival_half_life_ms) * 1_000_000))
         self._states: Dict[Tuple[int, str], PrefixState] = defaultdict(PrefixState)
         self._classes: Dict[str, Dict[str, object]] = {}
         self._representatives: Dict[str, Tuple[int, list[int]]] = {}
@@ -115,6 +117,10 @@ class PrefixProfiler:
             int(at_ns), npu_hit_tokens, storage_hit_tokens, self.ewma_alpha)
 
     def snapshot(self, at_ns: int, schedulers=()) -> Dict[str, object]:
+        for state in self._states.values():
+            if state.last_arrival_ns >= 0 and at_ns > state.last_arrival_ns:
+                elapsed = at_ns - state.last_arrival_ns
+                state.arrival_rate_ewma *= 0.5 ** (elapsed / self.arrival_half_life_ns)
         cache_by_instance = {}
         for scheduler in schedulers:
             pool = scheduler.memory.npu_pool
