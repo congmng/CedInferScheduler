@@ -105,7 +105,12 @@ def collect(roots, current_revision_only):
                 continue
             real, sim = entry["real"], entry["sim"]
             rows.append({
-                "bundle": path.parent.name,
+                # A replay lives in ``<bundle>/replay*/``; label the row with
+                # the *bundle* so the de-dup below keeps one row per recording
+                # instead of one per historical replay directory.
+                "bundle": (path.parent.parent.name
+                           if path.parent.name.startswith(("replay", "alignment"))
+                           else path.parent.name),
                 "generated_at": meta.get("generated_at", ""),
                 "policy": policy,
                 "mode": ("pacing" if meta.get("replay_client_pacing")
