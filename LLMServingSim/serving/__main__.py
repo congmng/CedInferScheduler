@@ -91,8 +91,16 @@ def _build_pd_link(cluster, args):
             return float(intra_node[1])
         return wire_latency
 
-    return PdHandoffLink(bandwidth_gbps, latency_ns,
+    link = PdHandoffLink(bandwidth_gbps, latency_ns,
                          logger=get_logger("PdHandoffLink"))
+    # How many pushes a producer can have in flight at once.  The cluster
+    # sustains 1.63 req/s of 184 MB handoffs (0.30 GB/s, ~rho = 1 for one FIFO)
+    # with essentially no queueing -- measured 2026-09-16 with the recorded
+    # client pacing: p50 TTFT 718 ms against a 106 ms prefill and a ~600 ms
+    # push.  A single FIFO at that utilisation would queue for seconds, so the
+    # egress is modelled as ``kv_egress_streams`` parallel pushes.
+    link.streams = max(1, int(cluster.get("kv_egress_streams", 1) or 1))
+    return link
 
 
 def _pass_response(router, current, state_changed=False, extra_deadline=None):

@@ -41,13 +41,21 @@ class PdHandoffLink:
         self._bandwidth_gbps = bandwidth_gbps
         self._latency_ns = latency_ns
         self._logger = logger
-        # producer instance -> the time its egress becomes free again.
+        self.streams = 1
+        # producer instance -> the times its egress streams become free again.
         self._free_at = {}
         self._due = []          # heap of (due_ns, seq, payload)
         self._seq = 0
         self.handoffs = 0
         self.bytes_shipped = 0
         self.egress_wait_ns = 0.0
+
+    def _slots(self, producer_instance):
+        slots = self._free_at.get(producer_instance)
+        if slots is None:
+            slots = [0] * max(1, int(self.streams))
+            self._free_at[producer_instance] = slots
+        return slots
 
     # -- scheduling -------------------------------------------------------
 
@@ -61,9 +69,11 @@ class PdHandoffLink:
         bandwidth = max(1e-9, float(self._bandwidth_gbps(producer_node, consumer_node)))
         latency = max(0, int(self._latency_ns(producer_node, consumer_node)))
         transmit_ns = int(round(max(0, num_bytes) / bandwidth))
-        start_ns = max(int(now_ns), self._free_at.get(producer_instance, 0))
+        slots = self._slots(producer_instance)
+        index = min(range(len(slots)), key=lambda i: slots[i])
+        start_ns = max(int(now_ns), slots[index])
         due_ns = start_ns + transmit_ns + latency
-        self._free_at[producer_instance] = start_ns + transmit_ns
+        slots[index] = start_ns + transmit_ns
         self._seq += 1
         heapq.heappush(self._due, (due_ns, self._seq, payload))
         self.handoffs += 1
@@ -104,7 +114,8 @@ class PdHandoffLink:
         bandwidth = max(1e-9, float(self._bandwidth_gbps(producer_node, consumer_node)))
         latency = max(0, int(self._latency_ns(producer_node, consumer_node)))
         transmit_ns = int(round(max(0, num_bytes) / bandwidth))
-        queued_ns = max(0, self._free_at.get(producer_instance, 0) - int(now_ns))
+        slots = self._slots(producer_instance)
+        queued_ns = max(0, min(slots) - int(now_ns))
         return queued_ns + transmit_ns + latency
 
     def stats(self):
