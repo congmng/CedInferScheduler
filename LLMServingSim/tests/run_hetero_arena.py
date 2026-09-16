@@ -30,6 +30,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOMAINS = "5090,5090,4090,3090,3090,a100"
+PEAK_RPS = 4.0
 TRACE = "workloads/cnndm-long-hetero6-4rps.jsonl"
 NUM_REQS = 376
 
@@ -46,27 +47,32 @@ ARMS = (
 )
 
 
-def build_configs(out_dir):
-    """Three variants of the arena: static-2, elastic, and all-six-active."""
+def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS):
+    """Three variants of the arena: static-2, elastic, and all-active."""
+    domain_count = len([d for d in domains.split(",") if d.strip()])
     configs = {}
     for tag, extra in (("static", []), ("elastic", ["--structural"]),
-                       ("all6", ["--min-active", "6"])):
+                       ("all", ["--min-active", str(domain_count)])):
         path = out_dir / f"hetero6-{tag}.json"
         subprocess.run([sys.executable, str(REPO / "tests" / "make_hetero_cluster.py"),
-                        "--domains", DOMAINS, "--out", str(path), *extra],
+                        "--domains", domains, "--out", str(path), *extra],
                        cwd=REPO, check=True, capture_output=True, text=True)
         configs[tag] = path
     return configs
 
 
-def ensure_trace():
-    trace = REPO / TRACE
+def ensure_trace(peak=PEAK_RPS):
+    """The workload: 1250-token prompts, 15 s warm-up, 90 s peak, 15 s cool."""
+    if peak == PEAK_RPS:
+        trace = REPO / TRACE
+    else:
+        trace = REPO / f"workloads/cnndm-long-arena-{peak:g}rps.jsonl"
     if not trace.exists():
         subprocess.run([sys.executable, str(REPO / "tests" / "make_phased_trace.py"),
                         "--input", "workloads/cnndm-long-pool-qwen3-8b.jsonl",
-                        "--rates", "0.5,4.0,0.5", "--durations", "15,90,15",
-                        "--names", "warmup,peak,cool", "--output", TRACE],
-                       cwd=REPO, check=True)
+                        "--rates", f"0.5,{peak:g},0.5", "--durations", "15,90,15",
+                        "--names", "warmup,peak,cool", "--output",
+                        str(trace.relative_to(REPO))], cwd=REPO, check=True)
     return trace
 
 
@@ -96,6 +102,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="")
     parser.add_argument("--timeout-s", type=int, default=1800)
+    parser.add_argument("--domains", default=DOMAINS,
+                        help="comma separated hardware per domain")
+    parser.add_argument("--peak-rps", type=float, default=PEAK_RPS,
+                        help="arrival rate of the 90 s peak phase")
     parser.add_argument("--arms", default="",
                         help="comma separated subset of " +
                              ",".join(arm for arm, _, _ in ARMS))
@@ -103,9 +113,11 @@ def main() -> int:
 
     out_dir = pathlib.Path(args.out) if args.out else pathlib.Path("/tmp/hetero-arena")
     out_dir.mkdir(parents=True, exist_ok=True)
-    configs = build_configs(out_dir)
-    trace = ensure_trace()
-    config_for = {"casr_full": configs["elastic"], "casr_all6": configs["all6"]}
+    configs = build_configs(out_dir, args.domains, args.peak_rps)
+    trace = ensure_trace(args.peak_rps)
+    all_tag = "all" if "all" in configs else "all6"
+    config_for = {"casr_full": configs["elastic"], "casr_all6": configs[all_tag]}
+    num_reqs = max(1, int(round(0.5 * 15 + args.peak_rps * 90 + 0.5 * 15)))
 
     wanted = {name.strip() for name in args.arms.split(",") if name.strip()}
     report = {}
@@ -116,7 +128,7 @@ def main() -> int:
         csv_path = out_dir / f"{arm}.csv"
         command = [sys.executable, "-m", "serving",
                    "--cluster-config", str(config),
-                   "--dataset", str(TRACE), "--num-reqs", str(NUM_REQS),
+                   "--dataset", str(trace), "--num-reqs", str(num_reqs),
                    "--dtype", "bfloat16", "--block-size", "16",
                    "--max-output-tokens", "16", "--max-num-seqs", "16",
                    "--log-level", "WARNING", "--output", str(csv_path),
