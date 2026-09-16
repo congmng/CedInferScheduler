@@ -96,6 +96,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default="")
     parser.add_argument("--timeout-s", type=int, default=1800)
+    parser.add_argument("--arms", default="",
+                        help="comma separated subset of " +
+                             ",".join(arm for arm, _, _ in ARMS))
     args = parser.parse_args()
 
     out_dir = pathlib.Path(args.out) if args.out else pathlib.Path("/tmp/hetero-arena")
@@ -104,8 +107,11 @@ def main() -> int:
     trace = ensure_trace()
     config_for = {"casr_full": configs["elastic"], "casr_all6": configs["all6"]}
 
+    wanted = {name.strip() for name in args.arms.split(",") if name.strip()}
     report = {}
     for arm, kind, extra_args in ARMS:
+        if wanted and arm not in wanted:
+            continue
         config = config_for.get(arm, configs["static"])
         csv_path = out_dir / f"{arm}.csv"
         command = [sys.executable, "-m", "serving",
