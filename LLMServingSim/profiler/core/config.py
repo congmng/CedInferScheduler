@@ -437,6 +437,22 @@ class ProfileArgs:
     whose keys are already measured, so a re-run after a feasibility
     change adds only the newly-eligible cases. Applies to both the
     main loop categories (dense/per_sequence/attention/moe) and skew."""
+
+    shard: tuple[int, int] | None = None
+    """``(index, total)``: keep only the shots whose position in the
+    composed grid is ``≡ index (mod total)``.
+
+    The per-shot cost is dominated by a fixed ~3.5 s of
+    ``torch.profiler`` bookkeeping (measured: 20 dense shots take the
+    same 3.5 s each as one attention shot), so a grid cannot be made
+    faster by measuring less per shot -- only by firing fewer shots or
+    by firing them on more cards at once. This knob is the second one:
+    run ``N`` processes with ``--shard 0/N`` .. ``--shard (N-1)/N`` on
+    ``N`` GPUs (each with its own ``--out-root``) and concatenate the
+    resulting CSVs. The shards are disjoint by construction and the
+    shot order is deterministic, so the merge is a plain concatenation
+    of the rows (see ``docs/混合注意力模型profile.md``).
+    """
     """Number of timed forward passes per shot, averaged by vLLM's
     layerwise_profile via its ``invocations`` count. A single sample
     can swing 15-25% on large GEMMs due to DVFS / clock-state jitter;

@@ -24,6 +24,7 @@ from profiler.core.categories import (
 from profiler.core.config import Architecture, ProfileArgs, load_architecture
 from profiler.core.engine import probe_limits, spin_down, spin_up
 from profiler.core.hooks.timings import TimingSample
+from profiler.core import shard
 from profiler.core.writer import (
     persist_meta,
     replicate_tp_stable,
@@ -91,6 +92,14 @@ def _fire_one_category(
     # Grids are small enough (<a few thousand shots) that holding them
     # in memory is fine.
     all_shots = list(category.compose_shots(arch, args, limits, tp))
+    if args.shard:
+        before = len(all_shots)
+        all_shots = shard.apply_shard(all_shots, args.shard)
+        log.info(
+            "%s shard %d/%d: %d of %d shots",
+            category.label, args.shard[0], args.shard[1],
+            len(all_shots), before,
+        )
     if not all_shots:
         log.warning(
             "category %s produced no shots for tp=%d; skipping",

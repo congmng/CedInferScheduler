@@ -552,6 +552,10 @@ def persist_meta(
         # which density produced the CSVs; humans get the axes too.
         "attention_grid": _attention_grid_spec(args, eff_mnbt, eff_msq),
         "measurement_iterations": args.measurement_iterations,
+        # ``--shard`` provenance: a merged bundle is assembled from N
+        # one-shard runs, so the value is recorded (and rewritten by the
+        # merge) rather than silently dropped.
+        "shard": (f"{args.shard[0]}/{args.shard[1]}" if args.shard else None),
         "skew_profile": _skew_meta_block(args),
         "skew_fit": _skew_fit_block(variant_root, args.tp_degrees),
     }

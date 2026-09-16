@@ -53,6 +53,7 @@ from profiler.core.config import (
     resolve_architecture_by_model_type,
 )
 from profiler.core.runner import run_full, run_slice
+from profiler.core.shard import parse_shard
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,14 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
                         "Default is resume mode: existing rows are preserved "
                         "and only shots whose keys aren't already in the CSV "
                         "get fired. Applies to every category plus skew.")
+    p.add_argument("--shard", default=None, metavar="I/N",
+                   help="Fire only the shots whose position in the composed "
+                        "grid is ≡ I (mod N). Run N processes with "
+                        "--shard 0/N .. --shard (N-1)/N on N GPUs (each with "
+                        "its own --out-root) and concatenate the CSVs: the "
+                        "per-shot torch.profiler cost is fixed (~3.5 s), so "
+                        "this is the only way to cut a big grid's wall clock. "
+                        "I is 0-based.")
 
     # Output root.
     p.add_argument(
@@ -332,6 +341,7 @@ def _build_profile_args(
         skew_kvs_factor=getattr(ns, "skew_kvs_factor", 2.0),
         only_skew=getattr(ns, "only_skew", False),
         force=getattr(ns, "force", False),
+        shard=parse_shard(getattr(ns, "shard", None)),
         hf_overrides=None,
         model_config=model_config,
     )

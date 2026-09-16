@@ -43,6 +43,7 @@ from pathlib import Path
 import pandas as pd
 
 from profiler.core import logger as log
+from profiler.core import shard
 from profiler.core.config import Architecture, ProfileArgs
 from profiler.core.hooks.batch import Shot
 from profiler.core.hooks.timings import TimingSample
@@ -436,6 +437,13 @@ def sample_skew(
         _geometric_spec(grid["kvs"]), _SKEW_REP,
     )
     all_cases = _build_cases(args, limits)
+    if args.shard:
+        # Same split as the uniform categories: shard over the *composed*
+        # case list so parallel processes stay disjoint and exhaustive.
+        index, total = args.shard
+        all_cases = shard.apply_shard(all_cases, args.shard)
+        log.info("skew shard %d/%d: %d cases in this shard",
+                 index, total, len(all_cases))
     if not all_cases:
         log.warning("skew: no feasible cases at tp=%d; skipping", tp)
         return tp_root / "skew.csv"
