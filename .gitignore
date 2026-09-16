@@ -23,3 +23,11 @@ LLMServingSim/astra-sim/inputs/runs/
 .vscode/
 *.swp
 .DS_Store
+
+# Local session transcript.  It contains the lab hosts' plaintext sudo
+# passwords (pasted while debugging the cluster) and must never be pushed.
+memory.md
+
+# Raw datasets (CNN/DailyMail, Dolly, ShareGPT, tokenizer).  Large and
+# re-downloadable; the workload generators read them from this path.
+data/
