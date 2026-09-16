@@ -19,6 +19,7 @@ class Router:
             policy_options=None,
             casr_enabled=False,
             client_concurrency=0,
+            placement_override=None,
     ):
         self.schedulers = schedulers
         self.num_instances = num_instances
@@ -99,6 +100,15 @@ class Router:
         # timing-model error.  ``0`` keeps the historical open-loop replay.
         self.client_concurrency = max(0, int(client_concurrency or 0))
         self._in_flight = 0
+        # Recorded placement, keyed by the trace's request index:
+        # ``{index: (prefill_instance_id, decode_instance_id)}``.  Feeding the
+        # *cluster's* per-request placement into the simulator separates the two
+        # questions an alignment run has to answer at once -- "does the
+        # controller pick the same instances" and "does the model execute a
+        # given placement at the same speed" -- so a residual gap can be
+        # attributed instead of guessed.
+        self.placement_override = {int(k): tuple(v)
+                                   for k, v in (placement_override or {}).items()}
         self.decode_service_ms = {int(key): float(value) for key, value in
                                   (options.get("decode_service_ms") or {}).items()}
         self.pair_rtt_ms = {}
@@ -640,7 +650,24 @@ class Router:
             if req_data['arrival_time_ns'] > current_time_ns:
                 break
 
-            sched = self._select_planned_prefill(req_data, current_time_ns)
+            recorded = self.placement_override.get(int(req_data['index']))
+            recorded_decode = None
+            if recorded is not None:
+                recorded_prefill = next(
+                    (candidate for candidate in self.prefill_schedulers
+                     if candidate.instance_id == int(recorded[0])
+                     and candidate.accepts_new_requests), None)
+                recorded_decode = next(
+                    (candidate.instance_id for candidate in self.decode_schedulers
+                     if candidate.instance_id == int(recorded[1])), None)
+                if recorded_prefill is not None and recorded_decode is not None:
+                    self._counters["placement_replayed"] = (
+                        self._counters.get("placement_replayed", 0) + 1)
+                else:
+                    recorded = None
+
+            sched = recorded_prefill if recorded is not None else \
+                self._select_planned_prefill(req_data, current_time_ns)
             self._counters["prefill_planned"] = (
                 self._counters.get("prefill_planned", 0) + (1 if sched is not None else 0))
             if sched is None and self._plan_prefill_totals:
@@ -718,6 +745,10 @@ class Router:
                 request.local_prefill = True
                 request.decode_instance_id = sched.instance_id
                 self._counters["local_prefill"] = self._counters.get("local_prefill", 0) + 1
+            elif recorded_decode is not None:
+                # Replayed placement: the Decode half comes from the recording,
+                # so the handoff target matches the cluster's.
+                request.decode_instance_id = recorded_decode
             elif self.name_decode_at_arrival:
                 # Pick the Decode half of the pair now, the way the real router
                 # does (``disagg_router._pick_decode`` runs on the same request

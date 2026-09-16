@@ -193,12 +193,39 @@ def run_sim_arm(policy, args, run_config, sim_config, out_dir):
     budget = deployment_max_num_seqs()
     if budget:
         command += ["--max-num-seqs", str(budget)]
+    if args.client_concurrency:
+        command += ["--client-concurrency", str(args.client_concurrency)]
     command += sim_args(policy, control_interval_s())
+    if args.replay_placement:
+        command += ["--replay-placement", str(out_dir / f"{policy}-placement.json")]
     print("   $ " + " ".join(command[1:8]) + " ...")
     subprocess.run(command, cwd=REPO, check=True,
                    stdout=(out_dir / f"{policy}.log").open("w"),
                    stderr=subprocess.STDOUT)
     return csv_path
+
+
+def build_placement(real_dir, policy, names):
+    """``{trace index: [sim prefill id, sim decode id]}`` from the recording.
+
+    The real client names its requests ``ds-<index>``, and the simulator numbers
+    the trace rows the same way, so the cluster's per-request placement can be
+    handed to the simulator verbatim (after mapping instance *names* to the
+    simulator's renumbered ids).
+    """
+    by_name = {name: instance_id for instance_id, name in names.items()}
+    placement = {}
+    path = pathlib.Path(real_dir) / f"metrics-{policy}.jsonl"
+    for row in load_real_metrics(path):
+        request_id = str(row.get("request_id", ""))
+        if not request_id.startswith("ds-"):
+            continue
+        prefill = by_name.get(row.get("prefill"))
+        decode = by_name.get(row.get("decode"))
+        if prefill is None or decode is None:
+            continue
+        placement[int(request_id.split("-", 1)[1])] = [prefill, decode]
+    return placement
 
 
 def main() -> int:
@@ -211,6 +238,12 @@ def main() -> int:
                         help="generation cap; the client's cap is applied by default")
     parser.add_argument("--skip-sim", action="store_true",
                         help="compare recorded results only (no simulator run)")
+    parser.add_argument("--replay-placement", action="store_true",
+                        help="route every request to the instance the cluster "
+                             "used, isolating execution fidelity from the "
+                             "controller's choices")
+    parser.add_argument("--client-concurrency", type=int, default=8,
+                        help="closed-loop arrival cap; the recorded client uses 8")
     args = parser.parse_args()
 
     real_dir = pathlib.Path(args.real_dir)
@@ -239,6 +272,11 @@ def main() -> int:
               f"   {real['exchange']} / {real['served']}")
         if args.skip_sim:
             continue
+        if args.replay_placement:
+            placement = build_placement(real_dir, policy, names)
+            (out_dir / f"{policy}-placement.json").write_text(
+                json.dumps(placement), encoding="utf-8")
+            print(f"   replayed placement: {len(placement)} requests")
         csv_path = run_sim_arm(policy, args, run_config, args.cluster_config, out_dir)
         sim = summarise_sim(load_sim_csv(csv_path), names)
         report[policy]["sim"] = sim

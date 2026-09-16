@@ -374,6 +374,11 @@ def main():
                              'the historical behaviour).  The real comparison client '
                              'runs with 8 in flight, so a replay must cap here too or '
                              'its queue grows without bound.')
+    parser.add_argument('--replay-placement', default='',
+                        help='JSON file mapping the trace request index to the '
+                             'recorded [prefill_instance_id, decode_instance_id]; '
+                             'replaying the cluster placement isolates execution '
+                             'fidelity from controller choices.')
     parser.add_argument('--log-interval', type=float, default=1.0,
                         help='interval in seconds between throughput/memory usage log messages')
     parser.add_argument('--log-level', type=str, choices=['WARNING', 'INFO', 'DEBUG'], default='WARNING',
@@ -687,12 +692,17 @@ def main():
     # Controller for astra-sim process communication
     controller = Controller(total_npu)
     # Global Request Router
+    placement_override = {}
+    if args.replay_placement:
+        with open(args.replay_placement) as handle:
+            placement_override = json.load(handle)
     router = Router(num_instances, schedulers, num_req, request_routing_policy,
                     prefix_profiler=casr_profiler,
                     name_decode_at_arrival=domain_aware_links,
                     policy_options=casr_config,
                     casr_enabled=bool(args.enable_casr),
-                    client_concurrency=args.client_concurrency)
+                    client_concurrency=args.client_concurrency,
+                    placement_override=placement_override)
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)
