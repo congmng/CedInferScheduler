@@ -281,6 +281,22 @@ def build(real=None, template=None, keep_nonuniform=False, kv_heavy=False,
             }
     if pair_costs:
         casr["pair_costs"] = pair_costs
+    # The fast router's own load denominator.  ``_pick_load`` ranks candidates
+    # by ``(inflight + 1) / capacity`` using the deployment's ``capacity`` field
+    # (p5090 220, p3090a 114, p4090 228 ...), which is *not* the solver capacity
+    # the LP prices with (63/45/59).  Without it the simulator's ``load``
+    # baseline picked a different instance than the recorded run -- visible on
+    # the forced-transfer replay, where the real arm put 104/120 on p4090 while
+    # the simulator spread them (measured 2026-09-16).
+    router_capacity = {}
+    for key in ("prefills", "decodes"):
+        for item in (real.get(key) or ()):
+            source_id = int(item["instance_id"])
+            mapping = (prefill_id_map if key == "prefills" else decode_id_map)
+            if source_id in mapping and item.get("capacity"):
+                router_capacity[str(mapping[source_id])] = float(item["capacity"])
+    if router_capacity:
+        casr["router_capacity"] = router_capacity
     links = []
     for link in (real_casr.get("shared_links") or []):
         pairs = [[prefill_id_map[int(p)], decode_id_map[int(d)]]

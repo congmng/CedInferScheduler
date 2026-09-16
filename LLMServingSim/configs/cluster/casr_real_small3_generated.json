@@ -183,6 +183,14 @@
         "bandwidth_bytes_per_s": 0.0
       }
     },
+    "router_capacity": {
+      "0": 220.0,
+      "2": 114.0,
+      "4": 228.0,
+      "1": 230.0,
+      "3": 90.0,
+      "5": 191.0
+    },
     "capacity_reference_tokens": 1024,
     "decode_reference_tokens": 16,
     "decode_fixed_ms": 20.0,

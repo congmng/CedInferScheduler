@@ -89,6 +89,12 @@ class Router:
                 source, target = int(key[0]), int(key[1])
             self.pair_rtt_ms[(source, target)] = float(
                 (value or {}).get("rtt_ms", 0.0))
+        # The fast router's own load denominator (``_pick_load``), which is the
+        # deployment's ``capacity`` field rather than the LP's solver capacity.
+        # Prefer it when the config carries it so a replay picks the same
+        # instance the recorded run did.
+        self.router_capacity = {int(key): float(value) for key, value in
+                                (options.get("router_capacity") or {}).items()}
         self.local_prefill_ms_per_1k = float(
             options.get("local_prefill_ms_per_1k", 93.0) or 93.0)
         self.transfer_ms_per_1k_local = float(
@@ -170,8 +176,10 @@ class Router:
             raw_score = waiting * 4 + running
             # Prefer the deployment's measured capacity; ``max_num_seqs`` is the
             # fallback for configs that carry no capacity table.
-            capacity = table.get(int(sched.instance_id)) or getattr(
-                sched, "max_num_seqs", 0)
+            router_table = getattr(self, "router_capacity", {})
+            capacity = (router_table.get(int(sched.instance_id))
+                        or table.get(int(sched.instance_id))
+                        or getattr(sched, "max_num_seqs", 0))
             # ``+1`` for the request being placed, so an idle tie resolves
             # toward the larger capacity -- the same shape as the real
             # router's ``(inflight + 1) / capacity``.
