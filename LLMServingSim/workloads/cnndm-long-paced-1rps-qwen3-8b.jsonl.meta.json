@@ -1,0 +1,14 @@
+{
+  "generator": "make_phased_trace",
+  "source": "workloads/cnndm-long-pool-qwen3-8b.jsonl",
+  "requests": 240,
+  "phases": [
+    {
+      "phase": "paced",
+      "rate_rps": 1.0,
+      "duration_s": 240.0,
+      "requests": 240
+    }
+  ],
+  "span_s": 239.0
+}

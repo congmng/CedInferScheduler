@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import statistics
 import time
@@ -33,6 +34,18 @@ def parse_args():
                              "often 500+ tokens and would dominate the run.")
     parser.add_argument("--concurrency", type=int, default=8,
                         help="Maximum in-flight requests.")
+    parser.add_argument("--pacing", choices=("closed", "trace"), default="closed",
+                        help="How the client paces itself.  'closed' (default) is "
+                             "the real client's semaphore: a request starts at its "
+                             "trace arrival *and* when a slot frees, so a server "
+                             "that is slower than the trace throttles its own "
+                             "arrival stream and the run lands in one of two "
+                             "regimes (measured 2026-09-16: the same arm gave "
+                             "718 ms and 4720 ms p50 TTFT this way).  'trace' "
+                             "submits purely on the trace's clock, which makes two "
+                             "arms comparable -- use it whenever the offered rate "
+                             "is below the server's capacity, otherwise the "
+                             "backlog grows without bound.")
     parser.add_argument("--time-scale", type=float, default=1.0,
                         help="Divide the trace's arrival offsets by this "
                              "(>1 compresses the run).")
@@ -162,7 +175,12 @@ async def main():
                 headers["X-SLO-TTFT-MS"] = str(slo_ttft_ms)
             if slo_tpot_ms is not None:
                 headers["X-SLO-TPOT-MS"] = str(slo_tpot_ms)
-            async with semaphore:
+            # ``trace`` pacing sends on the trace's clock only; the semaphore is
+            # what makes the real client's arrival stream depend on its own
+            # completions.
+            gate = (semaphore if args.pacing == "closed"
+                    else contextlib.nullcontext())
+            async with gate:
                 request_started = time.perf_counter()
                 try:
                     if args.stream:

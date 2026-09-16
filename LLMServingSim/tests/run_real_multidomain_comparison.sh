@@ -37,6 +37,9 @@ num_clients="${NUM_CLIENTS:-4}"
 prefix_tokens="${PREFIX_TOKENS:-512}"
 output_tokens="${OUTPUT_TOKENS:-16}"
 concurrency="${CONCURRENCY:-8}"
+# ``CLIENT_PACING=closed`` is the real client's semaphore; ``trace`` submits
+# purely on the trace's clock, which is what makes two policies comparable (see
+# tests/real_dataset_client.py).
 policies="${POLICIES:-rr load casr}"
 # Hotspot shape: ``HOT_PREFIXES`` below ``NUM_CLIENTS`` makes several clients
 # reuse one cached prompt (single-Prefill KV-egress congestion), and
@@ -122,7 +125,7 @@ keys = ("NUM_REQS", "NUM_CLIENTS", "PREFIX_TOKENS", "OUTPUT_TOKENS", "CONCURRENC
         "OVERFLOW_PENALTY", "PLAN_TTL_S", "CONTROL_INTERVAL_S",
         "DISABLED_INSTANCES", "PRESERVE_INSTANCES",
         "STOP_BEFORE_RUN", "LOCAL_PREFILL", "PD_TRANSFER_BACKEND",
-        "REQUEST_TIMEOUT_S",
+        "REQUEST_TIMEOUT_S", "CLIENT_PACING",
         "WARMUP_S", "STRUCTURAL_STARTUP_COST", "STRUCTURAL_EVAL_WINDOW_MS",
         "STRUCTURAL_DWELL_MS",
         "STRUCTURAL_STARTUP_S", "STRUCTURAL_HOLDING_COST",
@@ -419,6 +422,7 @@ print(f\"http://{p['host']}:{p['port']} http://{q['host']}:{q['port']}\")")
     python3 tests/real_dataset_client.py --url http://127.0.0.1:9000 \
       --trace "$trace" --num-reqs "$num_reqs" --model "${MODEL_NAME:-qwen3-8b}" \
       --max-output-tokens "$max_output_tokens" --concurrency "$concurrency" \
+      --pacing "${CLIENT_PACING:-closed}" \
       --request-timeout-s "${REQUEST_TIMEOUT_S:-180}" \
       --time-scale "$time_scale" \
       --slo-ttft-ms "${SLO_TTFT_MS:-0}" --slo-tpot-ms "${SLO_TPOT_MS:-0}" \
