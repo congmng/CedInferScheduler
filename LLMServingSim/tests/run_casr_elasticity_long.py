@@ -57,12 +57,26 @@ def write_arm_config(tag: str, min_active: int, max_active: int) -> pathlib.Path
     The simulator resolves cluster configs relative to ``astra-sim/``, so the
     file has to live under ``configs/cluster/``; it is removed afterwards.
     """
-    config = json.loads(BASE_CONFIG.read_text(encoding="utf-8"))
+    config = json.loads(_base_config().read_text(encoding="utf-8"))
     config["casr"]["lifecycle"]["min_active_prefill"] = min_active
     config["casr"]["lifecycle"]["max_active_prefill"] = max_active
     path = REPO / "configs" / "cluster" / f"_tmp_elastic_{tag}.json"
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+_BASE_CONFIG_OVERRIDE = None
+
+
+def _base_config() -> pathlib.Path:
+    """The cluster the arms run on.
+
+    Defaults to the 4-domain ``kvheavy`` config; ``--base-config`` lets an
+    acceptance run pick another (the 3-domain small-cluster config, say, which
+    is what the real comparisons use -- the deployment's A100 is shared with
+    another tenant, so it is neither usable nor representative).
+    """
+    return pathlib.Path(_BASE_CONFIG_OVERRIDE or BASE_CONFIG)
 
 
 def run_arm(tag: str, config: pathlib.Path, workdir: pathlib.Path) -> dict:
@@ -112,7 +126,13 @@ def main() -> int:
     parser.add_argument("--workdir", default="")
     parser.add_argument("--min-gain", type=float, default=0.10, dest="min_gain",
                         help="required mean-latency improvement of elastic over static")
+    parser.add_argument("--base-config", default="",
+                        help="cluster config to vary (default: the 4-domain kvheavy one)")
     args = parser.parse_args()
+
+    global _BASE_CONFIG_OVERRIDE
+    if args.base_config:
+        _BASE_CONFIG_OVERRIDE = args.base_config
 
     ensure_trace()
     workdir = pathlib.Path(args.workdir) if args.workdir else pathlib.Path(

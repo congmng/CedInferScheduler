@@ -555,6 +555,17 @@ def main():
         casr_config["pair_costs"] = pair_costs
     if args.casr_solver is not None:
         casr_config["solver"] = args.casr_solver
+    if args.enable_casr:
+        # Price the plan with the engine costs the run will actually execute:
+        # the deployment's ``service_ms`` understates the spread between cards
+        # (d4090 157 ms against d5090 145 ms) while both the profiler and the
+        # cluster's own measured TPOT put the 4090 at ~1.7x (see
+        # serving/core/hw_service.py).
+        from serving.core.hw_service import rescale_service_times
+        rescale_service_times(casr_config, instances, "decode_service_ms", tokens=1)
+        rescale_service_times(
+            casr_config, instances, "prefill_service_ms",
+            tokens=int(casr_config.get("capacity_reference_tokens", 1024) or 1024))
     casr_controller = (CASRController(int(args.casr_control_interval_ms * 1_000_000),
                                       policy=casr_config,
                                       policy_spec=args.casr_policy)
