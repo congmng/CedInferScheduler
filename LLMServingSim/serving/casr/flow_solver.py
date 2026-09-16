@@ -287,6 +287,27 @@ class CapacityAwareFlowSolver:
     def _link_uses_bytes(self, link):
         return link.capacity_bytes_per_s > 0 or link.link_id in self._runtime_link_capacity
 
+    def apply_capacity_overrides(self, prefill_capacity=None, decode_capacity=None):
+        """Temporarily re-price instance capacity for the next solve.
+
+        The plan and the structural evaluator otherwise price a Prefill by its
+        *compute* capacity (9.3 rps on a 5090), while the deployment's push
+        ceiling is 0.26 GB/s -- about 1.4 req/s for a 1250-token prompt.  With
+        the compute number the counterfactual for one more worker shows almost
+        no gain, so ``+P`` fires late: measured in the six-domain arena, the
+        elastic arm took 14878 ms where the capacity derived from the egress
+        took 1400 ms on the same pool floor.
+        """
+        updates = {}
+        if prefill_capacity:
+            updates["prefill_capacity"] = {**self.config.prefill_capacity,
+                                           **prefill_capacity}
+        if decode_capacity:
+            updates["decode_capacity"] = {**self.config.decode_capacity,
+                                          **decode_capacity}
+        if updates:
+            self.config = dataclass_replace(self.config, **updates)
+
     def solve(self, rows, prefill, decode, work_overrides=None):
         self._slo_violations = set()
         if self.config.solver == "lp":

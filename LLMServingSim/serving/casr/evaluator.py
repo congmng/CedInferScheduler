@@ -137,7 +137,7 @@ class StructuralEvaluator:
         return tuple(selected)
 
     def evaluate(self, snapshot, active_prefill, all_prefill, decode, solver,
-                 current_ns, last_action_ns=-1, min_active=1):
+                 current_ns, last_action_ns=-1, min_active=1, backlog_rps=0.0):
         rows = snapshot["prefix_states"]
         if not active_prefill or not decode or not rows:
             return StructuralDecision("keep", "none", 0.0, 0.0, 0.0,
@@ -163,6 +163,18 @@ class StructuralEvaluator:
         warm_classes = self._warm_classes(rows)
 
         horizon_s = self.window_ns / 1_000_000_000.0
+        # A *growing* backlog means the imbalance is not a transient: the
+        # counterfactual has to be judged over the time the pressure will
+        # actually last, not over one evaluation window.  Without this the
+        # 45 s boot is charged against a 60 s window and only 15 s of benefit
+        # remain, so ``+P`` waited until the peak was half over -- measured in
+        # the six-domain arena: the structural arm settled at 14878 ms while an
+        # egress-sized pool reached 1120 ms, and ``casr_lp`` with the
+        # lifecycle's demand-driven sizing (which reacts immediately) reached
+        # 1400 ms.
+        if backlog_rps > 0.05:
+            horizon_s = max(horizon_s, min(4.0 * horizon_s,
+                                           horizon_s * (1.0 + backlog_rps)))
         # What one more (or one fewer) active Prefill costs per second.  It
         # appears with opposite signs on the two branches below, which is what
         # makes the criterion symmetric instead of "grow whenever possible".

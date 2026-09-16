@@ -13,6 +13,8 @@ from .plan_builder import build_affinity_plan
 from .flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
+from typing import Mapping
+
 from .evaluator import StructuralEvaluator
 from .state import PrometheusStateCollector
 from .executor import ReconfigExecutor
@@ -122,6 +124,59 @@ class CASRController:
                                  (1.0 - self.alpha) * self._backlog_rps)
         return self._backlog_rps
 
+    def _egress_bound_prefill_capacity(self, rows, prefills):
+        """Per-Prefill capacity once its KV egress is taken into account.
+
+        The deployment's push ceiling is 0.26 GB/s (measured 239-314 MB/s), and
+        a 1250-token prompt is 184 MB of KV, so one worker can push ~1.4
+        requests/s no matter how fast its compute is.  The plan and the
+        structural evaluator need that number: with compute capacity alone
+        (9.3 rps on a 5090) the counterfactual for one more worker is
+        unprofitable until the run is already deep in backlog -- measured in
+        the six-domain arena, the ``+P`` arm settled at 14878 ms while the same
+        pool floor with an egress-derived capacity reached 1400 ms.
+        """
+        budgets = {}
+        for link in getattr(self.solver.config, "shared_links", ()):
+            capacity = float(getattr(link, "capacity_bytes_per_s", 0.0) or 0.0)
+            if capacity <= 0:
+                continue
+            for prefill_id, _decode_id in (getattr(link, "pairs", ()) or ()):
+                budgets[int(prefill_id)] = min(budgets.get(int(prefill_id), capacity),
+                                               capacity)
+        if not budgets:
+            return {}
+        per_token = float(getattr(self.solver.config, "kv_bytes_per_token", 0.0) or 0.0)
+        tokens = []
+        for row in rows:
+            requested = row.get("requested_tokens")
+            if isinstance(requested, Mapping):
+                tokens.extend(float(value) for value in requested.values() if value)
+            elif requested:
+                tokens.append(float(requested))
+            else:
+                ewma = row.get("requested_tokens_ewma")
+                if isinstance(ewma, Mapping):
+                    tokens.extend(float(value) for value in ewma.values() if value)
+                elif ewma:
+                    tokens.append(float(ewma))
+        if not tokens or per_token <= 0:
+            return {}
+        tokens.sort()
+        median_tokens = tokens[len(tokens) // 2]
+        per_request = per_token * max(1.0, median_tokens)
+        declared = {int(s.instance_id): float(
+            self.solver.config.prefill_capacity.get(
+                int(s.instance_id), getattr(s, "max_num_seqs", 1) or 1))
+            for s in prefills}
+        capped = {}
+        for instance_id, budget in budgets.items():
+            if instance_id not in declared:
+                continue
+            limit = budget / per_request
+            capped[instance_id] = min(declared[instance_id], max(0.05, limit))
+        return capped
+
     def _inflate_demand(self, rows):
         """Add the backlog growth back to the observed class rates.
 
@@ -166,10 +221,22 @@ class CASRController:
         # was *served*.
         self._sample_backlog(current_ns, prefill)
         self._inflate_demand(snapshot["prefix_states"])
+        # Price each Prefill by what it can actually push, not by its compute
+        # capacity: the producer's egress (0.26 GB/s measured) is what caps a
+        # 1250-token workload at ~1.4 req/s per worker, and without this term
+        # the counterfactual for one more worker shows almost no gain, so the
+        # structural action fires only once the peak is half over (measured in
+        # the six-domain arena: +P arm 14878 ms against 1400 ms for the same
+        # pool floor when capacity came from the egress).
+        egress_caps = self._egress_bound_prefill_capacity(
+            snapshot["prefix_states"], all_prefill)
+        if egress_caps:
+            self.solver.apply_capacity_overrides(prefill_capacity=egress_caps)
 
         decision = self.evaluator.evaluate(
             snapshot, prefill, all_prefill, decode, self.solver, current_ns,
-            self.last_action_ns, self.lifecycle.min_active)
+            self.last_action_ns, self.lifecycle.min_active,
+            backlog_rps=getattr(self, "_backlog_rps", 0.0))
         self.last_structural_decision = decision.as_dict()
         if decision.action != "keep":
             self.last_action_ns = int(current_ns)
