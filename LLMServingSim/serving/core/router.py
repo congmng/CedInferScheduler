@@ -1,5 +1,6 @@
 import bisect
 import json
+import os
 import random
 from collections import defaultdict
 from types import SimpleNamespace
@@ -111,6 +112,14 @@ class Router:
                                    for k, v in (placement_override or {}).items()}
         self.decode_service_ms = {int(key): float(value) for key, value in
                                   (options.get("decode_service_ms") or {}).items()}
+        self.prefill_service_ms = {int(key): float(value) for key, value in
+                                   (options.get("prefill_service_ms") or {}).items()}
+        # The real control loop's cost weights (``weights`` in
+        # router_config.json): network, service, and each leg's load.
+        self.cost_weights = dict(options.get("weights") or {})
+        # Set by the entry point once the P/D handoff link exists: it is what
+        # tells this router how much KV is already queued on a candidate pair.
+        self.pd_link = None
         self.pair_rtt_ms = {}
         for key, value in (options.get("pair_costs") or {}).items():
             if isinstance(key, str):
@@ -392,32 +401,85 @@ class Router:
                       if sched.accepts_new_requests and sched.instance_id in fallback_ids]
         return self._least_loaded(candidates) if candidates else None
 
-    def _decode_cost_select(self, prefill_sched):
+    def kv_bytes_for(self, prompt_tokens, scheduler=None):
+        """KV bytes one handoff of this prompt moves, for the network term.
+
+        The pair cost wants the *size* of the push the candidate pair implies
+        (``disagg_router._pair_cost`` divides it by the link bandwidth); a
+        per-token constant is enough for the ranking, and the scheduler's own
+        memory model is exact when it is available.
+        """
+        memory = getattr(scheduler, "memory", None)
+        if memory is not None and prompt_tokens:
+            try:
+                return float(memory.pd_kv_bytes(int(prompt_tokens)))
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return float(self.kv_bytes_per_token or 0.0) * max(0, int(prompt_tokens or 0))
+
+    def _decode_cost_select(self, prefill_sched, kv_bytes=None, now_ns=0):
         """Cheapest Decode for this Prefill, mirroring ``_pick_decode_cost``.
 
-        Cost has the same three parts as the real router's ``_pair_cost``:
-        the network term (zero for a same-domain pair, the measured RTT
-        otherwise), the Decode's measured service time, and a wait estimate
-        ``service x inflight / capacity`` (Little's law).  The Decode chosen
-        here is the one that runs the request, including when the request takes
-        the local-recompute path.
+        Same three parts as the real router's ``_pair_cost``, and the same
+        shape for each of them:
+
+        * **network** -- zero for a same-domain pair, otherwise the measured
+          RTT *plus the KV bytes already queued on that link* over its
+          bandwidth.  It is an occupancy price, not a serialisation: the push
+          overlaps with the Prefill's compute, so an idle link costs only the
+          RTT.  Pricing the full transfer made the real router refuse
+          profitable cross-domain pairings (measured -5.6% when that term was
+          removed there); pricing *nothing* let the simulator move traffic off
+          a link that was already backed up.
+        * **service** -- the pair's measured Prefill + Decode service times.
+        * **load** -- ``inflight / capacity`` on both legs.  This is a *wait
+          time* by Little's law (``W = L / lambda`` with ``lambda`` ~ the
+          calibrated requests/s), which is what makes it commensurate with the
+          two terms above; multiplying it by ``service`` instead (the shape
+          used here before 2026-09-16) turns it into a dimensionless
+          utilisation and over-penalises the faster instance.
         """
         candidates = [candidate for candidate in self.decode_schedulers
                       if candidate.accepts_new_requests]
         if not candidates:
             return None
-        table = getattr(self, "capacity_tables", {}).get("decode", {})
+        capacities = getattr(self, "capacity_tables", {})
+        table = capacities.get("decode", {})
+        prefill_table = capacities.get("prefill", {})
         prefill_node = int(getattr(prefill_sched, "node_id", -1))
+        weights = getattr(self, "cost_weights", {})
+        w_network = float(weights.get("network", 1.0))
+        w_service = float(weights.get("service", 1.0))
+        w_prefill = float(weights.get("prefill_load", 1.0))
+        w_decode = float(weights.get("decode_load", 1.0))
+        prefill_service = float(getattr(self, "prefill_service_ms", {}).get(
+            int(prefill_sched.instance_id), 0.0))
+        prefill_inflight = len(getattr(prefill_sched, "running", ())) + len(
+            getattr(prefill_sched, "waiting", ()))
+        prefill_capacity = max(1.0, float(
+            prefill_table.get(int(prefill_sched.instance_id))
+            or getattr(prefill_sched, "max_num_seqs", 1) or 1))
 
         def cost(sched):
             same_node = prefill_node == int(getattr(sched, "node_id", -2))
             rtt = 0.0 if same_node else self.pair_rtt_ms.get(
                 (int(prefill_sched.instance_id), int(sched.instance_id)), 0.0)
-            service = self.decode_service_ms.get(int(sched.instance_id), 0.0)
-            inflight = len(sched.running) + len(sched.waiting)
+            queued_ms = 0.0
+            link = getattr(self, "pd_link", None)
+            if link is not None and not same_node:
+                queued_ms = link.wait_ns(
+                    int(prefill_sched.instance_id), prefill_node,
+                    int(getattr(sched, "node_id", -2)),
+                    kv_bytes or 0, now_ns) / 1e6
+            network = (rtt + queued_ms) / 1000.0
+            service = (prefill_service
+                       + self.decode_service_ms.get(int(sched.instance_id), 0.0)) / 1000.0
             capacity = table.get(int(sched.instance_id)) or getattr(
                 sched, "max_num_seqs", 1) or 1
-            return rtt + service + service * inflight / max(1.0, float(capacity))
+            load = (w_prefill * prefill_inflight / prefill_capacity
+                    + w_decode * (len(sched.running) + len(sched.waiting))
+                    / max(1.0, float(capacity)))
+            return w_network * network + w_service * service + load
 
         return min(candidates, key=lambda sched: (cost(sched), sched.instance_id))
 
@@ -499,7 +561,11 @@ class Router:
                      request, "pair_prefill_instance_id",
                      getattr(request, "prefill_instance_id", None))), None)
             if prefill_sched is not None:
-                chosen = self._decode_cost_select(prefill_sched)
+                kv_bytes = (getattr(request, "pd_kv_bytes", 0) or 0
+                            or self.kv_bytes_for(getattr(request, "original_input", 0),
+                                                 prefill_sched))
+                chosen = self._decode_cost_select(
+                    prefill_sched, kv_bytes=kv_bytes, now_ns=current_time_ns)
                 if chosen is not None:
                     return chosen.instance_id
         planned = self._select_planned_decode(request, current_time_ns)
@@ -549,7 +615,10 @@ class Router:
         workload (measured 2026-09-16: real completion_tokens were 16/16 for all
         200 requests while the simulator generated 74.7 on average).
         """
-        path = f'../{path}'
+        # Relative to the repository root (this runs inside ``astra-sim``);
+        # an absolute path is already unambiguous.
+        if not os.path.isabs(path):
+            path = f'../{path}'
         self._enable_prefix_caching = enable_prefix_caching
         self._is_init = is_init
         self._max_output_tokens = int(max_output_tokens or 0)
@@ -712,9 +781,13 @@ class Router:
                 # CASR policies choose the Decode by cost (that is what makes
                 # their placement differ from the baselines); everything else
                 # keeps the plan-then-least-loaded order.
-                decode_sched = (self._decode_cost_select(sched)
-                                if self.casr_enabled
-                                else self._decode_scheduler_for(req_data, current_time_ns, sched))
+                decode_sched = (
+                    self._decode_cost_select(
+                        sched,
+                        kv_bytes=self.kv_bytes_for(req_data['input_toks'], sched),
+                        now_ns=current_time_ns)
+                    if self.casr_enabled
+                    else self._decode_scheduler_for(req_data, current_time_ns, sched))
                 if decode_sched is not None and decode_sched is not sched:
                     if self.local_prefill_mode == "always":
                         use_local = True

@@ -766,6 +766,10 @@ def main():
                     casr_enabled=bool(args.enable_casr),
                     client_concurrency=args.client_concurrency,
                     placement_override=placement_override)
+    # The router prices a candidate pair with the link's *occupancy* -- how much
+    # KV is already queued behind it -- exactly like the real control loop
+    # (``disagg_router._pair_cost``).
+    router.pd_link = pd_link
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)

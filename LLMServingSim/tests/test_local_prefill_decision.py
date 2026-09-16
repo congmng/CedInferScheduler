@@ -50,6 +50,10 @@ def router(**options):
     }
     instance.prefill_rr_counter = 0
     instance.decode_rr_counter = 0
+    instance.prefill_service_ms = {int(k): float(v) for k, v in
+                                   (options.get("prefill_service_ms") or {}).items()}
+    instance.cost_weights = dict(options.get("weights") or {})
+    instance.pd_link = None
     return instance
 
 

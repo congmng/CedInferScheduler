@@ -218,11 +218,47 @@ def arm_config_from_recording(cluster_config, real_dir, policy, names, out_dir):
     return path
 
 
-def run_sim_arm(policy, args, run_config, sim_config, out_dir):
+def trace_with_recorded_pacing(run_config, real_dir, policy, out_dir):
+    """Rewrite the trace's arrival times with the client's recorded ones.
+
+    A closed-loop replay re-derives its arrival stream from the *simulator's*
+    own completions, so a server model that is a little slow makes the client
+    throttle, requests pile up, and the run measures a queue the cluster never
+    had -- the two real arms of the elasticity bundle differ by 5x on the same
+    placement this way.  Keeping the recorded client's own submission times
+    removes that feedback: whatever is left is the server model.
+    """
+    trace = pathlib.Path(run_config["TRACE"])
+    if not trace.is_absolute():
+        trace = REPO / trace
+    rows = [json.loads(line) for line in
+            trace.read_text(encoding="utf-8").splitlines() if line.strip()]
+    real = [row for row in load_real_metrics(
+        pathlib.Path(real_dir) / f"metrics-{policy}.jsonl")
+        if str(row.get("request_id", "")).startswith("ds-")]
+    if not rows or not real:
+        return None
+    real.sort(key=lambda row: float(row.get("ts") or 0.0))
+    start = float(real[0]["ts"])
+    offsets = {int(str(row["request_id"]).split("-", 1)[1]):
+               float(row["ts"]) - start for row in real}
+    for index, row in enumerate(rows):
+        if index in offsets:
+            row["arrival_time_ns"] = int(round(offsets[index] * 1e9))
+    path = (pathlib.Path(out_dir) / "trace-pacing.jsonl").resolve()
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    print(f"   recorded client pacing: {len(offsets)} submissions, "
+          f"span {max(offsets.values()):.1f} s -> {path.name}")
+    return path
+
+
+def run_sim_arm(policy, args, run_config, sim_config, out_dir, trace=None):
     csv_path = out_dir / f"{policy}.csv"
     command = [sys.executable, "-m", "serving",
                "--cluster-config", str(sim_config),
-               "--dataset", str(run_config["TRACE"]),
+               "--dataset", str(trace or run_config["TRACE"]),
                "--num-reqs", str(run_config["NUM_REQS"]),
                "--dtype", "bfloat16", "--block-size", "16",
                "--log-level", "WARNING",
@@ -232,7 +268,9 @@ def run_sim_arm(policy, args, run_config, sim_config, out_dir):
     budget = deployment_max_num_seqs()
     if budget:
         command += ["--max-num-seqs", str(budget)]
-    if args.client_concurrency:
+    if args.client_concurrency and not args.replay_client_pacing:
+        # With the client's own pacing the trace *is* the arrival stream; a
+        # closed-loop cap on top of it would re-derive what we are replaying.
         command += ["--client-concurrency", str(args.client_concurrency)]
     command += sim_args(policy, control_interval_s())
     if args.replay_placement:
@@ -283,6 +321,10 @@ def main() -> int:
                              "controller's choices")
     parser.add_argument("--client-concurrency", type=int, default=8,
                         help="closed-loop arrival cap; the recorded client uses 8")
+    parser.add_argument("--replay-client-pacing", action="store_true",
+                        help="reuse the recorded client's submission times "
+                             "instead of a closed-loop cap, so the arrival "
+                             "stream is the cluster's and not the simulator's")
     args = parser.parse_args()
 
     real_dir = pathlib.Path(args.real_dir)
@@ -320,7 +362,10 @@ def main() -> int:
                 args.cluster_config, real_dir, policy, names, out_dir)
         else:
             sim_config = args.cluster_config
-        csv_path = run_sim_arm(policy, args, run_config, sim_config, out_dir)
+        pacing = (trace_with_recorded_pacing(run_config, real_dir, policy, out_dir)
+                  if args.replay_client_pacing else None)
+        csv_path = run_sim_arm(policy, args, run_config, sim_config, out_dir,
+                               trace=pacing)
         sim = summarise_sim(load_sim_csv(csv_path), names)
         report[policy]["sim"] = sim
         ratio = sim["e2e_p50"] / real["e2e_p50"] if real["e2e_p50"] else float("nan")

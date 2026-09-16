@@ -91,6 +91,22 @@ class PdHandoffLink:
     def in_flight(self):
         return len(self._due)
 
+    def wait_ns(self, producer_instance, producer_node, consumer_node,
+                num_bytes, now_ns):
+        """How long a push enqueued *now* would take to land, in ns.
+
+        The router prices a candidate pair with this the way the real control
+        loop prices its links (``disagg_router._pair_cost``: RTT plus the bytes
+        already queued on that link over its bandwidth).
+        """
+        if num_bytes is None or num_bytes <= 0:
+            return 0
+        bandwidth = max(1e-9, float(self._bandwidth_gbps(producer_node, consumer_node)))
+        latency = max(0, int(self._latency_ns(producer_node, consumer_node)))
+        transmit_ns = int(round(max(0, num_bytes) / bandwidth))
+        queued_ns = max(0, self._free_at.get(producer_instance, 0) - int(now_ns))
+        return queued_ns + transmit_ns + latency
+
     def stats(self):
         return {
             "handoffs": self.handoffs,
