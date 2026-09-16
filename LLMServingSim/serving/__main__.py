@@ -369,6 +369,11 @@ def main():
                         help='cap generated tokens per request (0 = use the trace). '
                         'The real comparison client runs with 16, so a replay that '
                         'must match it has to cap here too.')
+    parser.add_argument('--client-concurrency', type=int, default=0,
+                        help='closed-loop arrival cap (0 = replay the trace open-loop, '
+                             'the historical behaviour).  The real comparison client '
+                             'runs with 8 in flight, so a replay must cap here too or '
+                             'its queue grows without bound.')
     parser.add_argument('--log-interval', type=float, default=1.0,
                         help='interval in seconds between throughput/memory usage log messages')
     parser.add_argument('--log-level', type=str, choices=['WARNING', 'INFO', 'DEBUG'], default='WARNING',
@@ -686,7 +691,8 @@ def main():
                     prefix_profiler=casr_profiler,
                     name_decode_at_arrival=domain_aware_links,
                     policy_options=casr_config,
-                    casr_enabled=bool(args.enable_casr))
+                    casr_enabled=bool(args.enable_casr),
+                    client_concurrency=args.client_concurrency)
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)

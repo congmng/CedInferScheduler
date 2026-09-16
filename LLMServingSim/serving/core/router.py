@@ -18,6 +18,7 @@ class Router:
             name_decode_at_arrival=False,
             policy_options=None,
             casr_enabled=False,
+            client_concurrency=0,
     ):
         self.schedulers = schedulers
         self.num_instances = num_instances
@@ -88,6 +89,16 @@ class Router:
         # Without this the simulator's local-recompute path made ``casr_lp``
         # bit-identical to ``load``.
         self.casr_enabled = bool(casr_enabled)
+        # The recorded comparisons drive the cluster with a *closed-loop*
+        # client: ``real_dataset_client.py`` keeps at most ``--concurrency``
+        # requests in flight, so a slow system throttles its own arrival stream.
+        # Replaying a trace open-loop instead piles up every arrival the trace
+        # ever scheduled: measured 2026-09-16 on the 300-request forced-transfer
+        # arm, the cluster's TTFT settled at 4.7-5.5 s while the simulator's grew
+        # linearly to 42 s, and the resulting 12x E2E gap was mostly this, not a
+        # timing-model error.  ``0`` keeps the historical open-loop replay.
+        self.client_concurrency = max(0, int(client_concurrency or 0))
+        self._in_flight = 0
         self.decode_service_ms = {int(key): float(value) for key, value in
                                   (options.get("decode_service_ms") or {}).items()}
         self.pair_rtt_ms = {}
@@ -620,6 +631,11 @@ class Router:
         """
         routed = 0
         while self._pending_idx < len(self._pending_requests):
+            # Closed-loop client: hold the arrival stream back while the cap is
+            # reached, exactly as the real client's semaphore does.
+            if (self.client_concurrency and
+                    self._in_flight >= self.client_concurrency):
+                break
             req_data = self._pending_requests[self._pending_idx]
             if req_data['arrival_time_ns'] > current_time_ns:
                 break
@@ -685,7 +701,14 @@ class Router:
             request = sched.add_request([
                 req_data['index'], sched.model,
                 req_data['input_toks'], req_data['output_toks'],
-                req_data['arrival_time_ns'], sched.instance_id,
+                # A closed-loop client submits a request when a slot frees, and
+                # measures its latency from *that* moment -- the real client's
+                # semaphore does the same.  Keeping the trace's nominal arrival
+                # for a request that was held back would charge it for the time
+                # it spent waiting to be submitted.
+                (req_data['arrival_time_ns'] if not self.client_concurrency
+                 else max(req_data['arrival_time_ns'], current_time_ns)),
+                sched.instance_id,
                 req_data.get('input_hash_ids', []), req_data.get('output_hash_ids', []),
                 req_data['class_id'], req_data['prefix_id'],
             ], is_init=True if local_request else self._is_init)
@@ -724,6 +747,7 @@ class Router:
             pair_prefill = prefill_sched.instance_id
             served = (sched.instance_id if local_request
                       else request.decode_instance_id)
+            self._in_flight += 1
             request.pair_prefill_instance_id = pair_prefill
             self._assigned[pair_prefill] += 1
             if served is not None:
@@ -766,6 +790,7 @@ class Router:
         # early here, which would have left the counters rising forever.
         tracker = getattr(self, "_request_pair", None)
         if tracker is not None and request_id in tracker:
+            self._in_flight = max(0, self._in_flight - 1)
             for instance_id in tracker.pop(request_id):
                 if instance_id in self._assigned:
                     self._assigned[instance_id] = max(0, self._assigned[instance_id] - 1)
