@@ -18,6 +18,11 @@ LLMServingSim/outputs/*
 !LLMServingSim/outputs/example_*.csv
 LLMServingSim/astra-sim/inputs/runs/
 
+# Elasticity/ablation arm configs, written next to the cluster configs because
+# the simulator resolves them relative to astra-sim/ (see
+# tests/run_casr_elasticity_long.py).
+LLMServingSim/configs/cluster/_tmp_*.json
+
 # Editor / OS
 .idea/
 .vscode/
