@@ -1,0 +1,9 @@
+{
+  "generator": "make_hot_prefix_trace",
+  "source": "workloads/cnndm-long-pool-qwen3-8b.jsonl",
+  "requests": 120,
+  "hot_heads": 2,
+  "prefix_tokens": 1024,
+  "rate_rps": 0.6,
+  "span_s": 198.333333333
+}

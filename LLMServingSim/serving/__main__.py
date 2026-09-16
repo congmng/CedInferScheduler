@@ -64,6 +64,37 @@ def _pad_batch_to_max(batch, max_len):
     batch.num_decode += pad              # counted for lm_head / dense shape
 
 
+def _handoff_bytes(router, req):
+    """KV a handoff actually moves: the part the Decode does not already hold.
+
+    LMCache pulls only the blocks the Decode is missing, so a request whose
+    shared prefix is already resident on its Decode crosses the fabric with a
+    much smaller payload.  Measured 2026-09-16 on the hot-prefix trace (1250
+    tokens with a 1024-token shared head): the cluster's ``load`` arm answered
+    at TTFT p50 205 ms while a full-prompt push alone is ~700 ms at the
+    measured 0.257 GB/s, and ``rr`` -- which spreads the Decodes and so keeps
+    their caches cold -- paid 438 ms with a 44 ms TPOT p95.
+    """
+    total = int(req.pd_kv_bytes or 0)
+    prompt = int(req.original_input or 0)
+    if total <= 0 or prompt <= 0:
+        return total
+    target = getattr(req, "decode_instance_id", None)
+    sched = next((candidate for candidate in router.decode_schedulers
+                  if candidate.instance_id == target), None)
+    if sched is None:
+        return total
+    cached = 0
+    try:
+        _, npu_hit, _ = sched.kv.get_computed_blocks(req)
+        cached = min(prompt, int(npu_hit))
+    except Exception:       # a cache manager without the tier, or a new request
+        cached = 0
+    if cached <= 0:
+        return total
+    return int(round(total * (prompt - cached) / prompt))
+
+
 def _build_pd_link(cluster, args):
     """The P/D KV handoff model for this cluster, or ``None`` to keep graphs.
 
@@ -1011,7 +1042,7 @@ def main():
                 pd_link.enqueue(
                     instance_id, node_id,
                     node_id if landing_node is None else landing_node,
-                    sum(int(req.pd_kv_bytes or 0) for req in finished_reqs),
+                    sum(_handoff_bytes(router, req) for req in finished_reqs),
                     tuple(finished_reqs), current)
 
         # An NPU that opened a DP round owes ASTRA-Sim that round's graph, and it
