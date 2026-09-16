@@ -8,12 +8,43 @@ from .request import *
 from .utils import *
 from .controller import *
 from .memory_model import *
+from .memory_model import GB_TO_BYTE
 from .kv_cache_manager import request_block_hashes
 from .graph_generator import *
 from .trace_generator import *
 from .logger import print_markup, print_rule
 from .pim_model import *
 import numpy as np
+
+
+#: Why-won't-it-admit diagnostics.  A stalled waiting queue is otherwise
+#: silent: the run keeps ticking simulated seconds at zero throughput and only
+#: the end-of-run summary ever notices.  ``SIM_ADMISSION_DEBUG=1`` prints the
+#: first stall of each kind per instance, and the gate that fires names the
+#: resource that is actually binding.  This is what found the Decode staging
+#: budget leak of 2026-09-17 (see ``_schedule_waiting``).
+_ADMISSION_DEBUG = os.environ.get("SIM_ADMISSION_DEBUG") not in (None, "", "0")
+_admission_explained: set = set()
+
+
+def _explain_admission_stall(owner, gate, current, detail):
+    """Print, once per (instance, gate), why the scheduler stopped admitting.
+
+    ``detail`` is a zero-argument callable: it runs only when the diagnostic
+    actually fires, so a saturated run never pays for building these strings on
+    every step, and a stub scheduler in a test never has to carry every
+    attribute the message happens to mention.
+    """
+    if not _ADMISSION_DEBUG:
+        return
+    key = (getattr(owner, "instance_id", None), gate)
+    if key in _admission_explained:
+        return
+    _admission_explained.add(key)
+    print(f"[admission-stall] t={current} inst={getattr(owner, 'instance_id', None)} "
+          f"role={getattr(owner, 'pd_type', None)} gate={gate}: {detail()}",
+          flush=True)
+
 
 # class that shedules request of astra-sim
 class Scheduler:
@@ -241,12 +272,19 @@ class Scheduler:
         """Phase B: admit from the waiting queue. Never preempts to admit."""
         while self.waiting and token_budget > 0:
             if len(self.running) >= self.max_num_seqs:
+                _explain_admission_stall(
+                    self, "max_num_seqs", current,
+                    lambda: f"running={len(self.running)} >= "
+                            f"max_num_seqs={self.max_num_seqs}")
                 break
             matching_index = next((index for index, candidate in enumerate(self.waiting)
                                    if candidate.arrival <= current and
                                    (self.pd_type != "prefill" or
                                     self._matches_pd_target(candidate, pd_target))), None)
             if matching_index is None:
+                _explain_admission_stall(
+                    self, "no-arrived-candidate", current,
+                    lambda: f"pd_target={pd_target} waiting={len(self.waiting)}")
                 break
             req = self.waiting[matching_index]
 
@@ -259,6 +297,12 @@ class Scheduler:
                 need = self.memory.pd_kv_bytes(req.original_input)
                 staged = self.pd_staging.get(req.decode_instance_id, 0.0)
                 if staged + need > float(self.pd_buffer_bytes):
+                    _explain_admission_stall(
+                        self, "pd-staging-buffer", current,
+                        lambda: f"decode={req.decode_instance_id} "
+                                f"staged={staged / GB_TO_BYTE:.2f}GB "
+                                f"need={need / GB_TO_BYTE:.3f}GB "
+                                f"buffer={float(self.pd_buffer_bytes) / GB_TO_BYTE:.2f}GB")
                     break
 
             num_computed = req.num_computed_tokens
@@ -281,21 +325,35 @@ class Scheduler:
             if not self.enable_chunked_prefill and num_new > token_budget:
                 # Cannot split this prefill, and it does not fit. Stop here
                 # rather than skipping ahead, to keep FCFS.
+                _explain_admission_stall(
+                    self, "no-chunked-prefill", current,
+                    lambda: f"num_new={num_new} token_budget={token_budget}")
                 break
             num_new = min(num_new, token_budget)
             if num_new <= 0:
+                _explain_admission_stall(
+                    self, "nothing-to-compute", current,
+                    lambda: f"num_new={num_new}")
                 break
 
             if self.reserve_full_isl and not self.kv.can_fit_full_sequence(
                     req, hit_blocks, num_npu_hit, num_lower_hit):
                 # Its first chunk would fit but the whole sequence would not, so
                 # admitting it now only defers a preemption. vLLM breaks here.
+                _explain_admission_stall(
+                    self, "reserve-full-isl", current,
+                    lambda: f"req#{req.id} tokens_reached={req.num_tokens_reached} "
+                            f"free_blocks={self.kv.npu_pool.get_num_free_blocks()}")
                 break
 
             blocks = self.kv.allocate_slots(req, num_new, hit_blocks,
                                             num_npu_hit, num_lower_hit)
             if blocks is None:
                 # vLLM breaks here: a waiting request never causes a preemption.
+                _explain_admission_stall(
+                    self, "allocate-slots", current,
+                    lambda: f"req#{req.id} num_new={num_new} "
+                            f"free_blocks={self.kv.npu_pool.get_num_free_blocks()}")
                 break
 
             self.waiting.pop(matching_index)
@@ -309,6 +367,29 @@ class Scheduler:
             req.status = RequestStatus.RUNNING
             self.running.append(req)
             self.memory.record_prefix_stats(req)
+
+            # Reserve this request's Decode-side staging budget exactly once,
+            # here and not per batch: the budget stands for "this request's KV
+            # is going to occupy the Decode's handoff buffer", which is a
+            # property of the request, not of how many chunks the Prefill needs
+            # to compute it.  ``add_decode`` gives it back when the Decode
+            # actually takes the request over, against the instance charged
+            # here even if the handoff is later re-targeted.
+            #
+            # Charging it per *batch* instead leaked one ``pd_kv_bytes`` for
+            # every extra chunk: a 3750-token prompt over a 2048-token budget is
+            # built twice but handed over once.  At 375 MB per request the
+            # Decode's 32 GB buffer filled after ~85 requests, admission stopped
+            # and the run sat at "Running 0, Waiting 104, 0.0 tokens/s" for the
+            # rest of simulated time (measured 2026-09-17 on the pack-3 arena).
+            if (self.pd_type == "prefill" and self.pd_buffer_bytes
+                    and req.decode_instance_id is not None
+                    and getattr(req, "pd_staging_instance", None) is None):
+                charged = req.decode_instance_id
+                self.pd_staging[charged] = (
+                    self.pd_staging.get(charged, 0.0)
+                    + self.memory.pd_kv_bytes(req.original_input))
+                req.pd_staging_instance = charged
 
             scheduled.append((req, num_new, num_computed))
             token_budget -= num_new
@@ -425,14 +506,10 @@ class Scheduler:
                     raise RuntimeError(f"Unknown Decode instance {target} for P/D handoff")
                 # Charge the target Decode's staging budget: it is released when
                 # that instance actually takes the request over (``add_decode``).
-                if self.pd_buffer_bytes:
-                    for scheduled_req in scheduled:
-                        req_obj = scheduled_req[0] if isinstance(scheduled_req, tuple) else scheduled_req
-                        if getattr(req_obj, "decode_instance_id", None) != target:
-                            continue
-                        self.pd_staging[target] = (
-                            self.pd_staging.get(target, 0.0)
-                            + self.memory.pd_kv_bytes(req_obj.original_input))
+                # The charge itself is once per *request*, at admission -- see
+                # ``_schedule_waiting``; doing it here charged again for every
+                # extra prefill chunk of the same request and leaked the
+                # difference.  Deliberately nothing to do on this path.
                 batch.pd_decode_npu_count = self.decode_npu_counts.get(target, 0)
                 if self.pd_link_handoff:
                     # The frontend charges these bytes to the producer's egress
@@ -652,20 +729,33 @@ class Scheduler:
         budget = max(1, int(getattr(self, "max_num_seqs", 1) or 1))
         if len(self.running) >= budget:
             self.backpressure_events += 1
+            _explain_admission_stall(
+                self, "decode-max-num-seqs", 0,
+                lambda: f"running={len(self.running)} >= max_num_seqs={budget}")
             return False
         hit_blocks, num_npu_hit, num_lower_hit = self.kv.get_computed_blocks(req)
         num_computed = req.num_computed_tokens
         if self.kv.allocate_slots(req, 1, hit_blocks, num_npu_hit, num_lower_hit) is None:
             self.backpressure_events += 1
+            _explain_admission_stall(
+                self, "decode-kv-pool", 0,
+                lambda: f"req#{req.id} running={len(self.running)} "
+                        f"free_blocks={self.kv.npu_pool.get_num_free_blocks()} "
+                        f"of {self.kv.npu_pool.num_blocks}")
             return False
         req.instance_id = self.instance_id
         req.decode_instance_id = self.instance_id
         req.status = RequestStatus.RUNNING
         if self.pd_buffer_bytes:
             # The buffer is consumed the moment this Decode takes the request.
-            staged = self.pd_staging.get(self.instance_id, 0.0)
-            self.pd_staging[self.instance_id] = max(
+            # Release against the instance the Prefill *charged*: a handoff can
+            # be re-targeted when its planned Decode is inactive, and crediting
+            # the new target instead would strand the original reservation.
+            charged = getattr(req, "pd_staging_instance", None) or self.instance_id
+            staged = self.pd_staging.get(charged, 0.0)
+            self.pd_staging[charged] = max(
                 0.0, staged - self.memory.pd_kv_bytes(req.original_input))
+            req.pd_staging_instance = None
         req.num_computed_tokens = num_computed
         self.kv.take_traffic()          # a P/D handoff is not a recall
         self.running.append(req)
