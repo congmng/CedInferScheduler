@@ -17,6 +17,7 @@ class Router:
             prefix_profiler=None,
             name_decode_at_arrival=False,
             policy_options=None,
+            casr_enabled=False,
     ):
         self.schedulers = schedulers
         self.num_instances = num_instances
@@ -69,6 +70,25 @@ class Router:
             "decode": {int(key): float(value) for key, value in
                        (options.get("decode_capacity") or {}).items()},
         }
+        # The real router picks the Decode of a CASR policy by *cost*
+        # (``disagg_router._pick_decode_cost``: network + service + utilisation)
+        # rather than by load, which is why its ``casr_lp`` arm concentrated all
+        # 200 requests on the fastest Decode while its ``load`` arm spread them
+        # by capacity (measured 2026-09-16, 3-domain run: 200/200 vs 112/73/15).
+        # Without this the simulator's local-recompute path made ``casr_lp``
+        # bit-identical to ``load``.
+        self.casr_enabled = bool(casr_enabled)
+        self.decode_service_ms = {int(key): float(value) for key, value in
+                                  (options.get("decode_service_ms") or {}).items()}
+        self.pair_rtt_ms = {}
+        for key, value in (options.get("pair_costs") or {}).items():
+            if isinstance(key, str):
+                source, target = (int(part) for part in
+                                  key.replace("/", ",").split(",", 1))
+            else:
+                source, target = int(key[0]), int(key[1])
+            self.pair_rtt_ms[(source, target)] = float(
+                (value or {}).get("rtt_ms", 0.0))
         self.local_prefill_ms_per_1k = float(
             options.get("local_prefill_ms_per_1k", 93.0) or 93.0)
         self.transfer_ms_per_1k_local = float(
@@ -327,6 +347,35 @@ class Router:
                       if sched.accepts_new_requests and sched.instance_id in fallback_ids]
         return self._least_loaded(candidates) if candidates else None
 
+    def _decode_cost_select(self, prefill_sched):
+        """Cheapest Decode for this Prefill, mirroring ``_pick_decode_cost``.
+
+        Cost has the same three parts as the real router's ``_pair_cost``:
+        the network term (zero for a same-domain pair, the measured RTT
+        otherwise), the Decode's measured service time, and a wait estimate
+        ``service x inflight / capacity`` (Little's law).  The Decode chosen
+        here is the one that runs the request, including when the request takes
+        the local-recompute path.
+        """
+        candidates = [candidate for candidate in self.decode_schedulers
+                      if candidate.accepts_new_requests]
+        if not candidates:
+            return None
+        table = getattr(self, "capacity_tables", {}).get("decode", {})
+        prefill_node = int(getattr(prefill_sched, "node_id", -1))
+
+        def cost(sched):
+            same_node = prefill_node == int(getattr(sched, "node_id", -2))
+            rtt = 0.0 if same_node else self.pair_rtt_ms.get(
+                (int(prefill_sched.instance_id), int(sched.instance_id)), 0.0)
+            service = self.decode_service_ms.get(int(sched.instance_id), 0.0)
+            inflight = len(sched.running) + len(sched.waiting)
+            capacity = table.get(int(sched.instance_id)) or getattr(
+                sched, "max_num_seqs", 1) or 1
+            return rtt + service + service * inflight / max(1.0, float(capacity))
+
+        return min(candidates, key=lambda sched: (cost(sched), sched.instance_id))
+
     def _decode_scheduler_for(self, req_data, current_time_ns, prefill_sched):
         """Decode instance this arriving request would be paired with."""
         if not self.decode_schedulers:
@@ -575,7 +624,12 @@ class Router:
             # 200/200 requests of the Dolly trace (measured 2026-09-16).
             local_request = False
             if self.local_prefill_mode != "never" and self.decode_schedulers:
-                decode_sched = self._decode_scheduler_for(req_data, current_time_ns, sched)
+                # CASR policies choose the Decode by cost (that is what makes
+                # their placement differ from the baselines); everything else
+                # keeps the plan-then-least-loaded order.
+                decode_sched = (self._decode_cost_select(sched)
+                                if self.casr_enabled
+                                else self._decode_scheduler_for(req_data, current_time_ns, sched))
                 if decode_sched is not None and decode_sched is not sched:
                     if self.local_prefill_mode == "always":
                         use_local = True

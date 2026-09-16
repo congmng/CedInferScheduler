@@ -685,7 +685,8 @@ def main():
     router = Router(num_instances, schedulers, num_req, request_routing_policy,
                     prefix_profiler=casr_profiler,
                     name_decode_at_arrival=domain_aware_links,
-                    policy_options=casr_config)
+                    policy_options=casr_config,
+                    casr_enabled=bool(args.enable_casr))
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)

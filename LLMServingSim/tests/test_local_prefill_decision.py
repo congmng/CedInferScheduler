@@ -102,5 +102,57 @@ class CapacityWeightedLoadTests(unittest.TestCase):
         self.assertEqual(instance._least_load_select(schedulers, "prefill"), 1)
 
 
+class CostBasedDecodeTests(unittest.TestCase):
+    """CASR policies pick the Decode by cost, not by load.
+
+    The real router's ``casr_lp`` arm put 200/200 requests of the Dolly trace
+    on its fastest Decode while ``load`` spread them by capacity (112/73/15,
+    measured 2026-09-16).  Because the local-recompute path bypasses the
+    Prefill entirely, the simulator's plan had no effect on placement until the
+    Decode was chosen the same way.
+    """
+
+    def decode_router(self, pair_costs=None):
+        instance = router(decode_capacity={1: 65, 3: 26, 5: 57})
+        instance.casr_enabled = True
+        instance.decode_service_ms = {1: 144.7, 3: 421.6, 5: 157.1}
+        instance.pair_rtt_ms = pair_costs or {}
+        instance.decode_schedulers = [
+            _Sched(1, node_id=0, capacity=65), _Sched(3, node_id=1, capacity=26),
+            _Sched(5, node_id=2, capacity=57)]
+        return instance
+
+    def test_the_fastest_decode_wins_when_everything_is_idle(self):
+        instance = self.decode_router()
+        chosen = instance._decode_cost_select(_Sched(0, node_id=0))
+        self.assertEqual(chosen.instance_id, 1, "d5090 has the lowest service time")
+
+    def test_a_cross_domain_decode_pays_its_rtt(self):
+        # Move the fastest Decode behind a 48 ms hop and keep a slower one on
+        # the Prefill's own node: 144.7 + 48 loses to the free 157.1.
+        instance = self.decode_router({(0, 1): 48.0})
+        instance.decode_schedulers[0].node_id = 1
+        instance.decode_schedulers[2].node_id = 0
+        chosen = instance._decode_cost_select(_Sched(0, node_id=0))
+        self.assertEqual(chosen.instance_id, 5,
+                         "144.7 + 48 loses to the same-domain 157.1")
+
+    def test_a_saturated_decode_loses_on_the_wait_estimate(self):
+        instance = self.decode_router()
+        instance.decode_schedulers[0].running = [None] * 60
+        chosen = instance._decode_cost_select(_Sched(0, node_id=0))
+        self.assertNotEqual(chosen.instance_id, 1)
+
+    def test_baselines_still_follow_the_plan_then_load_order(self):
+        instance = self.decode_router()
+        instance.casr_enabled = False
+        # ``_decode_scheduler_for`` needs the plan/counter machinery; with no
+        # plan it must fall back to the capacity-weighted load pick.
+        instance.affinity_plan = None
+        instance._select_instance = instance._least_load_select
+        chosen = instance._decode_scheduler_for({}, 0, _Sched(0, node_id=0))
+        self.assertEqual(chosen.instance_id, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
