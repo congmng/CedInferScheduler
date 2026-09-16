@@ -183,6 +183,12 @@ def main() -> int:
             f"# 对齐矩阵（模拟器 revision {revision()}）\n\n"
             "由 `tests/alignment_matrix.py` 生成：每条记录都是"
             "「灌入真机放置/到达流 → 模拟器执行 → 与真机并排」。\n\n"
+            "- `mode=pacing`：按真机录制的提交时刻开环回放（真机侧用 "
+            "`CLIENT_PACING=trace` 录的那几条 trace）。\n"
+            "- `mode=placement`：只灌真机逐请求放置、到达流用模拟器闭环客户端"
+            "（真机侧是并发上限的录法）。\n"
+            "- `mode=-`：早期回放工具产出的行，当时还没记录模式；`rev` 同理。"
+            "`serving/` 自 `5ceefcd` 起未再改动，因此这些行仍对应当前执行模型。\n\n"
             + table + "\n", encoding="utf-8")
         print(f"\nwrote {path}")
     return 0
