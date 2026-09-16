@@ -55,8 +55,14 @@ def has_profile(hardware, model=MODEL, variant="bf16"):
     """
     return (REPO / "profiler" / "perf" / hardware / model / variant).is_dir()
 # Same-host P/D handoff measured on the deployment: 585 ms per 1000 prompt
-# tokens = 0.31 GB/s (314 MB/s).  Cross-domain uses the deployment's links.
-SAME_HOST_HANDOFF_GBPS = 0.3
+# tokens.  One prompt token is 147 456 B of KV (Qwen3-8B bf16), so 1000 tokens
+# is 147.5 MB and the rate is 252 MB/s -- the deployment record's own table says
+# 257 MB/s for this pair.  (An earlier revision wrote 0.31 GB/s by dividing the
+# 1250-token KV size, 184 MB, by the *1000-token* time; that made every same-host
+# push 17% too fast, which is the residual the recorded-pacing replay showed:
+# sim TTFT 3839 ms against the cluster's 4795 ms.)  Cross-domain uses the
+# deployment's links.
+SAME_HOST_HANDOFF_GBPS = 0.257
 SAME_HOST_LATENCY_NS = 1000
 # Measured container restart -> serving time (2026-09-14/15, both the real
 # router's WARMING gate and the p4090/p3090b scale-out).

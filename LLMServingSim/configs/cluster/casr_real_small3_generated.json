@@ -3,7 +3,7 @@
   "link_bw": 0.11,
   "link_latency": 48000000.0,
   "_generated": "Derived from deploy/real_lmcache_pd/router_config.json by tests/gen_sim_config_from_real.py -- do not hand-edit; re-run the generator instead.",
-  "_link_comment": "link_bw=0.11 GB/s is the deployment's standard cross-domain link (0.88 Gbps, 12 pairs) and link_latency=48000000.0 ns the slowest RTT; the fabric is NOT uniform (A100 pairs run 0.118-0.146 Gbps, kvlink budget [18300000.0, 260000000.0, 260000000.0, 260000000.0, 260000000.0] B/s), and the simulator's one-value-per-dimension topology cannot express that. intra_node_link_bw=0.3 GB/s is the measured same-host P/D handoff (585 ms per 1000 prompt tokens), and kv_egress_gbps is the producer-side push ceiling from the deployment's standard kvlink budget.",
+  "_link_comment": "link_bw=0.11 GB/s is the deployment's standard cross-domain link (0.88 Gbps, 12 pairs) and link_latency=48000000.0 ns the slowest RTT; the fabric is NOT uniform (A100 pairs run 0.118-0.146 Gbps, kvlink budget [18300000.0, 260000000.0, 260000000.0, 260000000.0, 260000000.0] B/s), and the simulator's one-value-per-dimension topology cannot express that. intra_node_link_bw=0.257 GB/s is the measured same-host P/D handoff (585 ms per 1000 prompt tokens), and kv_egress_gbps is the producer-side push ceiling from the deployment's standard kvlink budget.",
   "kv_egress_gbps": 0.11,
   "pd_buffer_bytes": 34359738368,
   "casr": {
@@ -326,7 +326,7 @@
       ]
     }
   ],
-  "intra_node_link_bw": 0.3,
+  "intra_node_link_bw": 0.257,
   "intra_node_link_latency": 1000,
   "_excluded_by_request": "Removed by --exclude for a small-cluster run: 3090b, a100. The real arms must disable the same instance ids."
 }

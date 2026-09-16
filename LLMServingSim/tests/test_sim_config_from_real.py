@@ -67,8 +67,11 @@ class GeneratedConfigTests(unittest.TestCase):
         config = gen.build()
         # 0.88 Gbps standard cross-domain link / 8 = 0.11 GB/s.
         self.assertAlmostEqual(config["link_bw"], 0.11, places=3)
-        # Measured same-host handoff: 585 ms per 1000 prompt tokens.
-        self.assertAlmostEqual(config["intra_node_link_bw"], 0.3, places=3)
+        # Measured same-host handoff: 585 ms per 1000 prompt tokens, and one
+        # token is 147 456 B of KV -> 252 MB/s (the deployment record's table
+        # says 257 MB/s for this pair).  0.3 was the 1250-token KV size divided
+        # by the 1000-token time, i.e. 17% too fast.
+        self.assertAlmostEqual(config["intra_node_link_bw"], 0.257, places=3)
 
     def test_service_times_are_remapped_and_cover_every_instance(self):
         """Per-instance compute cost has to follow the deployment's numbering.
