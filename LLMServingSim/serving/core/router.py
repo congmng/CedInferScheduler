@@ -653,7 +653,7 @@ class Router:
                 request.local_prefill = True
                 request.decode_instance_id = sched.instance_id
                 self._counters["local_prefill"] = self._counters.get("local_prefill", 0) + 1
-            if self.name_decode_at_arrival:
+            elif self.name_decode_at_arrival:
                 # Pick the Decode half of the pair now, the way the real router
                 # does (``disagg_router._pick_decode`` runs on the same request
                 # before anything is dispatched).  This is not just
@@ -664,6 +664,12 @@ class Router:
                 # intra-node hop -- and the cross-domain link the solver priced
                 # was never actually paid in the timeline (see
                 # docs/模拟器与真机一致性核查.md 附七).
+                #
+                # A locally-computed request keeps the instance it was routed
+                # to: overwriting it here recorded a Decode that never ran the
+                # request, so the per-request CSV named the wrong instance
+                # (measured 2026-09-16: every local request reported
+                # ``decode_instance_id=5`` while actually running on 1).
                 request.decode_instance_id = self._decode_instance_id_for(
                     request, current_time_ns)
             if self.prefix_profiler is not None:
