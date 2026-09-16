@@ -477,11 +477,28 @@ class CapacityAwareFlowSolver:
         if per_request > 0:
             return per_request
         if self.config.kv_bytes_per_token > 0:
-            tokens = entry.get("requested_tokens_ewma") or {}
-            if isinstance(tokens, Mapping):
-                per_request = max((float(value) for value in tokens.values()), default=0.0)
-            else:
-                per_request = float(tokens)
+            # KV bytes are a physical property of the prompt, so use the exact
+            # observation rather than a smoothed rate.  The EWMA starts at
+            # ``alpha x tokens`` -- 250 for a 1250-token prompt -- which
+            # under-priced the handoff five-fold and kept the producer-egress
+            # constraint (the one that actually binds this fabric) invisible:
+            # measured 2026-09-16, the small-cluster forced-transfer arm showed
+            # ``link_overflow 0`` for every instance while the run was 20x over
+            # the link's budget, so ``+P`` never looked profitable.
+            per_request = 0.0
+            exact = entry.get("requested_tokens")
+            if isinstance(exact, Mapping):
+                per_request = max((float(value) for value in exact.values()),
+                                  default=0.0)
+            elif exact:
+                per_request = float(exact)
+            if per_request <= 0:
+                tokens = entry.get("requested_tokens_ewma") or {}
+                if isinstance(tokens, Mapping):
+                    per_request = max((float(value) for value in tokens.values()),
+                                      default=0.0)
+                else:
+                    per_request = float(tokens)
             if per_request > 0:
                 return max(0.0, per_request * self.config.kv_bytes_per_token)
         return max(0.0, self.config.default_kv_bytes)

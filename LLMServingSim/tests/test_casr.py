@@ -467,6 +467,13 @@ class CasrTests(unittest.TestCase):
         budget only matches reality when the solver knows how many KV bytes a
         class moves.  The trace path reports tokens, not bytes, so the solver
         has to derive them from the per-request token count.
+
+        It uses the *exact* observation when there is one.  The token EWMA is
+        only a fallback: a unique-prompt workload observes every class exactly
+        once, so its EWMA never converges past ``alpha x tokens`` -- 250 for a
+        1250-token prompt -- which under-priced the handoff five-fold and hid
+        the producer-egress constraint that actually binds this fabric
+        (measured 2026-09-16).
         """
         config = FlowSolverConfig.from_dict({
             "kv_bytes_per_token": 147456.0,
@@ -474,7 +481,11 @@ class CasrTests(unittest.TestCase):
         })
         solver = CapacityAwareFlowSolver(config)
         entry = {"requested_tokens_ewma": {0: 2048.0}, "requested_tokens": {0: 999999.0}}
-        self.assertAlmostEqual(solver._class_kv_bytes("c", entry), 2048.0 * 147456.0)
+        self.assertAlmostEqual(solver._class_kv_bytes("c", entry), 999999.0 * 147456.0)
+        # Without an exact observation the EWMA is still used.
+        self.assertAlmostEqual(
+            solver._class_kv_bytes("c", {"requested_tokens_ewma": {0: 2048.0}}),
+            2048.0 * 147456.0)
         # An explicit per-class size still wins over the derived one.
         config = FlowSolverConfig.from_dict({
             "kv_bytes_per_token": 147456.0,
