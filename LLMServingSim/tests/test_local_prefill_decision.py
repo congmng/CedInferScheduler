@@ -160,3 +160,39 @@ class CostBasedDecodeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OccupancyWeightTests(unittest.TestCase):
+    """A backed-up producer must stop looking cheapest.
+
+    Measured 2026-09-16 in the six-domain arena: every class preferred the
+    cheapest pair, so 52-75% of 376 requests landed on the A100 whose push
+    budget is 1.4 req/s; the plan itself reported ``link_overflow 0`` because
+    each class's flow is tiny.  Pricing the producer's *pending* wait per
+    request (exactly what the real router does with
+    ``link_inflight_bytes/bandwidth``) cut the pool-3 mean from 11243 ms to
+    1590 ms and the p95 from 37111 ms to 2859 ms.
+    """
+
+    def test_a_backed_up_producer_loses_its_share(self):
+        class _Link:
+            def pending_ns(self, instance_id, now_ns):
+                return 3_000_000_000 if int(instance_id) == 10 else 0
+
+        instance = router()
+        instance.pd_link = _Link()
+        candidates = [_Sched(0, node_id=0), _Sched(10, node_id=5)]
+        weights = instance._occupancy_weights(candidates, {0: 0.4, 10: 0.6}, 0)
+        # 0.6 / (1 + 3 s) loses to 0.4 / (1 + 0 s).
+        self.assertGreater(weights[0], weights[10])
+
+    def test_an_idle_link_leaves_the_plan_weights_alone(self):
+        class _Link:
+            def pending_ns(self, instance_id, now_ns):
+                return 0
+
+        instance = router()
+        instance.pd_link = _Link()
+        candidates = [_Sched(0), _Sched(10)]
+        self.assertEqual(instance._occupancy_weights(candidates, {0: 0.4, 10: 0.6}, 0),
+                         {0: 0.4, 10: 0.6})

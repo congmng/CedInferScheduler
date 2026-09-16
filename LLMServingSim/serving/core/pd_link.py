@@ -101,6 +101,19 @@ class PdHandoffLink:
     def in_flight(self):
         return len(self._due)
 
+    def pending_ns(self, producer_instance, now_ns):
+        """How long the producer's egress would make a new push wait, in ns.
+
+        The router's occupancy price: the real control loop keeps
+        ``link_inflight_bytes / bandwidth`` per link and adds it to a candidate
+        pair's cost, so a producer that is already backed up stops being the
+        cheapest place to send the next request.
+        """
+        slots = self._free_at.get(producer_instance)
+        if not slots:
+            return 0
+        return max(0, min(slots) - int(now_ns))
+
     def wait_ns(self, producer_instance, producer_node, consumer_node,
                 num_bytes, now_ns):
         """How long a push enqueued *now* would take to land, in ns.

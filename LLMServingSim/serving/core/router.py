@@ -384,6 +384,26 @@ class Router:
         self._plan_assignments[(assignment_key, selected.instance_id)] += 1
         return selected
 
+    def _occupancy_weights(self, candidates, weights, current_time_ns):
+        """Discount a candidate Prefill by how backed-up its egress already is.
+
+        The plan is per class, and a few hundred classes can each independently
+        prefer the same producer: their flows look small one by one (the LP
+        reported ``link_overflow 0`` in the six-domain arena) while the executed
+        placement overran that producer's push budget ~11x and the p95 was 37 s
+        against the best arm's 1.3 s.  The real router prices the link's
+        occupancy per request (``link_inflight_bytes / bandwidth``), so a
+        producer that is already backed up stops looking cheapest.
+        """
+        link = getattr(self, "pd_link", None)
+        if link is None or len(candidates) <= 1:
+            return weights
+        now_ns = int(current_time_ns or 0)
+        return {
+            instance_id: float(weight)
+            / (1.0 + link.pending_ns(int(instance_id), now_ns) / 1e9)
+            for instance_id, weight in weights.items()}
+
     def _select_planned_prefill(self, req_data, current_time_ns):
         plan = self.affinity_plan
         if plan is None or plan.is_expired(current_time_ns):
@@ -392,6 +412,9 @@ class Router:
         candidates = [sched for sched in self.prefill_schedulers
                       if sched.accepts_new_requests and sched.instance_id in weights]
         if not candidates:
+            return None
+        weights = self._occupancy_weights(candidates, weights, current_time_ns)
+        if not weights:
             return None
         return self._select_weighted(candidates, weights,
                                      ("prefill", req_data['class_id']))
@@ -756,9 +779,11 @@ class Router:
                 candidates = [candidate for candidate in self.prefill_schedulers
                               if candidate.accepts_new_requests
                               and candidate.instance_id in self._plan_prefill_totals]
-                if candidates:
+                aggregate_weights = self._occupancy_weights(
+                    candidates, self._plan_prefill_totals, current_time_ns)
+                if candidates and aggregate_weights:
                     sched = self._select_weighted(
-                        candidates, self._plan_prefill_totals,
+                        candidates, aggregate_weights,
                         ("prefill_aggregate",))
                     self._counters["prefill_aggregate"] = (
                         self._counters.get("prefill_aggregate", 0) + 1)

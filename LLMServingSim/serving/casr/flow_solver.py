@@ -944,6 +944,7 @@ class CapacityAwareFlowSolver:
                                               objective.Value() / max(1.0, work[class_id]), carried))
         assignments = self._collapse_low_demand(assignments, grouped, prefill, decode)
         assignments = self._cap_class_footprint(assignments, grouped, prefill, decode)
+        assignments = self._enforce_egress_budget(assignments, grouped, prefill, decode)
         self.diagnostics = {
             "backend": self.backend,
             "objective": objective.Value(),
@@ -979,6 +980,118 @@ class CapacityAwareFlowSolver:
         if not self._link_uses_bytes(link):
             return 1.0
         return self._class_kv_bytes(class_id, grouped[class_id])
+
+    def _enforce_egress_budget(self, assignments, grouped, prefill, decode):
+        """Move class flow off producers whose KV egress budget is exhausted.
+
+        The LP prices the producer-side push through a *soft* slack variable, and
+        a single class's flow is far too small for that slack to show: the
+        overflow only appears once a few hundred classes land on the same
+        producer.  Measured 2026-09-16 in the six-domain arena -- the LP's own
+        flows reported ``link_overflow 0`` while the A100's push link was
+        overrun ~11x in aggregate, 284 of 376 requests landed there, and the
+        p95 was 37 s against the best arm's 1.3 s.  Neither disabling the
+        low-demand single-homing (byte-identical result) nor raising
+        ``overflow_penalty`` 100x (284 -> 280 requests) moved it.
+
+        So: after the LP, walk the classes sitting on an over-budget link and
+        move the cheapest-to-move ones to the cheapest pair that still has room,
+        in the same spirit as ``_cap_class_footprint`` does for the prefix
+        working set.  Whole classes move, because the router samples one
+        instance per request and a fractional rescale would not change what the
+        timeline does.
+        """
+        self._last_egress_moves = []
+        if not assignments:
+            return assignments
+        links = [link for link in self.config.shared_links if self._link_uses_bytes(link)]
+        if not links:
+            return assignments
+        prefills = {int(s.instance_id): s for s in prefill}
+        decodes = {int(s.instance_id): s for s in decode}
+        by_class = {}
+        for item in assignments:
+            by_class.setdefault(item.class_id, []).append(item)
+
+        def bytes_of(item, link):
+            return item.flow * self._class_link_bytes(item.class_id, grouped, link)
+
+        for _sweep in range(4):
+            load = {link.link_id: 0.0 for link in links}
+            for item in assignments:
+                for link in links:
+                    if link.carries(item.prefill_id, item.decode_id):
+                        load[link.link_id] += bytes_of(item, link)
+            over = [link for link in links
+                    if load[link.link_id] > self._link_capacity(link) + 1e-9]
+            if os.environ.get("EGRESS_DEBUG"):
+                print("[egress] " + " ".join(
+                    f"{link.link_id}={load[link.link_id]/1e6:.1f}/"
+                    f"{self._link_capacity(link)/1e6:.1f}MB/s" for link in links),
+                    f"over={[link.link_id for link in over]}", flush=True)
+            if not over:
+                break
+            over.sort(key=lambda link: load[link.link_id] - self._link_capacity(link),
+                      reverse=True)
+            moved_any = False
+            for link in over:
+                for class_id, items in sorted(by_class.items(),
+                                              key=lambda kv: -sum(i.flow for i in kv[1])):
+                    if load[link.link_id] <= self._link_capacity(link) + 1e-9:
+                        break
+                    mine = [item for item in items
+                            if link.carries(item.prefill_id, item.decode_id)]
+                    if not mine:
+                        continue
+                    entry = grouped.get(class_id) or {}
+                    best = None
+                    for candidate_p in prefills.values():
+                        for candidate_d in decodes.values():
+                            if candidate_p.instance_id == mine[0].prefill_id and \
+                                    candidate_d.instance_id == mine[0].decode_id:
+                                continue
+                            spare = True
+                            for other in links:
+                                if not other.carries(candidate_p.instance_id,
+                                                     candidate_d.instance_id):
+                                    continue
+                                extra = sum(bytes_of(item, other) for item in mine)
+                                if load[other.link_id] + extra > self._link_capacity(other) + 1e-9:
+                                    spare = False
+                                    break
+                            if not spare:
+                                continue
+                            cost = self._pair_cost(candidate_p, candidate_d, class_id,
+                                                   entry)
+                            if best is None or cost < best[0]:
+                                best = (cost, candidate_p.instance_id,
+                                        candidate_d.instance_id)
+                    if best is None:
+                        continue
+                    _, new_p, new_d = best
+                    moved = []
+                    for item in mine:
+                        for other in links:
+                            if other.carries(item.prefill_id, item.decode_id):
+                                load[other.link_id] = max(
+                                    0.0, load[other.link_id] - bytes_of(item, other))
+                        moved.append(dataclass_replace(item, prefill_id=new_p,
+                                                       decode_id=new_d))
+                    for item in moved:
+                        for other in links:
+                            if other.carries(item.prefill_id, item.decode_id):
+                                load[other.link_id] += bytes_of(item, other)
+                    by_class[class_id] = [item for item in items if item not in mine] + moved
+                    self._last_egress_moves.append({
+                        "class_id": class_id, "from": mine[0].prefill_id,
+                        "to": new_p, "decode": new_d,
+                        "link": link.link_id})
+                    moved_any = True
+            if not moved_any:
+                break
+        out = [item for items in by_class.values() for item in items]
+        out.sort(key=lambda item: (item.prefill_id, item.decode_id, item.class_id))
+        return out
 
     def _cap_class_footprint(self, assignments, grouped, prefill, decode):
         """Keep each Prefill's prefix working set at or below its cap.
