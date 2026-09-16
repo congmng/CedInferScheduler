@@ -32,7 +32,7 @@ will actually behave.  Source of the TPOT column:
 """
 
 from .trace_generator import (_load_architecture, _load_perf_db, _lookup_1d,
-                              _tp_tables, resolve_variant)
+                              _tp_tables, plan_layer_sequences, resolve_variant)
 from .utils import get_config
 
 
@@ -53,7 +53,8 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None):
     tables = _tp_tables(db, tp)
     dense = tables.get("dense") or {}
     per_sequence = tables.get("per_sequence") or {}
-    sequence = _load_architecture(config["model_type"])["sequence"]
+    architecture = _load_architecture(config["model_type"])
+    sequence = architecture["sequence"]
     blocks = int(config.get("num_hidden_layers", 1) or 1)
     total = 0
 
@@ -67,11 +68,21 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None):
 
     for layer in sequence.get("prologue") or ():
         total += dense_time(layer, 1)
-    for group in ("pre_attn", "post_attn", "mlp_dense", "mlp_moe"):
-        for layer in sequence.get(group) or ():
-            if layer == "attention":
-                continue          # context dependent; ~0.01 ms at 1k
-            total += dense_time(layer, blocks)
+    per_layer = plan_layer_sequences(config, architecture)
+    if per_layer is not None:
+        # A hybrid whose layers differ in shape: charge each layer its own
+        # pipeline instead of the flat template's, once per layer.
+        for layers in per_layer:
+            for layer in layers:
+                if layer == "attention":
+                    continue      # context dependent; ~0.01 ms at 1k
+                total += dense_time(layer, 1)
+    else:
+        for group in ("pre_attn", "post_attn", "mlp_dense", "mlp_moe"):
+            for layer in sequence.get(group) or ():
+                if layer == "attention":
+                    continue      # context dependent; ~0.01 ms at 1k
+                total += dense_time(layer, blocks)
     for layer in sequence.get("head") or ():
         total += sequence_time(layer, 1)
     return total

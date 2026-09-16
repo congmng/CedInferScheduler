@@ -160,6 +160,11 @@ class Architecture(BaseModel):
 
     catalog: Catalog
     sequence: Sequence | None = None
+    # Per-block-type pipelines, keyed by the strings a model config lists in
+    # ``layers_block_type`` (a real hybrid's layers differ in *shape*, so one
+    # ``sequence`` cannot describe them). Only the simulator reads it; the
+    # profiler validates it here so a typo fails before a profile run.
+    layer_types: dict[str, Sequence] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Validation
@@ -203,6 +208,14 @@ class Architecture(BaseModel):
             if unknown:
                 raise ValueError(
                     f"sequence references names not in catalog: {sorted(set(unknown))}"
+                )
+        for block_type, spec in self.layer_types.items():
+            catalog_names = {n for _, n, _ in self.catalog.all_entries()}
+            unknown = [n for n in spec.all_layers() if n not in catalog_names]
+            if unknown:
+                raise ValueError(
+                    f"layer_types.{block_type} references names not in "
+                    f"catalog: {sorted(set(unknown))}"
                 )
 
         return self

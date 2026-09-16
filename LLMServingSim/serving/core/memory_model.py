@@ -49,7 +49,13 @@ class MemoryModel():
         self.n_embd = self.config['hidden_size']
         self.n_layer = self.config['num_hidden_layers']
         self.n_head = self.config['num_attention_heads']
-        self.head_dim = self.config.get('head_dim', self.n_embd // self.n_head)
+        # ``head_dim`` is the HF key on most families; Zamba2 (and a few other
+        # hybrids) spell the same quantity ``attention_head_dim`` and size the
+        # attention tensors off ``attention_hidden_size`` instead of hidden_size.
+        self.head_dim = (self.config.get('head_dim')
+                         or self.config.get('attention_head_dim')
+                         or self.n_embd // self.n_head)
+        self.attn_hidden = int(self.config.get('attention_hidden_size', self.n_embd))
         self.kv_head = self.config.get("num_key_value_heads", self.n_head)  # fallback to n_head if not defined
         self.q_dim = self.n_head * self.head_dim       # total Q projection output dim
         self.kv_dim = self.kv_head * self.head_dim     # total KV projection output dim
@@ -61,6 +67,13 @@ class MemoryModel():
         # much smaller, non-linear KV footprint does to the *algorithm*.
         geometry = self.config.get("kv_geometry") or {}
         self.full_attention_layers = int(geometry.get("full_layers", self.n_layer))
+        # A real hybrid (Zamba2 and friends) interleaves its KV-bearing layers
+        # instead of putting them first, so the geometry may name the indices
+        # outright; the count above is then derived from that list.
+        indices = geometry.get("full_layer_indices")
+        if indices:
+            self.full_attention_layers = len(
+                [i for i in indices if 0 <= int(i) < self.n_layer])
         self.window_tokens = int(geometry.get("window_tokens", 0) or 0)
         self.vocab_size = self.config['vocab_size']
         # Accept either the Mistral-style ``num_local_experts`` or the
@@ -191,7 +204,17 @@ class MemoryModel():
 
         _, embedding, _ = calculate_sizes(self.model, 'embedding', 1, parallel=tp, fp=fp)
         weight += embedding
-        weight += self._get_weight_per_block(tp, ep, fp) * (self.n_layer // pp)
+        # A hybrid whose layers differ in shape (Zamba2: Mamba-only blocks
+        # against shared-attention+Mamba blocks) cannot be priced by one
+        # per-block figure; sum each layer's own type instead.
+        types = self.config.get("layers_block_type")
+        if types:
+            layers = list(types)[:self.n_layer]
+            total = sum(self._get_weight_per_layer_type(t, tp, ep, fp)
+                        for t in layers)
+            weight += total // pp
+        else:
+            weight += self._get_weight_per_block(tp, ep, fp) * (self.n_layer // pp)
         _, ln_f, _ = calculate_sizes(self.model, 'final_layernorm', 1, parallel=tp, fp=fp)
         weight += ln_f
         _, lm_head, _ = calculate_sizes(self.model, 'lm_head', 1, parallel=tp, fp=fp)
@@ -222,6 +245,40 @@ class MemoryModel():
             _, ffn2_w, _ = calculate_sizes(self.model, 'down_proj', 1, parallel=tp, fp=fp)
             block_weight += ffn2_w
         return block_weight
+
+    def _get_weight_per_layer_type(self, block_type, tp, ep, fp):
+        """Weight of one layer of ``block_type`` (a ``layers_block_type`` entry).
+
+        Zamba2 sizes: ``mamba`` is a Mamba decoder (norm + mixer); ``hybrid``
+        adds the shared attention decoder (2*hidden input norm, qkv, o_proj,
+        pre-FF norm, FFN) plus the ``shared_linear`` that folds the attention
+        pathway back onto the Mamba one.
+
+        Known approximation: the *checkpoint* instantiates the shared
+        transformer once and reaches it from the later hybrid layers through
+        rank-128 adapters, so the real file stores ~1.2B parameters while this
+        sum gives the 6 hybrids their own full copy (~1.7B).  Over-counting
+        weights only makes the NPU-fit check stricter.
+        """
+        _, ln_w, _ = calculate_sizes(self.model, 'layernorm', 1, parallel=tp, fp=fp)
+        _, mamba_norm_w, _ = calculate_sizes(self.model, 'mamba_norm', 1, parallel=tp, fp=fp)
+        _, mamba_w, _ = calculate_sizes(self.model, 'mamba_mixer', 1, parallel=tp, fp=fp)
+        layer_weight = mamba_norm_w + mamba_w
+        if block_type != 'hybrid':
+            return layer_weight
+        _, attn_norm_w, _ = calculate_sizes(self.model, 'attention_norm', 1, parallel=tp, fp=fp)
+        _, qkv_w, _ = calculate_sizes(self.model, 'qkv_proj', 1, parallel=tp, fp=fp)
+        _, o_w, _ = calculate_sizes(self.model, 'o_proj', 1, parallel=tp, fp=fp)
+        _, shared_w, _ = calculate_sizes(self.model, 'shared_linear', 1, parallel=tp, fp=fp)
+        layer_weight += attn_norm_w + ln_w + qkv_w + o_w + shared_w
+        if self.is_moe:
+            _, moe_w, _ = calculate_sizes(self.model, 'moe', 1, parallel=ep, fp=fp)
+            layer_weight += moe_w
+        else:
+            _, gate_up_w, _ = calculate_sizes(self.model, 'gate_up_proj', 1, parallel=tp, fp=fp)
+            _, down_w, _ = calculate_sizes(self.model, 'down_proj', 1, parallel=tp, fp=fp)
+            layer_weight += gate_up_w + down_w
+        return layer_weight
 
     # -------------------- KV sizing math --------------------
 
@@ -453,13 +510,17 @@ def full_cluster_kv_bytes_per_token(model, fp, kv_cache_dtype='auto', tokens=0):
     config = get_config(model)
     n_embd = config['hidden_size']
     n_head = config['num_attention_heads']
-    head_dim = config.get('head_dim', n_embd // n_head)
+    head_dim = (config.get('head_dim') or config.get('attention_head_dim')
+                or n_embd // n_head)
     kv_head = config.get('num_key_value_heads', n_head)
     kv_dim = kv_head * head_dim
     n_layer = config['num_hidden_layers']
     kv_fp = 1 if kv_cache_dtype == 'fp8' else fp // 8
     geometry = config.get("kv_geometry") or {}
     full_layers = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
+    indices = geometry.get("full_layer_indices")
+    if indices:
+        full_layers = len([i for i in indices if 0 <= int(i) < n_layer])
     windowed = n_layer - full_layers
     window_tokens = int(geometry.get("window_tokens", 0) or 0)
     if windowed <= 0 or window_tokens <= 0 or tokens <= 0:
@@ -482,9 +543,14 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     config = get_config(model)
     n_embd = config['hidden_size']
     n_head = config['num_attention_heads']
-    head_dim = config.get('head_dim', n_embd // n_head)
+    head_dim = (config.get('head_dim') or config.get('attention_head_dim')
+                or n_embd // n_head)
     vocab_size = config['vocab_size']
     kv_head = config.get("num_key_value_heads", n_head)  # fallback to n_head if not defined
+    # Zamba2's attention pathway runs on ``attention_hidden_size`` (2x hidden
+    # size) while the Mamba path stays on hidden_size; every other family omits
+    # the key and both are n_embd.
+    attn_hidden = int(config.get("attention_hidden_size", n_embd))
     q_dim = n_head * head_dim       # total Q projection output dim
     kv_dim = kv_head * head_dim     # total KV projection output dim
     ffn_dim = config.get("intermediate_size", config.get("ffn_dim"))  # dense FFN dim
@@ -494,6 +560,16 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     num_local_experts = config.get(
         "num_local_experts", config.get("num_experts", 1)
     )
+    # Mamba2 (Zamba2 hybrids). The mixer's in_proj / conv / out_proj widths
+    # come from the mamba_* keys, not from the attention ones: d_inner is the
+    # expanded inner width, n_mamba_heads the head count of the SSM.
+    d_inner = int(config.get("mamba_expand", 2)) * n_embd
+    mamba_headdim = int(config.get("mamba_headdim", 64) or 64)
+    n_mamba_heads = int(config.get("n_mamba_heads")
+                        or max(1, d_inner // mamba_headdim))
+    mamba_ngroups = int(config.get("mamba_ngroups", 1))
+    mamba_d_state = int(config.get("mamba_d_state", 128))
+    mamba_d_conv = int(config.get("mamba_d_conv", 4))
 
     p = max(int(parallel), 1)
 
@@ -514,6 +590,37 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     elif layer_name in ["input_layernorm", "post_layernorm", "final_layernorm", "layernorm"]:
         input_size = length * n_embd * fp
         weight_size = 1 * n_embd * fp  # scale only
+        output_size = length * n_embd * fp
+
+    elif layer_name in ["mamba_norm", "attention_norm"]:
+        # Zamba2's two RMSNorms. ``attention_norm`` stands for both norms of
+        # the shared attention decoder -- the 2*hidden ``input_layernorm`` and
+        # the hidden-sized ``pre_ff_layernorm`` the profiler folds together --
+        # so it is priced at the attention pathway's width; the Mamba decoder's
+        # norm is hidden-sized like every other decoder norm.
+        width = attn_hidden if layer_name == "attention_norm" else n_embd
+        input_size = length * width * fp
+        weight_size = 1 * width * fp
+        output_size = length * width * fp
+
+    elif layer_name == "mamba_mixer":
+        # One catalog row: in_proj + depthwise conv1d + the selective scan +
+        # out_proj (+ the gated norm), which the engine runs as a fused op.
+        # The d_state terms of in_proj/conv are replicated across TP ranks;
+        # only the head dims shard.
+        in_proj_w = (n_embd * ((2 * d_inner + n_mamba_heads) // p)
+                     + n_embd * 2 * mamba_ngroups * mamba_d_state)
+        conv_w = mamba_d_conv * ((d_inner + 2 * mamba_ngroups * mamba_d_state) // p)
+        out_proj_w = (d_inner // p) * n_embd
+        input_size = length * n_embd * fp
+        weight_size = (in_proj_w + conv_w + out_proj_w) * fp
+        output_size = length * n_embd * fp
+
+    elif layer_name == "shared_linear":
+        # ReplicatedLinear(hidden, hidden) in Zamba2HybridLayer: it projects
+        # the attention pathway's output back onto the Mamba pathway.
+        input_size = length * n_embd * fp
+        weight_size = n_embd * n_embd * fp
         output_size = length * n_embd * fp
 
     elif layer_name == "qk_norm":
@@ -545,8 +652,8 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
 
     # ----------------- QKV Projection (fused) -----------------
     elif layer_name == "qkv_proj":
-        input_size = length * n_embd * fp
-        weight_size = n_embd * ((q_dim + 2 * kv_dim) // p) * fp
+        input_size = length * attn_hidden * fp
+        weight_size = attn_hidden * ((q_dim + 2 * kv_dim) // p) * fp
         output_size = length * ((q_dim + 2 * kv_dim) // p) * fp
 
     elif layer_name == "o_proj":

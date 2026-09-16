@@ -945,7 +945,9 @@ def _build_trace_ctx(hardware, model, config, tp_size, pp_size, local_ep, ep_tot
     n_embd = config['hidden_size']
     n_head = config['num_attention_heads']
     kv_head = config.get('num_key_value_heads', n_head)
-    head_dim = config.get('head_dim', n_embd // n_head)
+    # Zamba2 names the same quantity ``attention_head_dim``.
+    head_dim = (config.get('head_dim') or config.get('attention_head_dim')
+                or n_embd // n_head)
     is_moe = gate is not None
 
     pim_channels = 0
@@ -1042,9 +1044,7 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
         kv_prefill, kv_mean, kv_max, kv_min = (
             bctx.kv_prefill, bctx.kv_decode_mean, bctx.kv_decode_max, bctx.kv_decode_min)
         if windowed > 0 and window > 0 and layer_num is not None:
-            first_windowed = full_layers if full_layers > 0 else 0
-            is_windowed = (layer_num >= first_windowed)
-            if is_windowed:
+            if _is_windowed_layer(ctx, layer_num):
                 kv_prefill = min(kv_prefill, window)
                 kv_mean = min(kv_mean, window)
                 kv_max = min(kv_max, window)
@@ -1103,14 +1103,36 @@ def _kv_geometry(ctx):
     ``full_layers`` keep a normal KV cache, the rest hold at most
     ``window_tokens`` (a sliding window, or a linear/SSM state of that size).
     Absent, every layer is full attention and all the historical numbers hold.
+
+    A real hybrid interleaves its KV-bearing layers rather than putting them
+    first (Zamba2 keeps attention on every sixth layer), so the geometry may
+    name them with ``full_layer_indices``; the count is then read off that
+    list and ``_is_windowed_layer`` answers the per-layer question.
     """
     geometry = (getattr(ctx, "config", None) or {}).get("kv_geometry") or {}
     n_layer = int((getattr(ctx, "config", None) or {}).get("num_hidden_layers", 0) or 0)
     if not geometry or n_layer <= 0:
         return n_layer, 0, 0
-    full = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
+    indices = geometry.get("full_layer_indices")
+    if indices:
+        full = len([i for i in indices if 0 <= int(i) < n_layer])
+    else:
+        full = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
     window = int(geometry.get("window_tokens", 0) or 0)
     return full, max(0, n_layer - full), window
+
+
+def _is_windowed_layer(ctx, layer_num):
+    """True when ``layer_num`` is a windowed (non-KV-growing) layer."""
+    geometry = (getattr(ctx, "config", None) or {}).get("kv_geometry") or {}
+    if not geometry:
+        return False
+    indices = geometry.get("full_layer_indices")
+    if indices:
+        return layer_num not in {int(i) for i in indices}
+    n_layer = int((getattr(ctx, "config", None) or {}).get("num_hidden_layers", 0) or 0)
+    full = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
+    return layer_num >= full
 
 
 def _pd_kv_send_bytes(ctx, bctx):
@@ -1353,6 +1375,69 @@ def _sequence(perf_db, section):
     return list(seq.get(section) or [])
 
 
+def _layer_types(perf_db):
+    """``layer_types`` from the architecture yaml, or {} when absent.
+
+    Maps a block-type name -- the strings a model config lists in
+    ``layers_block_type`` (HF's convention for hybrids) -- to the
+    ``pre_attn`` / ``post_attn`` / ``mlp_dense`` lists that replace the single
+    ``sequence`` template for that layer.  A hybrid whose layers differ in
+    *shape* rather than only in KV geometry (Zamba2: Mamba-only blocks against
+    shared-attention+Mamba blocks) can only be traced this way; the flat
+    ``sequence`` would price every layer as if all of them were the rich one.
+    """
+    return perf_db["architecture"].get("layer_types") or {}
+
+
+def _block_type_for(ctx, layer_num):
+    """Block-type name for layer ``layer_num``, or None when uniform."""
+    types = _layer_types(ctx.perf_db)
+    if not types:
+        return None
+    names = (getattr(ctx, "config", None) or {}).get("layers_block_type")
+    if not names or layer_num is None or not (0 <= layer_num < len(names)):
+        return None
+    name = str(names[layer_num])
+    return name if name in types else None
+
+
+def _type_sequence(ctx, layer_num, section, fallback):
+    """Section list for this layer's block type, or the global template."""
+    block_type = _block_type_for(ctx, layer_num)
+    if block_type:
+        spec = _layer_types(ctx.perf_db).get(block_type) or {}
+        if section in spec:
+            return list(spec.get(section) or [])
+    return fallback
+
+
+def plan_layer_sequences(config, architecture):
+    """Per-layer flat pipelines for the *plan's* cost model, or None.
+
+    ``hw_service.step_cost_ns`` prices a card by walking the architecture's
+    flat ``sequence`` once and multiplying by the layer count.  That is right
+    only while every layer has the same shape: on a real hybrid (Zamba2) it
+    would charge the shared-attention block to all 38 layers, and since the
+    capacity the control plane plans against comes from this number, the plan
+    and the timeline would disagree about the same machine.  Return the same
+    per-layer pipelines ``_type_sequence`` gives the timeline, or None when
+    the model has no ``layers_block_type`` and the flat walk still applies.
+    """
+    types = architecture.get("layer_types") or {}
+    names = config.get("layers_block_type")
+    if not types or not names:
+        return None
+    n_layer = int(config.get("num_hidden_layers", len(names)) or len(names))
+    per_layer = []
+    for name in list(names)[:n_layer]:
+        spec = types.get(str(name)) or {}
+        seq = []
+        for group in ("pre_attn", "post_attn", "mlp_dense"):
+            seq.extend(spec.get(group) or [])
+        per_layer.append(seq)
+    return per_layer
+
+
 _skipped_layer_warned = set()
 
 
@@ -1429,14 +1514,20 @@ def _emit_sequence(ctx, bctx, layer_num, layers, lines, power_acc, batch_tag):
 
 
 def _emit_pre_attn_layers(ctx, bctx, layer_num, lines, power_acc, batch_tag='NONE'):
-    _emit_sequence(ctx, bctx, layer_num, _sequence(ctx.perf_db, "pre_attn"),
-                   lines, power_acc, batch_tag)
+    _emit_sequence(
+        ctx, bctx, layer_num,
+        _type_sequence(ctx, layer_num, "pre_attn",
+                       _sequence(ctx.perf_db, "pre_attn")),
+        lines, power_acc, batch_tag)
 
 
 def _emit_post_attn_layers(ctx, bctx, layer_num, lines, power_acc, batch_id_str, batch_tag='NONE'):
     # Attention post-processing common to dense and MoE.
-    _emit_sequence(ctx, bctx, layer_num, _sequence(ctx.perf_db, "post_attn"),
-                   lines, power_acc, batch_tag)
+    _emit_sequence(
+        ctx, bctx, layer_num,
+        _type_sequence(ctx, layer_num, "post_attn",
+                       _sequence(ctx.perf_db, "post_attn")),
+        lines, power_acc, batch_tag)
     # MLP: either the dense FFN stack or a single MoE block.
     if ctx.is_moe:
         moe_seq = _sequence(ctx.perf_db, "mlp_moe")
@@ -1446,8 +1537,11 @@ def _emit_post_attn_layers(ctx, bctx, layer_num, lines, power_acc, batch_id_str,
             else:
                 _emit_sequence(ctx, bctx, layer_num, [layer_name], lines, power_acc, batch_tag)
     else:
-        _emit_sequence(ctx, bctx, layer_num, _sequence(ctx.perf_db, "mlp_dense"),
-                       lines, power_acc, batch_tag)
+        _emit_sequence(
+            ctx, bctx, layer_num,
+            _type_sequence(ctx, layer_num, "mlp_dense",
+                           _sequence(ctx.perf_db, "mlp_dense")),
+            lines, power_acc, batch_tag)
 
 
 def _build_transformer_block(ctx, bctx, layer_num, batch_tag, batch_id_str):

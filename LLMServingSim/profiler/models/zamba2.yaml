@@ -1,0 +1,103 @@
+# Zamba2 family — hybrid Mamba2 + (shared) attention decoder.
+#
+# vLLM instantiates one of two decoder-layer types per entry of
+# ``layers_block_type``:
+#
+#   * ``Zamba2MambaDecoderLayer`` — input RMSNorm + ``MambaMixer2``
+#   * ``Zamba2HybridLayer``       — a *shared* attention decoder
+#     (``Zamba2AttentionDecoderLayer``: norm, qkv, rope, attention, o_proj,
+#     MLP) running in parallel with a Mamba decoder, the transformer output
+#     projected (``ReplicatedLinear``) and added to the Mamba path.
+#
+# Only the hybrid layers hold a KV cache, so a long prompt's KV footprint is
+# set by the number of ``hybrid`` entries (6 of 38 in Zamba2-1.2B, one every
+# six layers) instead of by the layer count — which is the point of profiling
+# this family for the KV-aware scheduler.
+#
+# ``MambaMixer2`` is bound as one composite row: in the engine its internals
+# (in_proj, conv1d, the selective scan, out_proj, the gated norm) are a single
+# fused op, and binding the children as well would double count them.
+#
+# Known approximation: ``Zamba2AttentionDecoderLayer`` holds two RMSNorms
+# (``input_layernorm`` on the concatenated hidden state, ``pre_ff_layernorm``
+# before the MLP).  The catalog can only key on (class, ancestor-class), so
+# both match ``attention_norm`` and their timings are averaged (~0.3% of the
+# block either way).
+
+sequence:
+  prologue:  [embedding]
+  pre_attn:  [mamba_norm, mamba_mixer, attention_norm, qkv_proj, rotary_emb,
+              attention, shared_linear]
+  post_attn: [o_proj]
+  mlp_dense: [gate_up_proj, act_fn, down_proj]
+  mlp_moe:   []
+  head:      [final_layernorm, lm_head, sampler]
+
+# Per-block-type pipelines.  ``layers_block_type`` in the model config names
+# one entry per layer, so the simulator walks *this* table instead of the flat
+# ``sequence`` above -- otherwise all 38 layers would be priced as hybrid
+# blocks and the six attention layers would be charged 38 times.  The flat
+# ``sequence`` stays as the fallback for a config without the key.
+#
+# Emission order is pre_attn -> post_attn -> mlp_dense.  The engine runs the
+# shared attention decoder's MLP *before* ``shared_linear`` and the Mamba
+# decoder; here the MLP lands two rows later.  Every op is still charged
+# exactly once, and the only order-sensitive hooks are the TP ALLREDUCEs on
+# o_proj / down_proj, so the difference is a couple of slots in the graph.
+layer_types:
+  mamba:
+    pre_attn:  [mamba_norm, mamba_mixer]
+    post_attn: []
+    mlp_dense: []
+  hybrid:
+    pre_attn:  [attention_norm, qkv_proj, rotary_emb, attention, o_proj]
+    post_attn: [shared_linear, mamba_norm, mamba_mixer]
+    mlp_dense: [gate_up_proj, act_fn, down_proj]
+
+catalog:
+  dense:
+    embedding:
+      vllm: VocabParallelEmbedding
+    mamba_norm:
+      vllm: RMSNorm
+      within: Zamba2MambaDecoderLayer
+      tp_stable: true
+    mamba_mixer:
+      vllm: MambaMixer2
+    attention_norm:
+      vllm: RMSNorm
+      within: Zamba2AttentionDecoderLayer
+      tp_stable: true
+    qkv_proj:
+      vllm: QKVParallelLinear
+      within: Zamba2Attention
+    rotary_emb:
+      vllm: RotaryEmbedding
+    o_proj:
+      vllm: RowParallelLinear
+      within: Zamba2Attention
+    shared_linear:
+      vllm: ReplicatedLinear
+      within: Zamba2HybridLayer
+    gate_up_proj:
+      vllm: MergedColumnParallelLinear
+      within: Zamba2MLP
+    act_fn:
+      vllm: GeluAndMul
+    down_proj:
+      vllm: RowParallelLinear
+      within: Zamba2MLP
+    final_layernorm:
+      vllm: RMSNorm
+      within: Zamba2ForCausalLM
+      tp_stable: true
+  per_sequence:
+    lm_head:
+      vllm: LogitsProcessor
+    sampler:
+      vllm: Sampler
+      tp_stable: true
+  attention:
+    attention:
+      vllm: Attention
+  moe: {}
