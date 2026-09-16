@@ -204,10 +204,26 @@ class StructuralEvaluator:
                     f"counterfactual add Prefill {candidate.instance_id}",
                     warm_classes if mode == "warm" else ()))
 
-        if len(active_prefill) > min_active:
+        # Shrinking the pool while it has work in flight is never justified by
+        # the counterfactual: the solver prices *capacity*, so removing a worker
+        # only ever removes headroom, and the requests it was carrying are not
+        # modelled at all.  Measured 2026-09-16 on the small cluster: with a
+        # light load (1.05 req/s over two Prefills) every instance is briefly
+        # idle between requests, so a per-candidate check was not enough -- the
+        # controller removed p5090 twice and the pool collapsed both times.
+        # Gate the whole branch on the pool being quiet *and* on the candidate
+        # having nothing assigned (``inflight`` is the deployment's
+        # dispatched-not-finished count; the simulator only has running/waiting).
+        pool_busy = any(getattr(item, "waiting", ()) or getattr(item, "running", ())
+                        for item in active_prefill)
+        if len(active_prefill) > min_active and not pool_busy:
             # Every active instance is a candidate: which one is least useful is
             # a question for the counterfactual, not for the instance id.
             for candidate in sorted(active_prefill, key=lambda item: item.instance_id):
+                if (getattr(candidate, "running", ()) or
+                        getattr(candidate, "waiting", ()) or
+                        float(getattr(candidate, "inflight", 0) or 0) > 0.0):
+                    continue
                 candidate_prefill = [item for item in active_prefill if item is not candidate]
                 solver.solve(rows, candidate_prefill, decode)
                 candidate_objective = float(solver.diagnostics.get("objective", 0.0))

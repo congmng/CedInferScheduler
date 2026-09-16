@@ -265,6 +265,76 @@ class StructuralEconomicsTests(unittest.TestCase):
                                          "startup_s": 45.0})
         self.assertEqual(decision.action, "keep")
 
+    def test_a_busy_pool_is_never_shrunk(self):
+        """No removal while the pool has work, and none for a busy candidate.
+
+        The counterfactual prices the *pool*, not the queue sitting on one
+        instance, so a busy worker looks exactly like an idle one.  Measured
+        2026-09-16 on the small cluster: a ``-P`` stopped the Prefill that had
+        served 291 of 300 requests and the pool collapsed; even a light load
+        (1.05 req/s over two Prefills) reproduced it, because every instance is
+        briefly idle between requests and a per-candidate check missed it.
+        """
+        evaluator = StructuralEvaluator({"enabled": True,
+                                         "evaluation_window_ms": 60000.0,
+                                         "startup_s": 45.0, "holding_cost": 0.5})
+        busy = Sched(0, "prefill")
+        busy.running = [None] * 4
+        idle = Sched(1, "prefill")
+        rows = [{"class_id": "c", "arrival_rate_ewma": 1.0}]
+        decode = [Sched(11, "decode")]
+        decision = evaluator.evaluate(
+            {"prefix_states": rows}, [busy, idle], [busy, idle], decode,
+            _FakeSolver(lambda ids: 0.1 if len(ids) == 2 else 0.0),
+            current_ns=10 ** 18, last_action_ns=-1, min_active=1)
+        self.assertEqual(decision.action, "keep")
+        self.assertIn("no eligible", decision.reason)
+
+    def test_an_idle_pool_can_still_scale_in(self):
+        """The holding cost has to keep working when nothing is in flight."""
+        evaluator = StructuralEvaluator({"enabled": True,
+                                         "evaluation_window_ms": 60000.0,
+                                         "startup_s": 45.0, "holding_cost": 0.5})
+        first, second = Sched(0, "prefill"), Sched(1, "prefill")
+        decision = evaluator.evaluate(
+            {"prefix_states": [{"class_id": "c", "arrival_rate_ewma": 1.0}]},
+            [first, second], [first, second], [Sched(11, "decode")],
+            _FakeSolver(lambda ids: 0.1 if len(ids) == 2 else 0.0),
+            current_ns=10 ** 18, last_action_ns=-1, min_active=1)
+        self.assertEqual(decision.action, "-P")
+        self.assertEqual(len(decision.wanted_ids), 1)
+
+    def test_the_deployment_inflight_counter_also_blocks_removal(self):
+        """``inflight`` spans the whole request lifetime on the real router."""
+        evaluator = StructuralEvaluator({"enabled": True,
+                                         "evaluation_window_ms": 60000.0,
+                                         "startup_s": 45.0, "holding_cost": 0.5})
+        first, second = Sched(0, "prefill"), Sched(1, "prefill")
+        first.inflight = 2          # dispatched, not finished, no queue visible
+        decision = evaluator.evaluate(
+            {"prefix_states": [{"class_id": "c", "arrival_rate_ewma": 1.0}]},
+            [first, second], [first, second], [Sched(11, "decode")],
+            _FakeSolver(lambda ids: 0.1 if len(ids) == 2 else 0.0),
+            current_ns=10 ** 18, last_action_ns=-1, min_active=1)
+        self.assertEqual(decision.action, "-P")
+        self.assertEqual(decision.wanted_ids, (0,),
+                         "only the instance with no in-flight work may be removed")
+
+    def test_an_all_busy_pool_has_no_removal_candidate(self):
+        evaluator = StructuralEvaluator({"enabled": True,
+                                         "evaluation_window_ms": 60000.0,
+                                         "startup_s": 45.0, "holding_cost": 0.5})
+        first, second = Sched(0, "prefill"), Sched(1, "prefill")
+        first.waiting = [None] * 3
+        second.running = [None] * 2
+        decision = evaluator.evaluate(
+            {"prefix_states": [{"class_id": "c", "arrival_rate_ewma": 1.0}]},
+            [first, second], [first, second], [Sched(11, "decode")],
+            _FakeSolver(lambda ids: 0.1 if len(ids) == 2 else 0.0),
+            current_ns=10 ** 18, last_action_ns=-1, min_active=1)
+        self.assertEqual(decision.action, "keep")
+        self.assertIn("no eligible", decision.reason)
+
     def test_max_active_prefill_caps_scale_out(self):
         decision = self.evaluate(lambda ids: 10.0 if len(ids) == 1 else 0.0,
                                  active_ids=(0,), inactive_ids=(1, 2),
