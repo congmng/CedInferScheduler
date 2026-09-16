@@ -898,6 +898,11 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
         # PdHandoffLink): the cluster pushes several at a time, which is why
         # its egress sustains ~0.3 GB/s without queueing for seconds.
         "kv_egress_streams": cluster_config.get("kv_egress_streams"),
+        # Instances the deployment had stopped for this run (the real runner's
+        # ``STOP_BEFORE_RUN``/``DISABLED_INSTANCES``).  They stay in the topology
+        # -- ASTRA-Sim's shape is fixed for a run -- but no router may place
+        # work on them, which is what a baseline-policy comparison needs.
+        "inactive_instances": cluster_config.get("inactive_instances"),
         "handoff_link_bw": handoff_link_bw,
         "pd_buffer_bytes": pd_buffer_bytes,
         "instances": total_instances,

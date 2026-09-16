@@ -202,40 +202,50 @@ class Router:
         return self._rnd.randrange(len(schedulers))
 
     def _least_load_select(self, schedulers, role):
-        """vLLM-style least-loaded routing, normalized by instance capacity."""
-        best_idx = 0
-        best_score = float('inf')
-        num_instances = len(schedulers)
-        start = self._get_counter(role) % num_instances
+        """vLLM-style least-loaded routing, normalized by instance capacity.
+
+        Exactly the real router's ``_pick_load``: ``(inflight + 1) / capacity``
+        with the instance id as the tie-break.  The simulator used to walk the
+        candidates from a rotating cursor and keep the first strict minimum,
+        which turns every *tie* into a round-robin -- measured 2026-09-16 on
+        the paced trace, ``load`` spread the Prefills 160/80 (the capacity
+        ratio between p5090 and p3090a) where the cluster put 240/240 on p5090.
+
+        ``inflight`` counts requests dispatched to this instance and not
+        finished yet, and the Prefill's slot is given back as soon as that leg
+        returns (``release_prefill_leg``, called by the entry point when the
+        Prefill batch finishes) -- the real router releases
+        ``prefill.inflight`` in the dispatch handler's ``finally``.  It
+        deliberately does *not* read the instance's own queue: the recorded
+        ``load`` arm pins the largest-capacity host while the local-recompute
+        path is serving every request elsewhere, so a queue-aware score sends a
+        replay somewhere the real router never went.
+        """
+        if not schedulers:
+            return 0
         table = getattr(self, "capacity_tables", {}).get(role, {})
-        for offset in range(num_instances):
-            idx = (start + offset) % num_instances
-            sched = schedulers[idx]
-            waiting = len(sched.waiting)
-            running = len(sched.running)
-            # Prefer the deployment's measured capacity; ``max_num_seqs`` is the
-            # fallback for configs that carry no capacity table.
-            router_table = getattr(self, "router_capacity", {})
+        router_table = getattr(self, "router_capacity", {})
+        assigned = getattr(self, "_assigned", None)
+
+        def score(sched):
+            if assigned is not None:
+                inflight = assigned.get(int(sched.instance_id), 0)
+            else:
+                inflight = len(sched.waiting) * 4 + len(sched.running)
             capacity = (router_table.get(int(sched.instance_id))
                         or table.get(int(sched.instance_id))
                         or getattr(sched, "max_num_seqs", 0))
-            # Exactly the real router's shape: ``(inflight + 1) / capacity``
-            # with ``inflight`` = requests dispatched to this instance and not
-            # finished yet.  It deliberately does *not* read the instance's own
-            # queue: the recorded ``load`` arm pins the largest-capacity host
-            # while the local-recompute path is serving every request elsewhere,
-            # so a queue-aware score sends the replay somewhere the real router
-            # never went (measured 2026-09-16 on the forced-transfer arm).
-            inflight = (self._assigned.get(int(sched.instance_id), 0)
-                        if hasattr(self, "_assigned")
-                        else waiting * 4 + running)
-            score = inflight + 1
             if capacity not in (0, float('inf')):
-                score = (inflight + 1) / capacity
-            if score < best_score:
-                best_score = score
-                best_idx = idx
-        self._set_counter(role, (best_idx + 1) % num_instances)
+                return ((inflight + 1) / capacity, int(sched.instance_id))
+            return (float(inflight + 1), int(sched.instance_id))
+
+        best = min(schedulers, key=score)
+        best_idx = schedulers.index(best)
+        if os.environ.get("LOAD_DEBUG"):
+            print(f"[load-select:{role}] "
+                  + " ".join(f"{s.instance_id}:{score(s)[0]:.6f}" for s in schedulers)
+                  + f" -> {best.instance_id}", flush=True)
+        self._set_counter(role, (best_idx + 1) % len(schedulers))
         return best_idx
 
     def _custom_select(self, schedulers, role):
@@ -896,6 +906,8 @@ class Router:
         if tracker is not None and request_id in tracker:
             self._in_flight = max(0, self._in_flight - 1)
             for instance_id in tracker.pop(request_id):
+                if instance_id is None:
+                    continue          # already released when the Prefill handed over
                 if instance_id in self._assigned:
                     self._assigned[instance_id] = max(0, self._assigned[instance_id] - 1)
         session_info = self._request_to_session.pop(request_id, None)
@@ -980,6 +992,30 @@ class Router:
                 scheduler.pd_type
             )
 
+    def release_prefill_leg(self, request_id):
+        """Give the Prefill's dispatch slot back when its leg completes.
+
+        The real router releases ``prefill.inflight`` in the dispatch handler's
+        ``finally``: it awaits the Prefill POST and then returns the streaming
+        response, so the counter is back to zero long before the request
+        finishes, while ``decode.inflight`` is held until completion.  The
+        simulator kept both until completion, so a Prefill that had already
+        handed its KV over still looked busy -- with ``(inflight+1)/capacity``
+        the smaller p3090a then out-competed p5090 and ``load`` spread 160/80
+        where the cluster put 240/240 on p5090 (measured 2026-09-16, paced
+        trace, 1 req/s).
+        """
+        tracker = getattr(self, "_request_pair", None)
+        if tracker is None or request_id not in tracker:
+            return
+        pair = tracker[request_id]
+        if not pair or pair[0] is None:
+            return
+        prefill_id = pair[0]
+        if prefill_id in self._assigned:
+            self._assigned[prefill_id] = max(0, self._assigned[prefill_id] - 1)
+        tracker[request_id] = (None,) + tuple(pair[1:])
+
     def transfer_prefill_request(self, requests, current_time_ns=0):
         # A Decode whose KV pool is full refuses the handoff (``add_decode``
         # returns False); keep those requests here and retry them on the next
@@ -990,6 +1026,7 @@ class Router:
         queue = list(self._pending_handoffs) + list(requests)
         self._pending_handoffs = []
         for req in queue:
+            self.release_prefill_leg(req.id)
             sched = next((candidate for candidate in self.decode_schedulers
                           if candidate.instance_id == req.decode_instance_id
                           and candidate.accepts_new_requests), None)

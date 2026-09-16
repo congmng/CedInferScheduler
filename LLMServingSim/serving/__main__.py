@@ -563,12 +563,12 @@ def main():
         casr_config["pair_costs"] = pair_costs
     if args.casr_solver is not None:
         casr_config["solver"] = args.casr_solver
-    if args.enable_casr:
-        # Price the plan with the engine costs the run will actually execute:
-        # the deployment's ``service_ms`` understates the spread between cards
-        # (d4090 157 ms against d5090 145 ms) while both the profiler and the
-        # cluster's own measured TPOT put the 4090 at ~1.7x (see
-        # serving/core/hw_service.py).
+    # Price every policy's decisions with the engine costs the run will
+    # actually execute: the deployment's ``service_ms``/capacity tables predate
+    # the long-prompt workload, and the *baseline* policies rank by them too
+    # (``load`` divides by ``capacity``), so this is not CASR-only.  See
+    # serving/core/hw_service.py.
+    if casr_config.get("decode_service_ms") or casr_config.get("prefill_service_ms"):
         from serving.core.hw_service import rescale_capacities, rescale_service_times
         rescale_service_times(casr_config, instances, "decode_service_ms", tokens=1)
         rescale_service_times(
@@ -737,6 +737,15 @@ def main():
     # memory pressure. It is per instance and only known once the schedulers
     # exist, so it gets its own section rather than a row in the input-config
     # block, which is printed before any of this is resolved.
+    # Workers the deployment had stopped for this run: they stay in the
+    # topology but no policy may place work on them.
+    stopped = [int(value) for value in (cluster.get("inactive_instances") or ())]
+    for instance_id in stopped:
+        if 0 <= instance_id < len(schedulers):
+            schedulers[instance_id].set_admission_state("INACTIVE")
+    if stopped:
+        print(f"  • Stopped instances     : {sorted(stopped)} "
+              "(in the topology, unavailable to every policy)")
     print_heading("KV Cache Initialization")
     print_markup("")
     # Pad only as far as the widest label, so the line stays inside the rule.
@@ -985,6 +994,11 @@ def main():
         # its own batches in the meantime.  Without it the handoff stays a graph
         # the Decode NPU has to execute, which is what stalled the Decode.
         if instances[instance_id]["pd_type"] == "prefill" and len(finished_reqs) > 0:
+            # The Prefill's dispatch slot is released here, when its leg
+            # finishes -- not when the KV lands on the Decode (see
+            # Router.release_prefill_leg).
+            for req in finished_reqs:
+                router.release_prefill_leg(req.id)
             if pd_link is None:
                 router.transfer_prefill_request(finished_reqs, current)
             else:
