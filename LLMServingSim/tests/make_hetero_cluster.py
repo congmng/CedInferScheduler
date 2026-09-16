@@ -91,7 +91,16 @@ def _kv_bytes_per_token(model, prompt_tokens):
 
 
 def build(domains, min_active=2, max_active=None, structural=False,
-          prefix_caching=True, model=MODEL, prompt_tokens=1250):
+          prefix_caching=True, model=MODEL, prompt_tokens=1250,
+          cross_gbps=CROSS_GBPS, cross_rtt_ms=CROSS_LATENCY_NS / 1e6,
+          kv_egress_gbps=KV_EGRESS_GBPS):
+    """``cross_gbps``/``cross_rtt_ms`` describe the *inter-domain* link.
+
+    They are the environment knob: the same fleet with a 0.11 GB/s / 48 ms
+    WAN instead of a 1 GB/s / 1 ms fabric is a different placement problem --
+    which is exactly what a KVCache-aware planner is supposed to notice.
+    """
+    cross_latency_ns = int(round(cross_rtt_ms * 1e6))
     nodes = []
     prefill_ids = {index: index * 2 for index in range(len(domains))}
     decode_ids = {index: index * 2 + 1 for index in range(len(domains))}
@@ -141,18 +150,18 @@ def build(domains, min_active=2, max_active=None, structural=False,
         hardware = HARDWARE[name][0]
         shared_links.append({
             "id": f"kvlink-d{index}-{name}",
-            "capacity_bytes_per_s": KV_EGRESS_GBPS * 1e9,
+            "capacity_bytes_per_s": kv_egress_gbps * 1e9,
             "pairs": [[prefill_ids[index], decode_ids[other]]
                       for other in prefill_ids],
         })
 
     return {
         "num_nodes": len(nodes),
-        "link_bw": CROSS_GBPS,
-        "link_latency": CROSS_LATENCY_NS,
+        "link_bw": cross_gbps,
+        "link_latency": cross_latency_ns,
         "intra_node_link_bw": SAME_HOST_GBPS,
         "intra_node_link_latency": SAME_HOST_LATENCY_NS,
-        "kv_egress_gbps": KV_EGRESS_GBPS,
+        "kv_egress_gbps": kv_egress_gbps,
         "pd_buffer_bytes": PD_BUFFER_BYTES,
         "_generated": (
             "Derived from the profiler bundles by tests/make_hetero_cluster.py: "
@@ -161,9 +170,9 @@ def build(domains, min_active=2, max_active=None, structural=False,
             "executes.  Link numbers are the deployment's measured ones."),
         "_link_comment": (
             f"Same-host P/D handoff {SAME_HOST_GBPS} GB/s (measured 585 ms per "
-            f"1000 prompt tokens), cross-domain {CROSS_GBPS} GB/s at "
-            f"{CROSS_LATENCY_NS/1e6:.0f} ms RTT, producer push ceiling "
-            f"{KV_EGRESS_GBPS} GB/s (measured 239-314 MB/s)."),
+            f"1000 prompt tokens), cross-domain {cross_gbps} GB/s at "
+            f"{cross_rtt_ms:.0f} ms RTT, producer push ceiling "
+            f"{kv_egress_gbps} GB/s (measured 239-314 MB/s)."),
         "nodes": nodes,
         "casr": {
             "solver": "lp",
@@ -176,7 +185,7 @@ def build(domains, min_active=2, max_active=None, structural=False,
                 "prefill_capacity": prefill_capacity,
                 "prefill_tokens_per_s": prefill_tokens_per_s,
                 "capacity_reference_tokens": 1024,
-                "kv_egress_gbps": KV_EGRESS_GBPS,
+                "kv_egress_gbps": kv_egress_gbps,
             },
             "structural": {
                 "evaluation_window_ms": 60000.0,
@@ -236,6 +245,15 @@ def main() -> int:
                         help="prompt length the hybrid KV geometry is averaged over")
     parser.add_argument("--structural", action="store_true",
                         help="enable structural scale-out (casr_full arm)")
+    parser.add_argument("--cross-gbps", type=float, default=CROSS_GBPS,
+                        dest="cross_gbps",
+                        help="inter-domain link bandwidth (environment knob)")
+    parser.add_argument("--cross-rtt-ms", type=float,
+                        default=CROSS_LATENCY_NS / 1e6, dest="cross_rtt_ms",
+                        help="inter-domain round-trip time in ms")
+    parser.add_argument("--kv-egress-gbps", type=float,
+                        default=KV_EGRESS_GBPS, dest="kv_egress_gbps",
+                        help="producer-side KV push ceiling")
     parser.add_argument("--out", default="configs/cluster/hetero6_generated.json")
     args = parser.parse_args()
 
@@ -247,7 +265,9 @@ def main() -> int:
     config = build(domains, min_active=args.min_active,
                    max_active=args.max_active or len(domains),
                    structural=args.structural, model=args.model,
-                   prompt_tokens=args.prompt_tokens)
+                   prompt_tokens=args.prompt_tokens,
+                   cross_gbps=args.cross_gbps, cross_rtt_ms=args.cross_rtt_ms,
+                   kv_egress_gbps=args.kv_egress_gbps)
     path = pathlib.Path(args.out)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")

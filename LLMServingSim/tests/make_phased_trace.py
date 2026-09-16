@@ -45,6 +45,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-reqs", type=int, default=0, dest="max_reqs",
                         help="Truncate the emitted trace to this many requests "
                              "(0 = use exactly the rows the phases ask for).")
+    parser.add_argument("--pack", type=int, default=1,
+                        help="Concatenate this many consecutive source prompts "
+                             "into one request before pacing.  The pool's own "
+                             "token ids are reused, so packing N 1250-token "
+                             "CNN/DailyMail documents gives an N*1250-token "
+                             "prompt without re-tokenising.  KV-aware placement "
+                             "and the P/D handoff only become visible once the "
+                             "prompt is long enough that the KV -- not the "
+                             "weights -- is the expensive thing to move.")
     return parser.parse_args()
 
 
@@ -60,6 +69,8 @@ def _floats(raw: str, flag: str) -> list[float]:
 
 def main() -> int:
     args = parse_args()
+    if args.pack < 1:
+        raise SystemExit("--pack must be >= 1")
     rates = _floats(args.rates, "--rates")
     durations = _floats(args.durations, "--durations")
     if len(rates) != len(durations):
@@ -71,6 +82,18 @@ def main() -> int:
 
     source = pathlib.Path(args.input)
     rows = [json.loads(line) for line in source.open(encoding="utf-8") if line.strip()]
+    if args.pack > 1:
+        packed = []
+        for start in range(0, len(rows) - args.pack + 1, args.pack):
+            group = rows[start:start + args.pack]
+            merged = dict(group[0])
+            merged["input_toks"] = sum(int(row["input_toks"]) for row in group)
+            merged["input_tok_ids"] = [tok for row in group
+                                       for tok in row["input_tok_ids"]]
+            merged["output_toks"] = max(int(row["output_toks"]) for row in group)
+            merged["packed_from"] = args.pack
+            packed.append(merged)
+        rows = packed
 
     # One request every 1/rate seconds inside a phase, restarting the clock at
     # each boundary so the phases do not bleed into each other.
@@ -109,6 +132,8 @@ def main() -> int:
 
     meta = {"generator": "make_phased_trace",
             "source": str(source),
+            "pack": args.pack,
+            "prompt_tokens": (int(rows[0]["input_toks"]) if rows else 0),
             "requests": written,
             "phases": per_phase,
             "span_s": round(span_s, 2)}

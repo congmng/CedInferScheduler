@@ -1,0 +1,28 @@
+{
+  "generator": "make_phased_trace",
+  "source": "workloads/cnndm-long-pool-qwen3-8b.jsonl",
+  "pack": 3,
+  "prompt_tokens": 3750,
+  "requests": 376,
+  "phases": [
+    {
+      "phase": "warmup",
+      "rate_rps": 0.5,
+      "duration_s": 15.0,
+      "requests": 8
+    },
+    {
+      "phase": "peak",
+      "rate_rps": 8.0,
+      "duration_s": 45.0,
+      "requests": 360
+    },
+    {
+      "phase": "cool",
+      "rate_rps": 0.5,
+      "duration_s": 15.0,
+      "requests": 8
+    }
+  ],
+  "span_s": 75.0
+}

@@ -48,32 +48,48 @@ ARMS = (
 
 
 def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS, model="Qwen/Qwen3-8B",
-                  prompt_tokens=1250):
+                  prompt_tokens=1250, cross_gbps=None, cross_rtt_ms=None):
     """Three variants of the arena: static-2, elastic, and all-active."""
     domain_count = len([d for d in domains.split(",") if d.strip()])
     configs = {}
     for tag, extra in (("static", []), ("elastic", ["--structural"]),
                        ("all", ["--min-active", str(domain_count)])):
         path = out_dir / f"hetero6-{tag}.json"
+        link = []
+        if cross_gbps is not None:
+            link += ["--cross-gbps", str(cross_gbps)]
+        if cross_rtt_ms is not None:
+            link += ["--cross-rtt-ms", str(cross_rtt_ms)]
         subprocess.run([sys.executable, str(REPO / "tests" / "make_hetero_cluster.py"),
                         "--domains", domains, "--model", model,
                         "--prompt-tokens", str(prompt_tokens),
-                        "--out", str(path), *extra],
+                        "--out", str(path), *link, *extra],
                        cwd=REPO, check=True, capture_output=True, text=True)
         configs[tag] = path
     return configs
 
 
-def ensure_trace(peak=PEAK_RPS):
-    """The workload: 1250-token prompts, 15 s warm-up, 90 s peak, 15 s cool."""
-    if peak == PEAK_RPS:
+def ensure_trace(peak=PEAK_RPS, pack=1, peak_seconds=90.0):
+    """The workload: 1250-token prompts, 15 s warm-up, ``peak_seconds`` peak.
+
+    ``pack`` concatenates that many source prompts into one request, which is
+    how a 3750-token prompt is built without re-tokenising: the KV (and the P/D
+    handoff that moves it) only starts to dominate the weights once the prompt
+    is long.  ``peak_seconds`` bounds the run: the arm costs roughly a second
+    of wall clock per offered request.
+    """
+    if peak == PEAK_RPS and pack == 1 and peak_seconds == 90.0:
         trace = REPO / TRACE
     else:
-        trace = REPO / f"workloads/cnndm-long-arena-{peak:g}rps.jsonl"
+        suffix = (f"{'-pack' + str(pack) if pack != 1 else ''}"
+                  f"{'-' + f'{peak_seconds:g}' + 's' if peak_seconds != 90.0 else ''}")
+        trace = REPO / f"workloads/cnndm-long-arena-{peak:g}rps{suffix}.jsonl"
     if not trace.exists():
         subprocess.run([sys.executable, str(REPO / "tests" / "make_phased_trace.py"),
                         "--input", "workloads/cnndm-long-pool-qwen3-8b.jsonl",
-                        "--rates", f"0.5,{peak:g},0.5", "--durations", "15,90,15",
+                        "--rates", f"0.5,{peak:g},0.5",
+                        "--durations", f"15,{peak_seconds:g},15",
+                        "--pack", str(pack),
                         "--names", "warmup,peak,cool", "--output",
                         str(trace.relative_to(REPO))], cwd=REPO, check=True)
     return trace
@@ -113,6 +129,20 @@ def main() -> int:
                         help="prompt length the KV geometry is averaged over")
     parser.add_argument("--peak-rps", type=float, default=PEAK_RPS,
                         help="arrival rate of the 90 s peak phase")
+    parser.add_argument("--peak-seconds", type=float, default=90.0,
+                        dest="peak_seconds",
+                        help="length of the overload phase in seconds")
+    parser.add_argument("--pack", type=int, default=1,
+                        help="prompts packed into one request (2 gives ~2500 "
+                             "tokens, 3 gives ~3750)")
+    parser.add_argument("--cross-gbps", type=float, default=None,
+                        dest="cross_gbps",
+                        help="override the inter-domain link bandwidth "
+                             "(default: the deployment's measured 0.11 GB/s)")
+    parser.add_argument("--cross-rtt-ms", type=float, default=None,
+                        dest="cross_rtt_ms",
+                        help="override the inter-domain RTT in ms "
+                             "(default: the deployment's measured 48 ms)")
     parser.add_argument("--arms", default="",
                         help="comma separated subset of " +
                              ",".join(arm for arm, _, _ in ARMS))
@@ -121,11 +151,14 @@ def main() -> int:
     out_dir = pathlib.Path(args.out) if args.out else pathlib.Path("/tmp/hetero-arena")
     out_dir.mkdir(parents=True, exist_ok=True)
     configs = build_configs(out_dir, args.domains, args.peak_rps,
-                            model=args.model, prompt_tokens=args.prompt_tokens)
-    trace = ensure_trace(args.peak_rps)
+                            model=args.model, prompt_tokens=args.prompt_tokens,
+                            cross_gbps=args.cross_gbps,
+                            cross_rtt_ms=args.cross_rtt_ms)
+    trace = ensure_trace(args.peak_rps, args.pack, args.peak_seconds)
     all_tag = "all" if "all" in configs else "all6"
     config_for = {"casr_full": configs["elastic"], "casr_all6": configs[all_tag]}
-    num_reqs = max(1, int(round(0.5 * 15 + args.peak_rps * 90 + 0.5 * 15)))
+    num_reqs = max(1, int(round(0.5 * 15 + args.peak_rps * args.peak_seconds
+                                + 0.5 * 15)))
 
     wanted = {name.strip() for name in args.arms.split(",") if name.strip()}
     report = {}
