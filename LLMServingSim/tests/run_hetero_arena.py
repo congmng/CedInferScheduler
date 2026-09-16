@@ -135,6 +135,10 @@ def main() -> int:
     parser.add_argument("--pack", type=int, default=1,
                         help="prompts packed into one request (2 gives ~2500 "
                              "tokens, 3 gives ~3750)")
+    parser.add_argument("--trace", default="",
+                        help="use this trace instead of the generated phased "
+                             "one (e.g. a hot-prefix trace); --num-reqs then "
+                             "comes from the trace itself")
     parser.add_argument("--cross-gbps", type=float, default=None,
                         dest="cross_gbps",
                         help="override the inter-domain link bandwidth "
@@ -154,11 +158,18 @@ def main() -> int:
                             model=args.model, prompt_tokens=args.prompt_tokens,
                             cross_gbps=args.cross_gbps,
                             cross_rtt_ms=args.cross_rtt_ms)
-    trace = ensure_trace(args.peak_rps, args.pack, args.peak_seconds)
+    if args.trace:
+        trace = pathlib.Path(args.trace)
+        if not trace.is_absolute():
+            trace = REPO / trace
+        num_reqs = sum(1 for line in trace.open(encoding="utf-8") if line.strip())
+        print(f"trace {trace.name}: {num_reqs} requests", flush=True)
+    else:
+        trace = ensure_trace(args.peak_rps, args.pack, args.peak_seconds)
+        num_reqs = max(1, int(round(0.5 * 15 + args.peak_rps * args.peak_seconds
+                                    + 0.5 * 15)))
     all_tag = "all" if "all" in configs else "all6"
     config_for = {"casr_full": configs["elastic"], "casr_all6": configs[all_tag]}
-    num_reqs = max(1, int(round(0.5 * 15 + args.peak_rps * args.peak_seconds
-                                + 0.5 * 15)))
 
     wanted = {name.strip() for name in args.arms.split(",") if name.strip()}
     report = {}

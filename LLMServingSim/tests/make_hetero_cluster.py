@@ -157,6 +157,16 @@ def build(domains, min_active=2, max_active=None, structural=False,
 
     return {
         "num_nodes": len(nodes),
+        # The spares start stopped.  Without this, every policy that ignores
+        # the lifecycle controller -- ``load``, ``cache_aware``, ``rr`` --
+        # routed over all len(domains) Prefills while the CASR arms were capped
+        # at ``min_active``, i.e. the baselines were handed the elasticity CASR
+        # has to buy.  ``inactive_instances`` keeps them in the topology but off
+        # every policy's candidate list, and the controller still revives them
+        # when it scales out (casr/lifecycle.py sets ACTIVE on start).
+        "inactive_instances": [prefill_ids[index]
+                               for index in range(len(domains))
+                               if index >= min_active],
         "link_bw": cross_gbps,
         "link_latency": cross_latency_ns,
         "intra_node_link_bw": SAME_HOST_GBPS,
