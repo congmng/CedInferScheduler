@@ -31,3 +31,12 @@ memory.md
 # Raw datasets (CNN/DailyMail, Dolly, ShareGPT, tokenizer).  Large and
 # re-downloadable; the workload generators read them from this path.
 data/
+
+# ShareGPT replays: one conversation in the source dataset quotes a Slack
+# incoming-webhook URL, which GitHub's push protection blocks on every file
+# that contains it.  Regenerate them locally with
+#   python -m workloads.generators --dataset sharegpt ...   (see
+# docs/实验数据集与对比基线说明.md) instead of committing the traces.
+LLMServingSim/workloads/sharegpt-real-qwen3-8b-600-sps14.jsonl
+LLMServingSim/workloads/sharegpt-real-qwen3-8b-600-sps14-slo500-50.jsonl
+LLMServingSim/workloads/sharegpt-real-qwen3-8b-600-sps14-slo-tiered.jsonl
