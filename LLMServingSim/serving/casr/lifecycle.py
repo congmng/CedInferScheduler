@@ -24,6 +24,12 @@ class PrefillLifecycle:
         self._bootstrapped = False
         self.capacity = {int(key): float(value)
                          for key, value in config.get("prefill_capacity", {}).items()}
+        # The pool the deployment was actually running, when the caller knows
+        # it (a replay reads it off the recorded run).  The demand heuristic
+        # below can only rank workers by load or declared capacity, and neither
+        # of those is what an operator's ``STOP_BEFORE_RUN`` decided.
+        self.initial_active = {int(value)
+                               for value in (config.get("initial_active_prefill") or ())}
         # Length-aware capacity.  ``prefill_capacity`` is a requests/s figure
         # measured at ONE prompt length; the real router scales it by the
         # observed prompt size (``prefill_tokens_per_s``) and the simulator has
@@ -116,8 +122,6 @@ class PrefillLifecycle:
         ranked = sorted(schedulers, key=lambda s: (
             0 if s.admission_state == "ACTIVE" else 1,
             len(s.running) + len(s.waiting), s.instance_id))
-        wanted = (set(wanted_override) if wanted_override is not None else
-                  {scheduler.instance_id for scheduler in ranked[:desired]})
         # Keep an evaluator decision in force long enough to be used: the
         # counterfactual pays a 60 s horizon (minus the 45 s boot) for adding a
         # worker, so undoing it on the very next tick wastes the whole boot.
@@ -140,14 +144,49 @@ class PrefillLifecycle:
             floor = min(self.min_active, len(schedulers))
             if len(wanted) < floor:
                 wanted |= {scheduler.instance_id for scheduler in ranked[:floor]}
+            wanted = set(wanted)
             self._override = tuple(sorted(wanted))
             # The hold has to outlast the boot, or the worker the counterfactual
             # asked for is drained before it can serve anything.
             self._override_until_ns = int(current_ns + max(self.override_hold_ns, startup_ns))
-        elif self._override and current_ns < self._override_until_ns:
-            wanted = set(self._override)
-        elif self._override:
-            self._override = ()
+        else:
+            # Hold the workers the pool already had and only fill the rest from
+            # ``ranked``.  The load term above ranks whichever worker just took a
+            # request as the *busiest* one, so re-picking the whole set every
+            # tick drains exactly the worker that was just given work --
+            # measured 2026-09-16 on the small-cluster elasticity arm: p5090 was
+            # drained on the very tick it received request 0, so an arm meant to
+            # mirror the real run ("p4090 stopped, p5090 + p3090a working") ran
+            # p3090a + p4090 instead and replayed 247 of 300 handoffs across
+            # domains that the cluster pushed over its intra-node link.
+            held = [scheduler.instance_id for scheduler in schedulers
+                    if scheduler.instance_id in self.last_wanted
+                    and scheduler.admission_state != "INACTIVE"]
+            wanted = set(held[:desired])
+            if len(wanted) < desired:
+                # First tick, or genuine growth: fill from a *stable* order.
+                # Capacity describes the hardware; ``ranked`` describes the
+                # last request, and seeding a pool from it is what drained the
+                # worker above.
+                seed = [scheduler.instance_id for scheduler in schedulers
+                        if scheduler.instance_id in self.initial_active
+                        and scheduler.admission_state != "INACTIVE"]
+                busy = [scheduler.instance_id for scheduler in schedulers
+                        if scheduler.instance_id not in seed
+                        and (scheduler.running or scheduler.waiting)]
+                order = seed + busy + [scheduler.instance_id for scheduler in sorted(
+                    schedulers,
+                    key=lambda s: (-self.capacity.get(s.instance_id, 0.0),
+                                   s.instance_id))
+                    if scheduler.instance_id not in seed + busy]
+                for instance_id in order:
+                    if len(wanted) >= desired:
+                        break
+                    wanted.add(instance_id)
+            if self._override and current_ns < self._override_until_ns:
+                wanted = set(self._override)
+            elif self._override:
+                self._override = ()
         # Keep an acquired worker alive until startup completes.  Otherwise a
         # low-demand tick can immediately cancel a previous scale-out before
         # the new worker becomes eligible for the next plan.

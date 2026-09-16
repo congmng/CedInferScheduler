@@ -179,6 +179,45 @@ def deployment_max_num_seqs():
     return min(values) if values else 0
 
 
+def arm_config_from_recording(cluster_config, real_dir, policy, names, out_dir):
+    """The Prefill pool the cluster had up, written into the simulator config.
+
+    ``--replay-placement`` pins every request's (Prefill, Decode) pair, but the
+    simulator's own lifecycle still decides which workers start ACTIVE -- and
+    its demand heuristic ranks workers by instantaneous load, so an arm can
+    drain exactly the worker the recording used first (measured 2026-09-16: 247
+    of 300 handoffs replayed across domains, although the cluster pushed 290 of
+    them over its intra-node link).  The recording knows the answer: every
+    Prefill that served a request is a worker the run had (p5090 alone at the
+    start of the elasticity arm, with p3090a scaled in at 52 s), and a pinned
+    pair can only be replayed if its Prefill is in the pool.
+    """
+    by_name = {name: instance_id for instance_id, name in names.items()}
+    rows = [row for row in load_real_metrics(
+        pathlib.Path(real_dir) / f"metrics-{policy}.jsonl")
+        if str(row.get("request_id", "")).startswith("ds-")]
+    rows.sort(key=lambda row: float(row.get("ts") or 0.0))
+    pool = []
+    for row in rows:
+        instance_id = by_name.get(row.get("prefill"))
+        if instance_id is not None and instance_id not in pool:
+            pool.append(instance_id)
+    if not pool:
+        return pathlib.Path(cluster_config)
+    config = json.loads(pathlib.Path(cluster_config).read_text(encoding="utf-8"))
+    lifecycle = config.setdefault("casr", {}).setdefault("lifecycle", {})
+    lifecycle["initial_active_prefill"] = sorted(pool)
+    lifecycle["min_active_prefill"] = len(pool)
+    # Absolute: the simulator resolves a relative ``--cluster-config`` from one
+    # directory up (see ``build_cluster_config``).
+    path = (pathlib.Path(out_dir) / "arm-config.json").resolve()
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    print(f"   recorded Prefill pool: {sorted(pool)} "
+          f"(min_active_prefill={len(pool)}, written to {path.name})")
+    return path
+
+
 def run_sim_arm(policy, args, run_config, sim_config, out_dir):
     csv_path = out_dir / f"{policy}.csv"
     command = [sys.executable, "-m", "serving",
@@ -277,7 +316,11 @@ def main() -> int:
             (out_dir / f"{policy}-placement.json").write_text(
                 json.dumps(placement), encoding="utf-8")
             print(f"   replayed placement: {len(placement)} requests")
-        csv_path = run_sim_arm(policy, args, run_config, args.cluster_config, out_dir)
+            sim_config = arm_config_from_recording(
+                args.cluster_config, real_dir, policy, names, out_dir)
+        else:
+            sim_config = args.cluster_config
+        csv_path = run_sim_arm(policy, args, run_config, sim_config, out_dir)
         sim = summarise_sim(load_sim_csv(csv_path), names)
         report[policy]["sim"] = sim
         ratio = sim["e2e_p50"] / real["e2e_p50"] if real["e2e_p50"] else float("nan")

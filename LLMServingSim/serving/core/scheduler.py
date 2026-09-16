@@ -38,7 +38,8 @@ class Scheduler:
                  enable_chunked_prefill=False,
                  long_prefill_token_threshold=0, cxl_mem=0, ep_size=1, kv_cache_dtype='auto',
                  npu_memory_utilization=1.0, reserve_full_isl=True, prefix_profiler=None,
-                 pd_buffer_bytes=None, pd_staging=None, kv_scale=1.0):
+                 pd_buffer_bytes=None, pd_staging=None, kv_scale=1.0,
+                 pd_link_handoff=False):
         self.model = model
         self.config = get_config(model)
         self.node_id = node_id
@@ -67,6 +68,10 @@ class Scheduler:
         # exhaustion stalls the sender.
         self.pd_buffer_bytes = pd_buffer_bytes
         self.pd_staging = pd_staging if pd_staging is not None else {}
+        # The frontend models the KV handoff as a link push (``PdHandoffLink``)
+        # instead of a receiver graph the Decode NPU has to execute, so this
+        # instance's own trace must not also charge the bytes to its timeline.
+        self.pd_link_handoff = bool(pd_link_handoff)
         # How often this instance had to refuse a P/D handoff because its KV
         # pool was full (the caller retries; see ``add_decode``).
         self.backpressure_events = 0
@@ -401,6 +406,9 @@ class Scheduler:
                       num_prefill, num_decode, prefill_q_list, prefill_k_list, decode_k_list,
                       current, self.kv.npu_used_bytes(), 0, recall_bytes,
                       pd_kv_send_tokens=pd_kv_send_tokens)
+        # Tokens whose KV this batch hands over, kept even when the trace below
+        # drops the send (see the link model): it is what the frontend prices.
+        batch.pd_link_tokens = pd_kv_send_tokens
         batch.fired.append(sys)
         batch.requests.extend(req for req, _, _ in scheduled)
         if self.pd_type == "prefill":
@@ -426,7 +434,16 @@ class Scheduler:
                             self.pd_staging.get(target, 0.0)
                             + self.memory.pd_kv_bytes(req_obj.original_input))
                 batch.pd_decode_npu_count = self.decode_npu_counts.get(target, 0)
-                if batch.pd_decode_npu_count != self.num_npus:
+                if self.pd_link_handoff:
+                    # The frontend charges these bytes to the producer's egress
+                    # (``PdHandoffLink``) and lands the request on the Decode
+                    # when they arrive, so the trace must not charge the same
+                    # push to this NPU's timeline as a SEND; the small
+                    # sampled-token payload (what a disaggregated Prefill
+                    # actually returns) stays on the graph.
+                    batch.pd_kv_send_tokens = 0
+                if (not self.pd_link_handoff
+                        and batch.pd_decode_npu_count != self.num_npus):
                     raise RuntimeError(
                         "CASR P/D receiver graphs require equal P and Decode NPU counts; "
                         f"P has {self.num_npus}, Decode instance {target} has "
@@ -487,7 +504,13 @@ class Scheduler:
         # receive the streamed KV.
         last_npu = self.num_npus - 1
         if self.pd_type == "prefill" and batch.pd_decode_npu_offset is not None:
-            completion_npu = batch.pd_decode_npu_offset + last_npu
+            # Under the graph model the batch is not done until the Decode NPU
+            # has run the matching receiver; under the link model the producer's
+            # own ranks (whose last one carries the sampled-token send) are the
+            # whole story, and the frontend lands the request on the Decode.
+            completion_npu = (self.start_npu + last_npu
+                              if self.pd_link_handoff
+                              else batch.pd_decode_npu_offset + last_npu)
         else:
             completion_npu = self.start_npu + (self.num_npus * (2 if self.pd_type == "prefill" else 1) - 1)
         if self.start_npu not in batch.end or completion_npu not in batch.end:
@@ -517,10 +540,16 @@ class Scheduler:
             prefill_done_now = req.is_init and req.num_computed_tokens >= req.original_input
 
             if prefill_done_now:
-                # TTFT is recorded exactly once. A resumed request has is_init
-                # cleared, so it can never overwrite its own TTFT.
+                # TTFT is recorded exactly once, and it is recorded where the
+                # *client* sees it: on the first output token (see the token
+                # block below).  A transferred request does not see that token
+                # here -- its KV still has to land on the Decode -- so stamping
+                # it at the Prefill's completion would leave the whole handoff
+                # inside the request's first inter-token gap (measured
+                # 2026-09-16: TPOT 336 ms when the handoff was 1.7 s, against
+                # the real 14.9 ms).  A resumed request has is_init cleared, so
+                # it can never overwrite its own TTFT.
                 req.is_init = False
-                req.set_ttft(finish)
                 prompt_t += num_new + req.prefix_cache_hit
                 if self.enable_prefix_caching:
                     self.kv.cache_blocks(req, req.num_computed_tokens)
@@ -550,7 +579,13 @@ class Scheduler:
             if req.num_computed_tokens >= req.num_tokens_reached:
                 req.num_tokens_reached += 1
                 gen_t += 1
-                if not prefill_done_now:
+                if req.ttft < 0:
+                    # The first output token the client can see: for a locally
+                    # recomputed request that is this very step, for one that
+                    # came over the P/D handoff it is the first step after the
+                    # KV landed.
+                    req.set_ttft(finish)
+                else:
                     req.add_itl(finish)
                 if self.enable_prefix_caching:
                     self.kv.cache_blocks(req, req.num_computed_tokens)

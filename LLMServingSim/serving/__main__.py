@@ -27,6 +27,7 @@ from serving.core.router import *
 from serving.core.power_model import *
 from serving.core.logger import *
 from serving.core.run_paths import build_run_paths, resolve_run_id
+from serving.core.pd_link import PdHandoffLink
 from serving.casr import CASRController, PrefixProfiler
 import sys as flush
 
@@ -63,7 +64,38 @@ def _pad_batch_to_max(batch, max_len):
     batch.num_decode += pad              # counted for lm_head / dense shape
 
 
-def _pass_response(router, current, state_changed=False):
+def _build_pd_link(cluster, args):
+    """The P/D KV handoff model for this cluster, or ``None`` to keep graphs.
+
+    ``pd_handoff_model: "graph"`` in the cluster config restores the older
+    behaviour, where a handoff was a SEND on a Prefill rank plus a RECV
+    workload handed to the Decode NPU -- that RECV then ran *on* the Decode's
+    own timeline and serialised with its decode steps (see
+    ``serving/core/pd_link.py``).  The default is the link model.
+    """
+    if str(cluster.get("pd_handoff_model", "link")).lower() != "link":
+        return None
+    if not cluster.get("prefill_instance") or not cluster.get("decode_instance"):
+        return None
+    intra_node = cluster.get("intra_node_link")
+    wire_bw = float(cluster["handoff_link_bw"])
+    wire_latency = float(cluster["link_latency"])
+
+    def bandwidth_gbps(producer_node, consumer_node):
+        if intra_node is not None and producer_node == consumer_node:
+            return float(intra_node[0])
+        return wire_bw
+
+    def latency_ns(producer_node, consumer_node):
+        if intra_node is not None and producer_node == consumer_node:
+            return float(intra_node[1])
+        return wire_latency
+
+    return PdHandoffLink(bandwidth_gbps, latency_ns,
+                         logger=get_logger("PdHandoffLink"))
+
+
+def _pass_response(router, current, state_changed=False, extra_deadline=None):
     """The "pass" answer, carrying the next known arrival when there is one.
 
     ASTRA-Sim stops re-asking an NPU that passed until either some NPU
@@ -73,6 +105,11 @@ def _pass_response(router, current, state_changed=False):
     decision. Without the deadline an idle instance would stay suppressed
     past an arrival it should have admitted, in the case where every other
     instance is still mid-batch and so no report is coming.
+
+    ``extra_deadline`` carries the other kind of future event the frontend
+    knows about but ASTRA-Sim does not: a P/D handoff landing (see
+    ``PdHandoffLink``).  Without it the wake-up still happens -- an idle
+    cluster advances in 1 ms quanta -- but only after the queue has emptied.
 
 ``state_changed=True`` sends ``pass -1``: this pass altered scheduler
     state, so it is not idempotent and re-asking is not a wasted question.
@@ -85,6 +122,8 @@ def _pass_response(router, current, state_changed=False):
     if state_changed:
         return "pass -1"
     nxt = router.get_next_pending_arrival()
+    if extra_deadline is not None and (nxt is None or extra_deadline < nxt):
+        nxt = extra_deadline
     if nxt is None or nxt <= current:
         return "pass"
     return f"pass {int(nxt)}"
@@ -626,6 +665,10 @@ def main():
     if cluster.get("kv_egress_gbps"):
         print(f"  • KV egress cap (GB/s)  : {cluster['kv_egress_gbps']} "
               f"(handoff link charged at {cluster['handoff_link_bw']} GB/s)")
+    pd_link = _build_pd_link(cluster, args)
+    if pd_link is not None:
+        print("  • P/D handoff           : link model (both engines keep running; "
+              "see serving/core/pd_link.py)")
     for instance_id, instance in enumerate(instances):
         prefix_pool_index = prefix_pool_inst_mapping[instance_id]
         prefix_pool = None
@@ -657,6 +700,7 @@ def main():
             prefix_profiler=casr_profiler,
             pd_buffer_bytes=pd_buffer_bytes,
             pd_staging=pd_staging,
+            pd_link_handoff=pd_link is not None,
             # Optional per-instance KV-pool calibration, e.g.
             # ``"npu_mem": {"mem_size": 24, "kv_scale": 1.5}``.
             kv_scale=float((instance.get("npu_mem") or {}).get("kv_scale", 1.0) or 1.0),
@@ -801,23 +845,14 @@ def main():
     # with pp_size > 1 an NPU can open a second round before it has been handed
     # the first one's graph, and a single slot silently dropped the first.
     dp_ready_workloads = defaultdict(deque)  # npu_id -> deque[workload_path]
-    # Dynamic CASR P/D handoffs use a receiver ET graph generated alongside a
-    # Prefill batch.  Unlike the legacy adjacent receiver rank, the selected
-    # Decode NPU is outside the Prefill instance's normal rank range, so its
-    # workload has to be explicitly handed to that NPU on its next poll.
-    # The source scheduler rides along so the completion can be routed back to
-    # the Prefill batch that is waiting on it.
-    pd_ready_workloads = defaultdict(deque)  # decode_npu_id -> deque[(batch_id, path, source)]
 
     # ASTRA-Sim reports one zero-based iteration counter per NPU, and that
     # counter counts *every* workload this frontend runs on it: the startup
-    # event handler, each Prefill batch's receiver graph (which runs on the
-    # Decode NPU and unblocks the Prefill), each DP round's shared graph, and
-    # the instance's own batches.  ``Scheduler.add_done`` wants the instance's
-    # own batch id, not that mixed ordinal, so record the hand-over order and
-    # translate through it.  On an NPU that only ever runs its own batches the
-    # translation is the identity -- which is every configuration that existed
-    # before dynamic P/D handoffs.
+    # event handler, each DP round's shared graph, and the instance's own
+    # batches.  ``Scheduler.add_done`` wants the instance's own batch id, not
+    # that mixed ordinal, so record the hand-over order and translate through
+    # it.  On an NPU that only ever runs its own batches the translation is the
+    # identity -- which is every configuration without DP groups.
     npu_workload_log = defaultdict(list)  # npu -> [(instance_id, batch_id, kind, source)]
     for _npu in range(total_npu):
         # ASTRA-Sim begins by running the event-handler workload handed to it on
@@ -847,6 +882,14 @@ def main():
         # they cannot ride on Prefill completions, because a stalled Prefill
         # produces none (see Router.retry_pending_handoffs).
         router.retry_pending_handoffs(current)
+
+        # KV that has landed by ``current`` makes its request decodable: the
+        # handoff's bytes were charged to the producer's egress when the Prefill
+        # finished, so this is the only way a transferred request enters its
+        # Decode.
+        if pd_link is not None:
+            for landed in pd_link.pop_due(current):
+                router.transfer_prefill_request(landed, current)
 
         if casr_controller is not None and casr_controller.due(current):
             casr_plan = casr_controller.build_plan(current, casr_profiler, schedulers)
@@ -886,15 +929,6 @@ def main():
         work_log = npu_workload_log[sys]
         finished_work = work_log[id] if 0 <= id < len(work_log) else None
         work_kind = finished_work[2] if finished_work is not None else None
-        # A dynamic receiver graph runs on the selected Decode NPU, but its
-        # completion unblocks the originating Prefill batch.  Decode has no
-        # Python request yet at this point, so route the completion explicitly
-        # back to the source scheduler.
-        if work_kind == "pd":
-            pd_source = finished_work[3]
-            _, _, pd_finished = pd_source.add_done(finished_work[1] + 1, sys, current)
-            if pd_finished:
-                router.transfer_prefill_request(pd_finished, current)
         # check request is done
         if work_kind == "own":
             prompt_t, gen_t, finished_reqs = schedulers[instance_id].add_done(
@@ -914,9 +948,26 @@ def main():
             for req in finished_reqs:
                 router.notify_request_completed(req.id, current)
 
-        # Add prefill ended requests to decode instance
+        # A finished Prefill hands its KV to the Decode: with the link model the
+        # bytes occupy the producer's egress (``PdHandoffLink``) and the
+        # requests become decodable when they land, so the Decode keeps running
+        # its own batches in the meantime.  Without it the handoff stays a graph
+        # the Decode NPU has to execute, which is what stalled the Decode.
         if instances[instance_id]["pd_type"] == "prefill" and len(finished_reqs) > 0:
-            router.transfer_prefill_request(finished_reqs, current)
+            if pd_link is None:
+                router.transfer_prefill_request(finished_reqs, current)
+            else:
+                landing_node = None
+                for req in finished_reqs:
+                    target_instance = req.decode_instance_id
+                    if target_instance is not None:
+                        landing_node = inst2node_mapping[target_instance]
+                        break
+                pd_link.enqueue(
+                    instance_id, node_id,
+                    node_id if landing_node is None else landing_node,
+                    sum(int(req.pd_kv_bytes or 0) for req in finished_reqs),
+                    tuple(finished_reqs), current)
 
         # An NPU that opened a DP round owes ASTRA-Sim that round's graph, and it
         # has to be handed over before the scheduler may open anything new. vLLM
@@ -930,20 +981,12 @@ def main():
         # poll that should have handed over the previous one, and the round after
         # that overwrote the entry: the first graph never ran, and the other
         # pipeline stage blocked forever on a RECV that never came.
-        pd_pending = pd_ready_workloads.get(sys)
         pending = dp_ready_workloads.get(sys)
-        new_req = None if (pd_pending or pending) else schedulers[instance_id].schedule(current, sys, id)
+        new_req = None if pending else schedulers[instance_id].schedule(current, sys, id)
         responded = False  # track whether we already sent a response to ASTRA-Sim
 
         # Hand over a workload pre-generated by a DP round this NPU opened.
-        if pd_pending:
-            pd_batch_id, workload, pd_source = pd_pending.popleft()
-            if not pd_pending:
-                del pd_ready_workloads[sys]
-            npu_workload_log[sys].append((instance_id, pd_batch_id, "pd", pd_source))
-            controller.write_flush(p, workload)
-            responded = True
-        elif pending:
+        if pending:
             dp_batch_id, dp_workload = pending.popleft()
             npu_workload_log[sys].append((instance_id, dp_batch_id, "own", None))
             controller.write_flush(p, dp_workload)
@@ -1177,12 +1220,6 @@ def main():
                                    trace=trace_data)
                     workload = get_workload(new_req, instance["hardware"], instance_id,
                                             inputs_root=run_paths.inputs_root)
-                    if (instance["pd_type"] == "prefill" and
-                            new_req.pd_decode_npu_offset is not None):
-                        for target_npu in range(new_req.pd_decode_npu_offset,
-                                                new_req.pd_decode_npu_offset + new_req.pd_decode_npu_count):
-                            pd_ready_workloads[target_npu].append(
-                                (new_req.batch_id, workload, schedulers[instance_id]))
                     npu_workload_log[sys].append((instance_id, new_req.batch_id, "own", None))
                     controller.write_flush(p, workload)
             else:
@@ -1338,7 +1375,15 @@ def main():
                 )
         # check if all requests are done for current instance#
         # NOTE: 'instance_id' could occur in duplicate, because 'npu2inst_mapping[sys]' is not one-to-one mapping
-        if (instance_id not in decode_instance or is_prefill_done) and instance_id not in done_instance and schedulers[instance_id].is_request_empty() and not router.has_pending_requests() and not router.has_deferred_sessions():
+        # A KV handoff in flight on the link belongs to no scheduler: the
+        # Prefill retired the request and the Decode has not admitted it yet, so
+        # "every instance is empty" is not the same as "the run is over".
+        if ((instance_id not in decode_instance or is_prefill_done)
+                and instance_id not in done_instance
+                and schedulers[instance_id].is_request_empty()
+                and not router.has_pending_requests()
+                and not router.has_deferred_sessions()
+                and (pd_link is None or pd_link.in_flight() == 0)):
             # For DP groups: only mark done when ALL members of the group are empty
             dg = inst_dp_group.get(instance_id)
             if dg is not None:
@@ -1349,7 +1394,9 @@ def main():
                 if not all_dp_empty:
                     # Other DP members still have work — keep this instance alive for dummy waves
                     if not responded:
-                        controller.write_flush(p, _pass_response(router, current))
+                        controller.write_flush(p, _pass_response(
+                            router, current,
+                            extra_deadline=(None if pd_link is None else pd_link.next_due())))
                     flush.stdout.flush()
                     continue
 
@@ -1382,7 +1429,9 @@ def main():
             # advance current time so the next iteration can pick them up.
             # Built before the jump below: _pass_response compares against
             # the clock ASTRA-Sim is actually at, not the one we skip to.
-            pass_msg = _pass_response(router, current)
+            pass_msg = _pass_response(
+                router, current,
+                extra_deadline=(None if pd_link is None else pd_link.next_due()))
             if router.has_deferred_sessions() or router.has_pending_requests():
                 next_arrival = router.get_next_pending_arrival()
                 if next_arrival is not None and next_arrival > current:
