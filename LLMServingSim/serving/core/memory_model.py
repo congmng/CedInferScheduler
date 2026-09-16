@@ -53,6 +53,15 @@ class MemoryModel():
         self.kv_head = self.config.get("num_key_value_heads", self.n_head)  # fallback to n_head if not defined
         self.q_dim = self.n_head * self.head_dim       # total Q projection output dim
         self.kv_dim = self.kv_head * self.head_dim     # total KV projection output dim
+        # Hybrid attention: ``kv_geometry`` in the model config splits the
+        # layers into full-attention ones and windowed ones (sliding-window or
+        # linear/SSM state, which keeps at most ``window_tokens`` of KV).  The
+        # simulator's kernels are the profiled ones of the base model, so this
+        # is a KV-geometry study rather than a re-profile: the point is what a
+        # much smaller, non-linear KV footprint does to the *algorithm*.
+        geometry = self.config.get("kv_geometry") or {}
+        self.full_attention_layers = int(geometry.get("full_layers", self.n_layer))
+        self.window_tokens = int(geometry.get("window_tokens", 0) or 0)
         self.vocab_size = self.config['vocab_size']
         # Accept either the Mistral-style ``num_local_experts`` or the
         # HF/Qwen-style ``num_experts`` key — profiler configs track
@@ -222,7 +231,21 @@ class MemoryModel():
         # return batch_size = 1 to caclulate max batch_size in scheduler
 
         # K & V multiply 2
-        return 2 * self.kv_dim * seq * self.n_layer * self.kv_fp // self.num_npus
+        return 2 * self.kv_dim * self.kv_tokens(seq) * self.kv_fp // self.num_npus
+
+    def kv_tokens(self, seq):
+        """Token-slots of KV a sequence of ``seq`` tokens occupies on one rank.
+
+        Full-attention layers hold one entry per token; windowed (hybrid)
+        layers hold at most ``window_tokens``.  ``kv_geometry`` absent means
+        every layer is full attention, which is the historical behaviour and
+        keeps every existing number unchanged.
+        """
+        if self.window_tokens <= 0 or self.full_attention_layers >= self.n_layer:
+            return seq * self.n_layer
+        full = max(0, min(self.n_layer, self.full_attention_layers))
+        windowed = max(0, self.n_layer - full)
+        return full * seq + windowed * min(seq, self.window_tokens)
 
     def get_total_kv(self, req):
         """Bytes of KV a request's whole computed context occupies, per rank.
@@ -242,7 +265,7 @@ class MemoryModel():
         more at wider GQA ratios. It also honours ``kv_cache_dtype``, which the
         activation size did not.
         """
-        return 2 * self.kv_dim * num_tokens * self.n_layer * self.kv_fp // self.tp_size
+        return 2 * self.kv_dim * self.kv_tokens(num_tokens) * self.kv_fp // self.tp_size
 
     def free_weight(self):
         if self._npu_reserved - self.weight < 0:
@@ -413,13 +436,19 @@ def build_prefix_pool(tier, capacity_bytes, npu_block_size, cluster_bytes_per_to
                      enable_caching=True, node_id=node_id, instance_id=instance_id)
 
 
-def full_cluster_kv_bytes_per_token(model, fp, kv_cache_dtype='auto'):
+def full_cluster_kv_bytes_per_token(model, fp, kv_cache_dtype='auto', tokens=0):
     """Bytes of KV cache per token aggregated over the full TP cluster.
 
     Mirrors MemoryModel.get_kv(1) * num_npus but computes directly, avoiding
     the per-rank floor-division roundoff. ``fp`` is the model weight dtype
     in bits (16, 32, ...). ``kv_cache_dtype='fp8'`` forces 1 byte per element
     for the KV cache regardless of weight dtype.
+
+    With ``kv_geometry`` (hybrid attention) the *marginal* rate is not what a
+    plan should price: windowed layers stop growing once they reach their
+    window, so a 1250-token prompt averages far less than one token's marginal
+    cost.  Pass ``tokens`` (the workload's prompt length) to get that average;
+    ``0`` keeps the marginal figure.
     """
     config = get_config(model)
     n_embd = config['hidden_size']
@@ -429,8 +458,17 @@ def full_cluster_kv_bytes_per_token(model, fp, kv_cache_dtype='auto'):
     kv_dim = kv_head * head_dim
     n_layer = config['num_hidden_layers']
     kv_fp = 1 if kv_cache_dtype == 'fp8' else fp // 8
-    # 2 (K + V) * kv_dim * n_layer * bytes_per_elem
-    return 2 * kv_dim * n_layer * kv_fp
+    geometry = config.get("kv_geometry") or {}
+    full_layers = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
+    windowed = n_layer - full_layers
+    window_tokens = int(geometry.get("window_tokens", 0) or 0)
+    if windowed <= 0 or window_tokens <= 0 or tokens <= 0:
+        layer_slots = n_layer
+    else:
+        # Average token-slots per layer over a prompt of ``tokens`` tokens.
+        layer_slots = full_layers + windowed * min(tokens, window_tokens) / tokens
+    # 2 (K + V) * kv_dim * layer-slots * bytes_per_elem
+    return int(round(2 * kv_dim * kv_fp * layer_slots))
 
 
 # calculate the per-rank input, weight, output size of each layer

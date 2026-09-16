@@ -579,8 +579,22 @@ def main():
         # understates it by the layer count and is exactly the kind of gap that
         # let the LP pick a cross-domain pair the timeline then charged far
         # more for (docs/模拟器与真机一致性核查.md 附四/附六).
+        #
+        # This is the *graph* model's shape and it is what the validated tables
+        # were produced with.  Under the link model the fixed part is one hop,
+        # and pricing ``layers x`` there is wrong in the other direction -- but
+        # fixing it alone makes the plan one-hot onto the two best same-domain
+        # pairs (the router can then only choose among the candidates the plan
+        # offered), which the six-domain arena measured as 20375 ms against
+        # 1120 ms.  The fix has to land together with a *hard* per-producer
+        # egress budget in the plan; see docs/大规模异构模拟环境.md 第 7/12 节.
         num_layers = int(get_config(
             raw_instances[0]["model_name"]).get("num_hidden_layers", 1))
+        link_model = (str(raw_cluster_config.get("pd_handoff_model", "link")).lower()
+                      == "link")
+        hop_ms = link_latency_ms if link_model else link_latency_ms * num_layers
+        intra = raw_cluster_config.get("intra_node_link_bw")
+        same_node_bw = (float(intra) if intra else 0.0) * 1e9
         pair_costs = {}
         prefills = [i for i in raw_instances if i.get("pd_type") == "prefill"]
         decodes = [i for i in raw_instances if i.get("pd_type") == "decode"]
@@ -588,8 +602,9 @@ def main():
             for d in decodes:
                 same_node = node_of.get(int(p["instance_id"])) == node_of.get(int(d["instance_id"]))
                 pair_costs[f"{p['instance_id']},{d['instance_id']}"] = {
-                    "rtt_ms": 0.0 if same_node else link_latency_ms * num_layers,
-                    "bandwidth_bytes_per_s": 0.0 if same_node else link_bw_gbps * 1e9,
+                    "rtt_ms": 0.0 if same_node else hop_ms,
+                    "bandwidth_bytes_per_s": (same_node_bw if same_node
+                                              else link_bw_gbps * 1e9),
                 }
         casr_config["pair_costs"] = pair_costs
     if args.casr_solver is not None:

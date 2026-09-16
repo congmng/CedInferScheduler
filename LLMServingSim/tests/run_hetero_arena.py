@@ -47,7 +47,8 @@ ARMS = (
 )
 
 
-def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS):
+def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS, model="Qwen/Qwen3-8B",
+                  prompt_tokens=1250):
     """Three variants of the arena: static-2, elastic, and all-active."""
     domain_count = len([d for d in domains.split(",") if d.strip()])
     configs = {}
@@ -55,7 +56,9 @@ def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS):
                        ("all", ["--min-active", str(domain_count)])):
         path = out_dir / f"hetero6-{tag}.json"
         subprocess.run([sys.executable, str(REPO / "tests" / "make_hetero_cluster.py"),
-                        "--domains", domains, "--out", str(path), *extra],
+                        "--domains", domains, "--model", model,
+                        "--prompt-tokens", str(prompt_tokens),
+                        "--out", str(path), *extra],
                        cwd=REPO, check=True, capture_output=True, text=True)
         configs[tag] = path
     return configs
@@ -104,6 +107,10 @@ def main() -> int:
     parser.add_argument("--timeout-s", type=int, default=1800)
     parser.add_argument("--domains", default=DOMAINS,
                         help="comma separated hardware per domain")
+    parser.add_argument("--model", default="Qwen/Qwen3-8B",
+                        help="model id; a hybrid variant exercises kv_geometry")
+    parser.add_argument("--prompt-tokens", type=int, default=1250,
+                        help="prompt length the KV geometry is averaged over")
     parser.add_argument("--peak-rps", type=float, default=PEAK_RPS,
                         help="arrival rate of the 90 s peak phase")
     parser.add_argument("--arms", default="",
@@ -113,7 +120,8 @@ def main() -> int:
 
     out_dir = pathlib.Path(args.out) if args.out else pathlib.Path("/tmp/hetero-arena")
     out_dir.mkdir(parents=True, exist_ok=True)
-    configs = build_configs(out_dir, args.domains, args.peak_rps)
+    configs = build_configs(out_dir, args.domains, args.peak_rps,
+                            model=args.model, prompt_tokens=args.prompt_tokens)
     trace = ensure_trace(args.peak_rps)
     all_tag = "all" if "all" in configs else "all6"
     config_for = {"casr_full": configs["elastic"], "casr_all6": configs[all_tag]}

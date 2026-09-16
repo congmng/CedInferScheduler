@@ -377,6 +377,14 @@ def _load_perf_db(hardware, model, variant, tp_needed, model_type):
     tuple and cache it. ``tp_needed`` is a set of int TP degrees the
     simulator will query; each must have its own ``tp<N>/`` folder.
     """
+    # A model may declare ``profile_model`` when it shares another model's
+    # kernels and only differs in KV geometry (a hybrid-attention variant of a
+    # profiled checkpoint, say): look the profile up under that name.
+    try:
+        profile_model = get_config(model).get("profile_model") or model
+    except Exception:                                     # noqa: BLE001
+        profile_model = model
+    model = profile_model
     cache_key = (hardware, model, variant)
     if cache_key in _perf_db_cache:
         db = _perf_db_cache[cache_key]
@@ -1028,11 +1036,24 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
     if category == "per_sequence":
         latency_ns = _lookup_per_sequence(ctx.perf_db, layer_name, ctx.tp_size, bctx.lm_head_len)
     elif category == "attention":
+        # A windowed (hybrid) layer attends over at most its window, so its
+        # lookup -- and the sizes derived from it -- use the capped lengths.
+        full_layers, windowed, window = _kv_geometry(ctx)
+        kv_prefill, kv_mean, kv_max, kv_min = (
+            bctx.kv_prefill, bctx.kv_decode_mean, bctx.kv_decode_max, bctx.kv_decode_min)
+        if windowed > 0 and window > 0 and layer_num is not None:
+            first_windowed = full_layers if full_layers > 0 else 0
+            is_windowed = (layer_num >= first_windowed)
+            if is_windowed:
+                kv_prefill = min(kv_prefill, window)
+                kv_mean = min(kv_mean, window)
+                kv_max = min(kv_max, window)
+                kv_min = min(kv_min, window)
         latency_ns = _lookup_attention_with_skew(
             ctx.perf_db, ctx.tp_size,
-            bctx.prefill_chunk, bctx.kv_prefill,
-            bctx.n_decode, bctx.kv_decode_mean, bctx.kv_decode_max,
-            bctx.kv_decode_min,
+            bctx.prefill_chunk, kv_prefill,
+            bctx.n_decode, kv_mean, kv_max,
+            kv_min,
         )
     else:  # dense
         latency_ns = _lookup_dense(ctx.perf_db, layer_name, ctx.tp_size, bctx.total_len)
@@ -1075,6 +1096,23 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
     return latency_ns
 
 
+def _kv_geometry(ctx):
+    """(full-attention layers, windowed layers, window tokens) for this model.
+
+    ``kv_geometry`` in the model config describes a hybrid-attention model:
+    ``full_layers`` keep a normal KV cache, the rest hold at most
+    ``window_tokens`` (a sliding window, or a linear/SSM state of that size).
+    Absent, every layer is full attention and all the historical numbers hold.
+    """
+    geometry = (getattr(ctx, "config", None) or {}).get("kv_geometry") or {}
+    n_layer = int((getattr(ctx, "config", None) or {}).get("num_hidden_layers", 0) or 0)
+    if not geometry or n_layer <= 0:
+        return n_layer, 0, 0
+    full = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
+    window = int(geometry.get("window_tokens", 0) or 0)
+    return full, max(0, n_layer - full), window
+
+
 def _pd_kv_send_bytes(ctx, bctx):
     """Per-layer, per-rank KV bytes a prefill instance ships to its decode peer.
 
@@ -1091,7 +1129,13 @@ def _pd_kv_send_bytes(ctx, bctx):
     if tokens <= 0:
         return 0
     kv_dim = ctx.kv_head * ctx.head_dim
-    return 2 * kv_dim * tokens * ctx.kv_fp // max(ctx.tp_size, 1)
+    # Hybrid attention: only the full-attention layers ship one entry per
+    # token; a windowed layer keeps (and therefore ships) at most its window.
+    full_layers, windowed, window = _kv_geometry(ctx)
+    if windowed <= 0 or window <= 0:
+        return 2 * kv_dim * tokens * ctx.kv_fp // max(ctx.tp_size, 1)
+    slots = full_layers * tokens + windowed * min(tokens, window)
+    return 2 * kv_dim * slots * ctx.kv_fp // max(max(1, full_layers + windowed) * max(ctx.tp_size, 1), 1) * max(1, full_layers + windowed)
 
 
 def _aggregate_kv_handoff(rows):

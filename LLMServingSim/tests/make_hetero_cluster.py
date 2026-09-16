@@ -49,7 +49,8 @@ CONTAINER_BOOT_MS = 45000
 MODEL = "Qwen/Qwen3-8B"
 
 
-def profiled_costs(hardware, tp=1, prefill_reference=1024, decode_reference=16):
+def profiled_costs(hardware, tp=1, prefill_reference=1024, decode_reference=16,
+                   model=MODEL):
     """(decode_service_ms, prefill_service_ms, decode_rps, prefill_rps).
 
     ``*_service_ms`` is the per-*request* service at the reference length, which
@@ -65,8 +66,8 @@ def profiled_costs(hardware, tp=1, prefill_reference=1024, decode_reference=16):
     cwd = os.getcwd()
     os.chdir(REPO / "astra-sim")
     try:
-        decode_ms = step_cost_ns(hardware, MODEL, tp=tp, tokens=1) / 1e6
-        prefill_ms = step_cost_ns(hardware, MODEL, tp=tp,
+        decode_ms = step_cost_ns(hardware, model, tp=tp, tokens=1) / 1e6
+        prefill_ms = step_cost_ns(hardware, model, tp=tp,
                                   tokens=prefill_reference) / 1e6
     finally:
         os.chdir(cwd)
@@ -74,8 +75,23 @@ def profiled_costs(hardware, tp=1, prefill_reference=1024, decode_reference=16):
             1000.0 / (decode_reference * decode_ms), 1000.0 / prefill_ms)
 
 
+def _kv_bytes_per_token(model, prompt_tokens):
+    import os
+    sys.path.insert(0, str(REPO))
+    from serving.core.memory_model import full_cluster_kv_bytes_per_token
+
+    cwd = os.getcwd()
+    os.chdir(REPO)
+    try:
+        value = full_cluster_kv_bytes_per_token(model, 16, "auto",
+                                                tokens=int(prompt_tokens or 0))
+    finally:
+        os.chdir(cwd)
+    return float(value)
+
+
 def build(domains, min_active=2, max_active=None, structural=False,
-          prefix_caching=True):
+          prefix_caching=True, model=MODEL, prompt_tokens=1250):
     nodes = []
     prefill_ids = {index: index * 2 for index in range(len(domains))}
     decode_ids = {index: index * 2 + 1 for index in range(len(domains))}
@@ -86,13 +102,13 @@ def build(domains, min_active=2, max_active=None, structural=False,
             "num_instances": 2,
             "cpu_mem": {"mem_size": 128, "mem_bw": 256, "mem_latency": 0},
             "instances": [
-                {"instance_id": prefill_ids[index], "model_name": MODEL,
+                {"instance_id": prefill_ids[index], "model_name": model,
                  "hardware": hardware,
                  "npu_mem": {"mem_size": mem_gb, "mem_bw": mem_bw,
                              "mem_latency": 0, "mem_util": 0.9},
                  "pd_type": "prefill", "tp_size": 1,
                  "enable_prefix_caching": prefix_caching},
-                {"instance_id": decode_ids[index], "model_name": MODEL,
+                {"instance_id": decode_ids[index], "model_name": model,
                  "hardware": hardware,
                  "npu_mem": {"mem_size": mem_gb, "mem_bw": mem_bw,
                              "mem_latency": 0, "mem_util": 0.9},
@@ -106,7 +122,8 @@ def build(domains, min_active=2, max_active=None, structural=False,
     router_capacity, prefill_tokens_per_s = {}, {}
     for index, name in enumerate(domains):
         hardware = HARDWARE[name][0]
-        decode_ms, prefill_ms, decode_rps, prefill_rps = profiled_costs(hardware)
+        decode_ms, prefill_ms, decode_rps, prefill_rps = profiled_costs(
+            hardware, model=model)
         prefill_capacity[str(prefill_ids[index])] = round(prefill_rps, 3)
         decode_capacity[str(decode_ids[index])] = round(decode_rps, 3)
         prefill_service[str(prefill_ids[index])] = round(prefill_ms, 3)
@@ -194,7 +211,11 @@ def build(domains, min_active=2, max_active=None, structural=False,
             "compute_weight": 1.0,
             "network_weight": 1.0,
             "single_home_below_rps": 1.0,
-            "kv_bytes_per_token": 147456,
+            # Average KV bytes per prompt token at the workload's own prompt
+            # length: a hybrid-attention model's windowed layers stop growing
+            # once they reach their window, so the marginal figure would
+            # over-price its egress five-fold at 1250 tokens.
+            "kv_bytes_per_token": _kv_bytes_per_token(model, prompt_tokens),
             "shared_links": shared_links,
             "local_prefill": "never",
         },
@@ -209,6 +230,10 @@ def main() -> int:
     parser.add_argument("--min-active", type=int, default=2,
                         help="Prefills that start ACTIVE (the rest are spares)")
     parser.add_argument("--max-active", type=int, default=0)
+    parser.add_argument("--model", default=MODEL,
+                        help="HF model id, e.g. Qwen/Qwen3-8B or a hybrid variant")
+    parser.add_argument("--prompt-tokens", type=int, default=1250,
+                        help="prompt length the hybrid KV geometry is averaged over")
     parser.add_argument("--structural", action="store_true",
                         help="enable structural scale-out (casr_full arm)")
     parser.add_argument("--out", default="configs/cluster/hetero6_generated.json")
@@ -221,7 +246,8 @@ def main() -> int:
                          f"known: {sorted(HARDWARE)}")
     config = build(domains, min_active=args.min_active,
                    max_active=args.max_active or len(domains),
-                   structural=args.structural)
+                   structural=args.structural, model=args.model,
+                   prompt_tokens=args.prompt_tokens)
     path = pathlib.Path(args.out)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")
