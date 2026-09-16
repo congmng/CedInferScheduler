@@ -1,0 +1,14 @@
+local_cpu: false
+max_local_cpu_size: 0
+max_local_disk_size: 0
+remote_serde: NULL
+
+enable_pd: true
+pd_role: "sender"
+pd_buffer_size: 1073741824
+pd_buffer_device: "cuda"
+pd_backend_mode: "sync"
+save_unfull_chunk: true
+pd_skip_proxy_notification: true
+nixl_backends: ["UCX"]
+transfer_channel: "nixl"

@@ -710,6 +710,18 @@ scenarios are for.
   into the container's site-packages by `scripts/compile.sh`, so editing
   `llm_converter.py` changes nothing until you reinstall it
   (`cd astra-sim/extern/graph_frontend/chakra && pip3 install .`)
+  - **2026-09-15: that reinstall no longer works in this environment**
+    (`setup.cfg`'s `build_grpc` fails during wheel metadata), and the
+    consequence was a day of debugging: the 09-12 handoff fix sat in the tree
+    while every multi-domain run loaded a three-day-old copy and deadlocked at
+    0 tokens/s.  Copy the changed file instead and let the guard test prove it:
+    `cp astra-sim/extern/graph_frontend/chakra/src/converter/llm_converter.py \
+    /home/ubuntu/miniconda3/lib/python3.13/site-packages/chakra/src/converter/`,
+    then `python3 -m pytest tests/test_chakra_runtime_sync.py -q`
+    (or `python3 tests/check_sim_ready.py`, which runs that check plus the ET
+    pairing and liveness gates).  Do **not** shadow the installed chakra with
+    `PYTHONPATH`: the tree's generated protobufs are stale and every import
+    raises "Descriptors cannot be created directly".
 - **Don't commit large files**: generated traces, `.et` files and scratch run
   output are gitignored (`outputs/*` with `!outputs/example_*.csv`,
   `bench/results/`). `astra-sim/inputs/runs/` is cleaned per run unless you

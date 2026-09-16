@@ -148,7 +148,17 @@ def assemble_scheduler_output(shot: Shot, model_runner):
     # hybrid architectures). We honor all of them by reading the
     # worker's live block_table list.
     input_batch = getattr(model_runner, "input_batch", None)
-    if input_batch is None:
+    if input_batch is not None:
+        block_tables = input_batch.block_table.block_tables
+        block_sizes = [
+            bt.block_size * bt.blocks_per_kv_block
+            for bt in block_tables
+        ]
+    elif hasattr(model_runner, "block_tables"):
+        # Newer vLLM GPU workers split the old input batch into
+        # input_buffers and a standalone BlockTables object.
+        block_sizes = list(model_runner.block_tables.block_sizes)
+    else:
         available = sorted(
             name for name in vars(model_runner)
             if "batch" in name.lower() or "input" in name.lower()
@@ -157,11 +167,6 @@ def assemble_scheduler_output(shot: Shot, model_runner):
             "vLLM worker has no input_batch; profiler requires a V1 "
             f"GPUModelRunner input batch (available fields: {available})"
         )
-    block_tables = input_batch.block_table.block_tables
-    block_sizes = [
-        bt.block_size * bt.blocks_per_kv_block
-        for bt in block_tables
-    ]
     num_kv_groups = len(block_sizes)
 
     scheduled: list = []
@@ -194,6 +199,7 @@ def assemble_scheduler_output(shot: Shot, model_runner):
                 # Length must equal `history + new_tokens` so vLLM
                 # thinks it's handling a real sequence.
                 prompt_token_ids=[1] * total_len,
+                prefill_token_ids=[1] * total_len,
                 mm_features=[],
                 sampling_params=sampling_params,
                 pooling_params=None,

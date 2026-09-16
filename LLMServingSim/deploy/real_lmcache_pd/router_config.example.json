@@ -1,0 +1,138 @@
+{
+  "_comment": [
+    "Template for the real multi-domain P/D router (disagg_router.py).",
+    "hosts maps each domain to SSH/model details; optional 'gpu_runtime' forces",
+    "'--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=<gpu>' instead of '--gpus device=<gpu>'",
+    "(needed on dockerd without a live CDI spec, e.g. 3090b).",
+    "'service_ms' is the measured single-request service time at concurrency 1;",
+    "it is what makes the casr cost model heterogeneity-aware.",
+    "'links' must be filled from measured KV transfer cost, not NIC line rate."
+  ],
+  "hosts": {
+    "5090": {
+      "ssh": "buaa@10.212.70.196",
+      "ssh_port": 22,
+      "ucx_device": "ens6f0",
+      "model": "/data/Models/Qwen3-8B"
+    },
+    "3090a": {
+      "ssh": "buaa@10.212.67.68",
+      "ssh_port": 22,
+      "ucx_device": "ens18",
+      "model": "/data/sdb/model/casr/Qwen3-8B"
+    },
+    "3090b": {
+      "ssh": "buaa@10.212.70.38",
+      "ssh_port": 22,
+      "ucx_device": "eno1",
+      "model": "/home/buaa/models/Qwen3-8B",
+      "gpu_runtime": "nvidia"
+    }
+  },
+  "prefills": [
+    {
+      "id": "p5090",
+      "host": "10.212.70.196",
+      "port": 8100,
+      "domain": "5090",
+      "gpu": 0,
+      "speed": 1.0,
+      "capacity": 220,
+      "service_ms": 48.5
+    },
+    {
+      "id": "p3090a",
+      "host": "10.212.67.68",
+      "port": 8100,
+      "domain": "3090a",
+      "gpu": 0,
+      "speed": 0.55,
+      "capacity": 140,
+      "service_ms": 68.0
+    },
+    {
+      "id": "p3090b",
+      "host": "10.212.70.38",
+      "port": 8100,
+      "domain": "3090b",
+      "gpu": 0,
+      "speed": 0.55,
+      "capacity": 140,
+      "service_ms": 105.2
+    }
+  ],
+  "decodes": [
+    {
+      "id": "d5090",
+      "host": "10.212.70.196",
+      "port": 8200,
+      "domain": "5090",
+      "gpu": 1,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 1.0,
+      "capacity": 230,
+      "service_ms": 144.7
+    },
+    {
+      "id": "d3090a",
+      "host": "10.212.67.68",
+      "port": 8200,
+      "domain": "3090a",
+      "gpu": 1,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 0.55,
+      "capacity": 110,
+      "service_ms": 421.6
+    }
+  ],
+  "links": [
+    {
+      "src": "5090",
+      "dst": "3090a",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    },
+    {
+      "src": "3090a",
+      "dst": "5090",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    },
+    {
+      "src": "5090",
+      "dst": "3090b",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    },
+    {
+      "src": "3090b",
+      "dst": "5090",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    },
+    {
+      "src": "3090a",
+      "dst": "3090b",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    },
+    {
+      "src": "3090b",
+      "dst": "3090a",
+      "bw_gbps": 16.0,
+      "rtt_ms": 0.3
+    }
+  ],
+  "weights": {
+    "network": 1.0,
+    "prefill_load": 1.0,
+    "decode_load": 1.0,
+    "service": 1.0,
+    "kv_bytes_per_token": 147456,
+    "chars_per_token": 6.7
+  }
+}

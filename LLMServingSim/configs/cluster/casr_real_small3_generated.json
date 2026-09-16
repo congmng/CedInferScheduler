@@ -1,0 +1,317 @@
+{
+  "num_nodes": 3,
+  "link_bw": 0.11,
+  "link_latency": 48000000.0,
+  "_generated": "Derived from deploy/real_lmcache_pd/router_config.json by tests/gen_sim_config_from_real.py -- do not hand-edit; re-run the generator instead.",
+  "_link_comment": "link_bw=0.11 GB/s is the deployment's standard cross-domain link (0.88 Gbps, 12 pairs) and link_latency=48000000.0 ns the slowest RTT; the fabric is NOT uniform (A100 pairs run 0.118-0.146 Gbps, kvlink budget [18300000.0, 260000000.0, 260000000.0, 260000000.0, 260000000.0] B/s), and the simulator's one-value-per-dimension topology cannot express that. intra_node_link_bw=0.3 GB/s is the measured same-host P/D handoff (585 ms per 1000 prompt tokens), and kv_egress_gbps is the producer-side push ceiling from the deployment's standard kvlink budget.",
+  "kv_egress_gbps": 0.11,
+  "pd_buffer_bytes": 34359738368,
+  "casr": {
+    "solver": "lp",
+    "lifecycle": {
+      "min_active_prefill": 1,
+      "max_active_prefill": 3,
+      "warmup_ms": 45000,
+      "prefill_capacity": {
+        "0": 63,
+        "2": 45,
+        "4": 59
+      }
+    },
+    "structural": {
+      "evaluation_window_ms": 60000.0,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 3000.0,
+      "startup_cost": 0.0,
+      "warm_cost": 0.0,
+      "enabled": true,
+      "startup_s": 45.0,
+      "idle_cost_fraction": 0.1,
+      "enable_warm_counterfactual": false
+    },
+    "resources": {
+      "startup_ms": 45000,
+      "reclaim_ms": 50,
+      "nodes": {
+        "0": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            32,
+            32
+          ]
+        },
+        "1": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "2": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        }
+      }
+    },
+    "prefill_capacity": {
+      "0": 63,
+      "2": 45,
+      "4": 59
+    },
+    "decode_capacity": {
+      "1": 65,
+      "3": 26,
+      "5": 55
+    },
+    "overflow_penalty": 10,
+    "shared_links": [
+      {
+        "id": "kvlink-p5090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            0,
+            5
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x.",
+        "_id_comment": "pairs re-keyed to simulator instance ids"
+      },
+      {
+        "id": "kvlink-p3090a",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            5
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x.",
+        "_id_comment": "pairs re-keyed to simulator instance ids"
+      },
+      {
+        "id": "kvlink-p4090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            4,
+            1
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            5
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x.",
+        "_id_comment": "pairs re-keyed to simulator instance ids"
+      }
+    ],
+    "compute_weight": 1.0,
+    "kv_bytes_per_token": 147456.0,
+    "utilization_weight": 1.0,
+    "utilization_segments": 8,
+    "prefill_service_ms": {
+      "0": 48.5,
+      "2": 68.0,
+      "4": 39.2
+    },
+    "decode_service_ms": {
+      "1": 144.7,
+      "3": 421.6,
+      "5": 157.1
+    },
+    "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does.",
+    "pair_costs": {
+      "0,1": {
+        "rtt_ms": 0.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "0,3": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "0,5": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "2,1": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "2,3": {
+        "rtt_ms": 0.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "2,5": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "4,1": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "4,3": {
+        "rtt_ms": 48.0,
+        "bandwidth_bytes_per_s": 0.0
+      },
+      "4,5": {
+        "rtt_ms": 0.0,
+        "bandwidth_bytes_per_s": 0.0
+      }
+    },
+    "capacity_reference_tokens": 1024,
+    "decode_reference_tokens": 16,
+    "decode_fixed_ms": 20.0,
+    "decode_ms_per_1k_tokens": 14000.0,
+    "backlog_rps_multiple": 4.0,
+    "single_home_below_rps": 1.0,
+    "prefill_tokens_per_s": {
+      "0": 14000.0,
+      "2": 7300.0,
+      "4": 10400.0
+    }
+  },
+  "nodes": [
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 0,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 1,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 2,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 3,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 4,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 5,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    }
+  ],
+  "intra_node_link_bw": 0.3,
+  "intra_node_link_latency": 1000,
+  "_excluded_by_request": "Removed by --exclude for a small-cluster run: 3090b, a100. The real arms must disable the same instance ids."
+}

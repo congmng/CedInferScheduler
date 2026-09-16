@@ -1,0 +1,25 @@
+{
+  "_comment": "Measured single-instance anchors for calibrate_simulator.py --real-anchors. Keep the source line with each number: these are the only defensible yardsticks for the simulator's timing model.",
+  "RTX5090": {
+    "source": "2026-09-14/15, p5090 (10.212.70.196), unique 254-token prompts, 16 output tokens, concurrency 1 and 16 (tests/calibrate_pd_throughput.py + prefill-only sweep)",
+    "prefill_ms": 111.0,
+    "ttft_p50_ms": 111.0,
+    "tpot_p50_ms": 19.4,
+    "capacity_rps": 71.9
+  },
+  "RTX4090": {
+    "source": "2026-09-14/15, p4090 (10.212.67.167), unique 254-token prompts, prefill-only, concurrency 16",
+    "prefill_ms": 195.0,
+    "ttft_p50_ms": 195.0,
+    "tpot_p50_ms": 21.0,
+    "capacity_rps": 40.8
+  },
+  "_kv_egress_note": "Producer-side KV egress measured on the native NixlConnector path (2026-09-13/14): 115-314 MB/s per Prefill, 184 MB per 1250-token handoff. deploy/real_lmcache_pd/router_config.json uses 260 MB/s for that budget.",
+  "_long_prompt_anchor": {
+    "tokens": 1250,
+    "hardware": "RTX5090",
+    "source": "2026-09-14, p5090 prefill-only, unique 1250-token prompts, concurrency 16",
+    "capacity_rps": 11.3,
+    "engine_prefill_ms": 146.0
+  }
+}

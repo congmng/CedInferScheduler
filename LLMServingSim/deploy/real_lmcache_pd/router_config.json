@@ -1,0 +1,544 @@
+{
+  "timeouts": {
+    "downstream_s": 120.0,
+    "_comment": "Downstream (Prefill/Decode) HTTP timeout. A stalled KV handoff would otherwise leave the router handler and its inflight counters hung forever, wedging every later request; the handler now fails the request instead."
+  },
+  "hosts": {
+    "5090": {
+      "ssh": "buaa@10.212.70.196",
+      "ssh_port": 22,
+      "kv_group": "v029",
+      "ucx_device": "ens6f0",
+      "model": "/data/Models/Qwen3-8B",
+      "log_dir": "/data/casr/logs",
+      "cache_dir": "/data/casr/cache",
+      "ray_temp_dir": "/data/casr/ray"
+    },
+    "3090a": {
+      "ssh": "buaa@10.212.67.68",
+      "ssh_port": 22,
+      "kv_group": "v029",
+      "ucx_device": "ens18",
+      "model": "/data/sdb/model/casr/Qwen3-8B",
+      "log_dir": "/data/sdb/model/casr/logs",
+      "cache_dir": "/data/sdb/model/casr/cache",
+      "ray_temp_dir": "/data/sdb/model/casr/ray"
+    },
+    "3090b": {
+      "ssh": "buaa@10.212.70.38",
+      "ssh_port": 22,
+      "kv_group": "v029",
+      "ucx_device": "eno1",
+      "model": "/home/buaa/models/Qwen3-8B",
+      "gpu_runtime": "nvidia",
+      "log_dir": "/data/casr/logs",
+      "cache_dir": "/data/casr/cache",
+      "ray_temp_dir": "/data/casr/ray"
+    },
+    "a100": {
+      "ssh": "buaa@10.66.0.15",
+      "ssh_port": 2222,
+      "kv_group": "v029",
+      "ucx_device": "ens81f0",
+      "model": "/home/buaa/models/Qwen3-8B",
+      "image": "vllm/vllm-openai:v0.29.0",
+      "gpu_memory_utilization": 0.35,
+      "launcher": "venv",
+      "venv_python": "/mnt/lmcache-raid0/buaa/casr/venv/bin/python3",
+      "log_dir": "/mnt/lmcache-raid0/buaa/casr/logs",
+      "cache_dir": "/mnt/lmcache-raid0/buaa/casr/cache",
+      "ray_temp_dir": "/mnt/lmcache-raid0/buaa/casr/ray",
+      "_launcher_comment": "2026-09-15: docker stays unusable for buaa on this host (buaa is not in the docker group; /var/run/docker.sock is root:docker), so this domain runs vLLM straight from a venv -- sudo is used only to own the data-disk directories. 2026-09-16: buaa gained sudo (group 27), so the venv (8.1G) + pip cache (4.1G) + logs were moved off the nfsrdma share onto the host's own 14T raid0 at /mnt/lmcache-raid0/buaa/casr (13T free).",
+      "_comment": "2026-09-13: image upgraded to upstream v0.29.0 (the base of casr029) so the domain can join the native NixlConnector fabric -- NIXL refuses to hand KV between vLLM 0.26 and 0.29 (metadata schema differs). GPU 4/5, shared node.",
+      "_address_comment": "2026-09-13: canonical address is 10.66.0.15:2222 (overlay path). 10.70.251.47 is the same host (identical SSH host key, same ray node) reached over the older direct route, and is no longer used by any tooling. SSH auth failed until now only because the non-default identity ~/.ssh/id_casr_cluster was not selectable for this host; both addresses now answer with plain `ssh -p 2222 buaa@10.66.0.15`. Any hand-run ssh must carry -p 2222, otherwise the connection is refused rather than rejected."
+    },
+    "4090": {
+      "ssh": "ubuntu@10.212.67.167",
+      "ssh_port": 22,
+      "kv_group": "v029",
+      "ucx_device": "eno1",
+      "model": "/home/ubuntu/models/Qwen3-8B",
+      "config_dir": "/home/ubuntu",
+      "log_dir": "/mnt/home/casr/logs",
+      "cache_dir": "/mnt/home/casr/cache",
+      "ray_temp_dir": "/mnt/home/casr/ray",
+      "_comment": "local head node; p4090 pinned to GPU3 and d4090 to GPU2, since GPU0/GPU1 were taken by another user's job on 2026-09-11; service_ms measured from the same-domain p4090->d4090 pair"
+    }
+  },
+  "prefills": [
+    {
+      "id": "p5090",
+      "host": "10.212.70.196",
+      "domain": "5090",
+      "port": 8100,
+      "gpu": 0,
+      "speed": 1.0,
+      "capacity": 220,
+      "service_ms": 48.5,
+      "instance_id": 0,
+      "solver_capacity": 63,
+      "max_num_seqs": 16,
+      "_capacity_before_20260913": 220
+    },
+    {
+      "id": "p3090a",
+      "host": "10.212.67.68",
+      "domain": "3090a",
+      "port": 8100,
+      "gpu": 0,
+      "speed": 0.55,
+      "capacity": 114,
+      "service_ms": 68.0,
+      "instance_id": 1,
+      "solver_capacity": 45,
+      "max_num_seqs": 16,
+      "_capacity_before_20260913": 140
+    },
+    {
+      "id": "p3090b",
+      "host": "10.212.70.38",
+      "domain": "3090b",
+      "port": 8100,
+      "gpu": 0,
+      "speed": 0.55,
+      "capacity": 87,
+      "service_ms": 105.2,
+      "instance_id": 2,
+      "solver_capacity": 152,
+      "max_num_seqs": 16,
+      "enabled": true,
+      "_capacity_before_20260913": 140
+    },
+    {
+      "id": "p_a100",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8100,
+      "gpu": 4,
+      "speed": 0.3,
+      "capacity": 72,
+      "service_ms": 106.0,
+      "enabled": true,
+      "_comment": "A100 node is a shared machine; other users can reclaim the GPUs and remove foreign containers at any time. 2026-09-13: node was free, so the instance is enabled. speed/capacity/service_ms were declared while only two of eight GPUs were available, so they must be re-measured on the free node before quoting them.",
+      "instance_id": 3,
+      "solver_capacity": 151,
+      "max_num_seqs": 16,
+      "_speed_before_20260913": 2.0,
+      "_capacity_before_20260913": 550
+    },
+    {
+      "id": "p4090",
+      "host": "10.212.67.167",
+      "domain": "4090",
+      "port": 8100,
+      "gpu": 3,
+      "speed": 1.1,
+      "capacity": 228,
+      "service_ms": 39.2,
+      "instance_id": 4,
+      "solver_capacity": 59,
+      "max_num_seqs": 16,
+      "enabled": true,
+      "_capacity_before_20260913": 200
+    }
+  ],
+  "decodes": [
+    {
+      "id": "d5090",
+      "host": "10.212.70.196",
+      "domain": "5090",
+      "port": 8200,
+      "gpu": 1,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 1.0,
+      "capacity": 230,
+      "service_ms": 144.7,
+      "instance_id": 11,
+      "solver_capacity": 111,
+      "max_num_seqs": 16,
+      "_capacity_before_20260913": 230,
+      "_solver_capacity_before_20260913": 111
+    },
+    {
+      "id": "d3090a",
+      "host": "10.212.67.68",
+      "domain": "3090a",
+      "port": 8200,
+      "gpu": 1,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 0.55,
+      "capacity": 90,
+      "service_ms": 421.6,
+      "instance_id": 12,
+      "solver_capacity": 38,
+      "max_num_seqs": 16,
+      "_capacity_before_20260913": 110,
+      "_solver_capacity_before_20260913": 38
+    },
+    {
+      "id": "d_a100",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8200,
+      "gpu": 5,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 0.3,
+      "capacity": 135,
+      "service_ms": 280.0,
+      "enabled": true,
+      "_comment": "A100 node is a shared machine; other users can reclaim the GPUs and remove foreign containers at any time. 2026-09-13: node was free, so the instance is enabled. speed/capacity/service_ms were declared while only two of eight GPUs were available, so they must be re-measured on the free node before quoting them.",
+      "instance_id": 13,
+      "solver_capacity": 57,
+      "max_num_seqs": 16,
+      "_speed_before_20260913": 2.0,
+      "_capacity_before_20260913": 575,
+      "_solver_capacity_before_20260913": 57
+    },
+    {
+      "id": "d4090",
+      "host": "10.212.67.167",
+      "domain": "4090",
+      "port": 8200,
+      "gpu": 2,
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557,
+      "speed": 1.1,
+      "capacity": 191,
+      "service_ms": 157.1,
+      "instance_id": 14,
+      "solver_capacity": 102,
+      "max_num_seqs": 16,
+      "enabled": true,
+      "_capacity_before_20260913": 210,
+      "_solver_capacity_before_20260913": 102
+    }
+  ],
+  "links": [
+    {
+      "src": "5090",
+      "dst": "3090a",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090a",
+      "dst": "5090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "5090",
+      "dst": "3090b",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090b",
+      "dst": "5090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090a",
+      "dst": "3090b",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090b",
+      "dst": "3090a",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "a100",
+      "dst": "5090",
+      "bw_gbps": 0.146,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "5090",
+      "dst": "a100",
+      "bw_gbps": 0.118,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "a100",
+      "dst": "3090a",
+      "bw_gbps": 0.146,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "3090a",
+      "dst": "a100",
+      "bw_gbps": 0.118,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "a100",
+      "dst": "3090b",
+      "bw_gbps": 0.146,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "3090b",
+      "dst": "a100",
+      "bw_gbps": 0.118,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "a100",
+      "dst": "4090",
+      "bw_gbps": 0.146,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "4090",
+      "dst": "a100",
+      "bw_gbps": 0.118,
+      "rtt_ms": 41.5
+    },
+    {
+      "src": "4090",
+      "dst": "5090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "5090",
+      "dst": "4090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "4090",
+      "dst": "3090a",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090a",
+      "dst": "4090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "4090",
+      "dst": "3090b",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    },
+    {
+      "src": "3090b",
+      "dst": "4090",
+      "bw_gbps": 0.88,
+      "rtt_ms": 48.0
+    }
+  ],
+  "weights": {
+    "network": 1.0,
+    "prefill_load": 1.0,
+    "decode_load": 1.0,
+    "kv_bytes_per_token": 147456,
+    "service": 1.0,
+    "chars_per_token": 4.0,
+    "_chars_per_token_comment": "Seed only (was 6.7): the router fits the ratio from the engine's own usage.prompt_tokens and converged on 4.46 within 12 requests of real traffic (2026-09-14). The old 6.7 under-stated every token count by ~1.5x, and with it every KV byte the link budget is denominated in."
+  },
+  "model_name": "qwen3-8b",
+  "casr": {
+    "model_name": "qwen3-8b",
+    "solver": "lp",
+    "control_interval_s": 1.0,
+    "plan_ttl_s": 4.0,
+    "ewma_alpha": 0.2,
+    "hit_half_life_s": 10.0,
+    "scrape_timeout_s": 2.0,
+    "scale_backend": "noop",
+    "container_prefix": "casr-md-",
+    "warmup_s": 150.0,
+    "min_active_prefill": 1,
+    "overflow_penalty": 10.0,
+    "use_cache_capacity": true,
+    "network_weight": 1.0,
+    "queue_weight": 1.0,
+    "utilization_weight": 1.0,
+    "default_kv_bytes": 301989888,
+    "_comment": "Mirrors the simulator cluster 'casr' block. Capacity is the measured engine throughput (max_num_seqs*1000/service_ms); compute_weight prices per-request service time scaled by the prefix-cache miss ratio, and utilization_weight adds the convex congestion price that stops the LP from stacking every class on one P/D pair.",
+    "prefill_capacity": {
+      "0": 63,
+      "1": 45,
+      "2": 29,
+      "3": 29,
+      "4": 59
+    },
+    "decode_capacity": {
+      "11": 65,
+      "12": 26,
+      "13": 57,
+      "14": 55
+    },
+    "structural": {
+      "evaluation_window_ms": 60000.0,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 3000.0,
+      "startup_cost": 0.0,
+      "startup_s": 45.0,
+      "idle_cost_fraction": 0.1,
+      "enable_warm_counterfactual": false,
+      "_comment": "Economics of a structural edit, calibrated 2026-09-14. evaluation_window_ms is the horizon the edit must repay within (the expected overload duration, not one control tick): with 1 s, no real container start-up can ever be repaid, so the decision degenerated to 'a stopped spare exists -> start it' (measured: +P fired at tick 0 on a nearly idle pool with gain 0.0375, while the same counterfactual at the real peak is worth ~10/s). startup_s is the measured WARMING time of a restarted container (45 s on 2026-09-13/14); the +P gain only accrues over horizon - startup_s, and it also becomes the minimum cooldown so a decision is not reversed inside its own boot. idle_cost_fraction charges each active Prefill 10% of its saturated compute cost per second, which is what makes -P able to win: with no holding cost every -P counterfactual was mechanically negative and the pool could only ever grow. max_active_prefill caps scale-out; 0/absent means 'every configured Prefill'."
+    },
+    "local_domains": [],
+    "compute_weight": 1.0,
+    "ttft_slo_ms": 500.0,
+    "slo_penalty": 10.0,
+    "_slo_comment": "Application-level interactive bound: TTFT <= 500 ms and TPOT <= 50 ms (see docs/实验数据集与对比基线说明.md).  A (class, prefill, decode) triple whose predicted TTFT exceeds ttft_slo_ms gets +slo_penalty on its unit cost, so the LP avoids it while a capacity shortfall still yields a plan.  SLO_TTFT_MS / SLO_PENALTY env vars override these at run time for sweeps.",
+    "prefill_overhead_ms": {
+      "0": 52.0,
+      "1": 184.0,
+      "4": 73.0
+    },
+    "decode_ttft_ms": {
+      "11": 56.0,
+      "12": 163.0,
+      "14": 56.0
+    },
+    "_ttft_model_comment": "Fixed TTFT-path overheads measured on 2026-09-12 from /tmp/casr-md/lp43-r{1,2}: prefill_overhead = router-observed prefill_ms - service_ms (p50: p5090 101-48.5, p3090a 252-68, p4090 112.5-39.2); decode_ttft = ttft_ms - prefill_ms (p50: d5090/d4090 56 ms, d3090a scaled by its service ratio 421.6/144.7).  Without these the predicted TTFT of an idle cluster is ~50 ms against a real ~240 ms, so no realistic SLO ever binds.",
+    "plan_gain_threshold_rel": 0.03,
+    "plan_gain_threshold_abs": 0.0,
+    "shared_links": [
+      {
+        "id": "kvlink-p5090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            0,
+            11
+          ],
+          [
+            0,
+            12
+          ],
+          [
+            0,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x."
+      },
+      {
+        "id": "kvlink-p3090a",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            1,
+            11
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            1,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x."
+      },
+      {
+        "id": "kvlink-p3090b",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            2,
+            11
+          ],
+          [
+            2,
+            12
+          ],
+          [
+            2,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x."
+      },
+      {
+        "id": "kvlink-p4090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            4,
+            11
+          ],
+          [
+            4,
+            12
+          ],
+          [
+            4,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push ceiling, recalibrated 2026-09-14: measured 239-314 MB/s (decode-side vllm:nixl_bytes_transferred against the run window, e.g. 184 MB per transfer with 585-731 ms per-1k-token handoffs). The earlier 115 MB/s was the low end of an older range and over-penalised every P/D decision by ~2.3x."
+      },
+      {
+        "id": "kvlink-p_a100",
+        "capacity_bytes_per_s": 18300000.0,
+        "pairs": [
+          [
+            3,
+            11
+          ],
+          [
+            3,
+            12
+          ],
+          [
+            3,
+            14
+          ]
+        ],
+        "_comment": "A100 egress measured on the serving path (native NixlConnector, 2026-09-13): 8223 ms per 1000 prompt tokens = 18.3 MB/s. Not recalibrated 2026-09-14 (the node was reclaimed by its owner)."
+      }
+    ],
+    "_decode_capacity_comment": "Measured saturation throughput (req/s) from tests/calibrate_pd_throughput.py at a 2048-token prefix / 4 output tokens: d5090 60-70, d3090a 23-29, d4090 53-57. The derived max_num_seqs*1000/service_ms overestimates by ~2x because engine throughput does not scale linearly with batch size.",
+    "warmup_enabled": false,
+    "warmup_concurrency": 4,
+    "warmup_min_share": 0.1,
+    "_warmup_comment": "Plan policies only, disabled by default.  The mechanism is functional (the serving edge is now recorded as warm, earlier it never was -- see docs/异构环境搭建进展.md 'casr_lp 尾部调查'), but enabling it did not move the 2026-09-13 saturation tail, so the default stays off.",
+    "warm_before_switch": false,
+    "warm_switch_timeout_s": 2.0,
+    "single_home_below_rps": 1.0,
+    "_single_home_comment": "lp27 A/B: a class offering < 1 req/s is single-homed onto the Prefill the LP liked best, unless that would overflow the Prefill or its KV-push link. Targets the +74 cold first-touches the LP created by splitting low-demand classes across Prefills.",
+    "_capacity_comment": "prefill_capacity is the MEASURED saturation point tests/calibrate_pd_throughput.py 2026-09-13 (1024-token prefix, 4 output tokens, 32 reqs/level): p5090=62.9, p4090=58.5 req/s. The previous values (330/408) were declared from max_num_seqs*1000/service_ms and overstate the knee 5-7x, so the LP never saw the load pressure it should. p3090a/p3090b/p_a100 are unmeasured and are scaled from the declared hardware ratio; p_a100 became reachable and idle on 2026-09-13, so it can now be calibrated with tests/calibrate_pd_throughput.py before its capacity is quoted.",
+    "_kv_cost_comment": "Native NixlConnector handoff cost measured 2026-09-13 (tests/calibrate_native_pd.py, unique prompt per sample): p5090->d5090 (same host) 163 ms + 585 ms/1k tokens; p5090->d4090 211 ms + 1351 ms/1k tokens; p5090->d3090a 415 ms + 1364 ms/1k tokens. For comparison the Decode recomputing the same prompt locally costs ~93 ms. A handoff is therefore 8-15x MORE expensive than recomputing, so the scheduler must treat 'transfer' as a resource it spends only when the alternative (Decode-side prefill / queueing) is worse -- the current pair-cost model still assumes a transfer always happens. A100 domain (now on vLLM 0.29 and inside the NIXL fabric): p_a100->d5090 544 ms + 8223 ms/1k (18.3 MB/s); p5090->d_a100 626 ms + 10163 ms/1k (14.8 MB/s). That is a 14x spread against the same-host 257 MB/s, i.e. the heterogeneous link the scheduler has to price.",
+    "_prefill_speed_comment": "Measured local prefill cost 2026-09-13 (TTFT of a ~850-token prompt sent directly to the instance, 3 samples, median; includes the network RTT to the instance): d5090 50.9, d4090 64.6, d3090a 156.1, d_a100 202.4 ms/1k tokens. Relative to the 5090 that is 1.00 / 0.79 / 0.33 / 0.30 (sharing the a100 node's GPU makes it the slowest, not the fastest as the earlier declared speed=2.0 assumed).",
+    "_decode_capacity_comment_measured": "Decode service capacity re-based on a measured concurrency sweep 2026-09-13 (12 concurrent ~180-token prompts, 16 output tokens, single instance): d5090 40.5, d4090 33.7, d_a100 23.8, d3090a 15.9 req/s. Values here keep d5090's declared scale and apply the measured ratios, so the fast layer's inflight/capacity ranking reflects reality instead of the declared hardware ratios (which had made the A100 look like the strongest decode).",
+    "_prefill_capacity_comment_measured": "Prefill capacity re-based on a measured concurrency sweep 2026-09-13 (12 concurrent ~180-token prompts, max_tokens=1, single instance): p5090 156.2, p4090 162.0, p3090a 80.7, p3090b 61.7, p_a100 51.3 req/s. The declared a100 value (550) was 10.7x its measured rate and made the least-loaded baseline pile 95% of prefills onto the slowest node; these values keep p5090's declared scale and apply the measured ratios.",
+    "prefill_tokens_per_s": {
+      "0": 14000.0,
+      "1": 7300.0,
+      "2": 5600.0,
+      "3": 4600.0,
+      "4": 10400.0
+    },
+    "capacity_reference_tokens": 1024,
+    "decode_reference_tokens": 16,
+    "decode_fixed_ms": 20.0,
+    "decode_ms_per_1k_tokens": 14000.0,
+    "_length_comment": "Pre-2026-09-14 the LP scaled nothing by length: a 1250-token request cost the same as a 200-token one, so prefill_overflow stayed 0 on a node whose queue was 48 deep. prefill_tokens_per_s is the measured token ceiling; decode_* model the decode leg's output-length cost (20 ms fixed + 14 ms/token, calibrated on d5090's 226 ms for 16 output tokens).",
+    "backlog_rps_multiple": 4.0,
+    "_backlog_comment": "Demand recovered from Prefill queue growth: the arrival EWMA alone is post-backpressure, so under overload demand reads as == capacity. Caps the added term at this multiple of the observed arrival rate.",
+    "_prefill_tokens_comment": "Measured 2026-09-14, unique prefixes, prefill-only, concurrency 16: p5090 11.3 req/s @1250 tokens / 71.9 @254 (14.1-18.3 ktok/s, take the conservative 14.1k), p4090 8.4 / 40.8 (10.4 ktok/s, flat). p3090a/b/p_a100 were not measured; scaled from p5090 by their declared capacity ratio. The declared prefill_capacity is only valid below tokens = ceiling/capacity.",
+    "max_active_prefill": 5
+  }
+}

@@ -103,6 +103,21 @@ def register_args(p: argparse.ArgumentParser) -> None:
                    dest="max_sessions",
                    help="Cap on dataset rows fetched (0 = no cap). "
                         "Default 5000.")
+    p.add_argument("--emit-text", action="store_true", default=False,
+                   dest="emit_text",
+                   help="Also write the prompt as ``input_text`` (the decoded "
+                        "token sequence).  The simulator ignores the extra key; "
+                        "the real-cluster replay client needs it to send the "
+                        "same prompt without a chat template.")
+    p.add_argument("--slo-ttft-ms", type=float, default=0.0, dest="slo_ttft_ms",
+                   help="Per-request TTFT SLO written into every trace row "
+                        "(0 = omit).  Carrying the SLO on the trace is what "
+                        "lets the replay client judge each request against the "
+                        "bound the dataset/application asked for, instead of a "
+                        "single global constant.")
+    p.add_argument("--slo-tpot-ms", type=float, default=0.0, dest="slo_tpot_ms",
+                   help="Per-request TPOT SLO written into every trace row "
+                        "(0 = omit).")
 
     # ---- Fixed-length mode ------------------------------------------------
     p.add_argument("--fix-len", action="store_true",
@@ -204,6 +219,14 @@ def run(args: argparse.Namespace) -> int:
                 "input_tok_ids": list(in_ids),
                 "output_tok_ids": list(out_ids),
             }
+            if args.emit_text:
+                # ``decode(encode(text))`` re-tokenizes to ``in_ids``, so the
+                # real engine is given the same prompt as the simulator.
+                row["input_text"] = tok.decode(in_ids, skip_special_tokens=False)
+            if args.slo_ttft_ms > 0:
+                row["slo_ttft_ms"] = float(args.slo_ttft_ms)
+            if args.slo_tpot_ms > 0:
+                row["slo_tpot_ms"] = float(args.slo_tpot_ms)
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             written += 1
 

@@ -8,7 +8,7 @@ architecture: qwen3_moe
 architecture_sha256: 784ed86cdd6b8a71c1c8cc82a5af96e49a70607e40ac8570b7b9341eb3dc5800
 model: Qwen/Qwen3-30B-A3B-Instruct-2507
 variant: bf16
-tp_degrees: [1]
+tp_degrees: [1, 2, 4, 8]
 engine_effective:
   load_format: dummy
   enforce_eager: true
@@ -40,3 +40,7 @@ skew_profile:
   enabled: false
 skew_fit:
   enabled: false
+profile_notes:
+  - tp1 was collected with max_model_len=262144, max_num_batched_tokens=1024, and max_num_seqs=64.
+  - tp2/tp4/tp8 were collected with max_model_len=4096, max_num_batched_tokens=512, and max_num_seqs=32 to avoid vLLM 0.26.0 startup OOM; all attention points are capped at kv=1024.
+  - tp2/tp4/tp8 contain uniform attention data only; skew profiling remains disabled.

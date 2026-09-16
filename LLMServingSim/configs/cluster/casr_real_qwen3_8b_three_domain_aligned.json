@@ -1,0 +1,261 @@
+{
+  "num_nodes": 3,
+  "link_bw": 2.0,
+  "link_latency": 300000.0,
+  "intra_node_link_bw": 50.0,
+  "intra_node_link_latency": 1000.0,
+  "kv_egress_gbps": 2.0,
+  "pd_buffer_bytes": 34359738368,
+  "_link_comment": "Inter-node: 16 Gbps / 0.3 ms measured on the 10.212 fabric. Intra-node: same-host P/D handoff, measured ~0-2 ms for a 512-token prefix, modelled as 50 GB/s over PCIe with 1 us per-layer latency. Declaring the intra-node link switches the topology to [tp, slots_per_node, num_nodes] so the network model can tell a same-domain handoff from a cross-domain one.",
+  "_handoff_comment": "kv_egress_gbps caps the P/D handoff path at min(wire, declared). Wire = 2 GB/s (measured intranet). Producer ceiling measured on the native NixlConnector is 115-314 MB/s (184 MB per 1250-token handoff in 585-731 ms) -- but it does NOT bind at this trace's 254-token prompts, where a handoff measures 40-90 ms (37 MB, i.e. 0.4-0.9 GB/s): the engine bursts small transfers. So this short-prompt config keeps the wire value (2.0) and reproduces the deployment's sustained 14 req/s. For KV-heavy traces use kv_egress_gbps = 0.26 (see the long-prompt variant), where the producer does bind. Known residual: ASTRA-Sim's congestion-unaware backend charges every per-layer send on the instance's own timeline without overlapping it with compute, so with the 0.26 cap a single 254-token handoff costs 425 ms in simulation against ~90 ms measured -- an overlapped transfer model is the open follow-up.",
+  "casr": {
+    "solver": "lp",
+    "lifecycle": {
+      "min_active_prefill": 3,
+      "max_active_prefill": 3,
+      "warmup_ms": 250,
+      "prefill_capacity": {
+        "0": 235,
+        "2": 408,
+        "4": 330
+      }
+    },
+    "structural": {
+      "evaluation_window_ms": 1000,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 1000,
+      "startup_cost": 0.0,
+      "warm_cost": 0.0,
+      "enabled": false
+    },
+    "resources": {
+      "startup_ms": 250,
+      "reclaim_ms": 50,
+      "nodes": {
+        "0": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "1": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "2": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            32,
+            32
+          ]
+        }
+      }
+    },
+    "prefill_capacity": {
+      "0": 235,
+      "2": 408,
+      "4": 330
+    },
+    "decode_capacity": {
+      "1": 26,
+      "3": 57,
+      "5": 65
+    },
+    "overflow_penalty": 10,
+    "shared_links": [
+      {
+        "id": "p0-to-decode",
+        "capacity_bytes_per_s": 2000000000.0,
+        "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective. Byte-denominated so the same constraint binds in the simulator and on the real router.",
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            0,
+            5
+          ]
+        ]
+      },
+      {
+        "id": "p1-to-decode",
+        "capacity_bytes_per_s": 2000000000.0,
+        "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective.",
+        "pairs": [
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            5
+          ]
+        ]
+      },
+      {
+        "id": "p2-to-decode",
+        "capacity_bytes_per_s": 2000000000.0,
+        "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective.",
+        "pairs": [
+          [
+            4,
+            1
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            5
+          ]
+        ]
+      }
+    ],
+    "compute_weight": 1.0,
+    "kv_bytes_per_token": 147456.0,
+    "utilization_weight": 1.0,
+    "utilization_segments": 8,
+    "prefill_service_ms": {
+      "0": 68.0,
+      "2": 39.2,
+      "4": 48.5
+    },
+    "decode_service_ms": {
+      "1": 421.6,
+      "3": 157.1,
+      "5": 144.7
+    },
+    "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does."
+  },
+  "nodes": [
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 0,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 1,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 2,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 3,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 4,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 5,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    }
+  ]
+}

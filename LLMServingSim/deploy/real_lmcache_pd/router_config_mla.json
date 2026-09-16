@@ -1,0 +1,262 @@
+{
+  "timeouts": {
+    "downstream_s": 120.0,
+    "_comment": "Downstream (Prefill/Decode) HTTP timeout. A stalled KV handoff would otherwise leave the router handler and its inflight counters hung forever, wedging every later request; the handler now fails the request instead."
+  },
+  "hosts": {
+    "a100": {
+      "ssh": "buaa@10.66.0.15",
+      "ssh_port": 2222,
+      "kv_group": "v029",
+      "ucx_device": "ens81f0",
+      "model": "/home/buaa/models/DeepSeek-V2-Lite-Chat",
+      "image": "vllm/vllm-openai:v0.29.0",
+      "gpu_memory_utilization": 0.45,
+      "_comment": "MLA testbed (2026-09-13): DeepSeek-V2-Lite-**Chat**, KV 31.1 KB/token (4.7x smaller than Qwen3-8B's 147.5). GPU6 prefill / GPU7 decode; the second pair is documented but disabled while GPU4/5 host Zamba2.",
+      "_address_comment": "2026-09-13: canonical address is 10.66.0.15:2222 (overlay path). 10.70.251.47 is the same host (identical SSH host key, same ray node) reached over the older direct route, and is no longer used by any tooling. SSH auth failed until now only because the non-default identity ~/.ssh/id_casr_cluster was not selectable for this host; both addresses now answer with plain `ssh -p 2222 buaa@10.66.0.15`. Any hand-run ssh must carry -p 2222, otherwise the connection is refused rather than rejected."
+    }
+  },
+  "prefills": [
+    {
+      "id": "p_mla",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8300,
+      "gpu": 6,
+      "speed": 3.4,
+      "capacity": 8,
+      "service_ms": 140.0,
+      "instance_id": 0,
+      "solver_capacity": 8,
+      "max_num_seqs": 8,
+      "enabled": true,
+      "_comment": "MLA testbed, measured 33 req/s at conc=12 (2026-09-13)"
+    },
+    {
+      "id": "p_mla2",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8310,
+      "gpu": 4,
+      "speed": 3.4,
+      "capacity": 9,
+      "service_ms": 140.0,
+      "instance_id": 1,
+      "solver_capacity": 9,
+      "max_num_seqs": 8,
+      "enabled": false,
+      "_comment": "disabled: GPU4/5 currently host the Zamba2 testbed"
+    }
+  ],
+  "decodes": [
+    {
+      "id": "d_mla",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8400,
+      "gpu": 7,
+      "speed": 3.4,
+      "capacity": 4,
+      "service_ms": 140.0,
+      "instance_id": 2,
+      "solver_capacity": 4,
+      "max_num_seqs": 8,
+      "enabled": true,
+      "_comment": "MLA testbed, measured 8 req/s at conc=12 (2026-09-13)",
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557
+    },
+    {
+      "id": "d_mla2",
+      "host": "10.66.0.15",
+      "domain": "a100",
+      "port": 8410,
+      "gpu": 5,
+      "speed": 3.4,
+      "capacity": 4,
+      "service_ms": 140.0,
+      "instance_id": 3,
+      "solver_capacity": 4,
+      "max_num_seqs": 8,
+      "enabled": false,
+      "_comment": "disabled: GPU4/5 currently host the Zamba2 testbed",
+      "init_port": 55555,
+      "alloc_port": 55556,
+      "query_port": 55557
+    }
+  ],
+  "links": [],
+  "weights": {
+    "network": 1.0,
+    "prefill_load": 1.0,
+    "decode_load": 1.0,
+    "kv_bytes_per_token": 147456,
+    "service": 1.0,
+    "chars_per_token": 6.7
+  },
+  "model_name": "deepseek-v2-lite",
+  "casr": {
+    "model_name": "qwen3-8b",
+    "solver": "lp",
+    "control_interval_s": 1.0,
+    "plan_ttl_s": 4.0,
+    "ewma_alpha": 0.2,
+    "hit_half_life_s": 10.0,
+    "scrape_timeout_s": 2.0,
+    "scale_backend": "noop",
+    "container_prefix": "casr-md-",
+    "warmup_s": 150.0,
+    "min_active_prefill": 1,
+    "overflow_penalty": 10.0,
+    "use_cache_capacity": true,
+    "network_weight": 1.0,
+    "queue_weight": 1.0,
+    "utilization_weight": 1.0,
+    "default_kv_bytes": 301989888,
+    "_comment": "Mirrors the simulator cluster 'casr' block. Capacity is the measured engine throughput (max_num_seqs*1000/service_ms); compute_weight prices per-request service time scaled by the prefix-cache miss ratio, and utilization_weight adds the convex congestion price that stops the LP from stacking every class on one P/D pair.",
+    "prefill_capacity": {
+      "0": 8
+    },
+    "decode_capacity": {
+      "1": 4
+    },
+    "structural": {
+      "evaluation_window_ms": 1000.0,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 3000.0,
+      "startup_cost": 0.0,
+      "enable_warm_counterfactual": false
+    },
+    "local_domains": [],
+    "compute_weight": 1.0,
+    "ttft_slo_ms": 500.0,
+    "slo_penalty": 10.0,
+    "_slo_comment": "Application-level interactive bound: TTFT <= 500 ms and TPOT <= 50 ms (see docs/实验数据集与对比基线说明.md).  A (class, prefill, decode) triple whose predicted TTFT exceeds ttft_slo_ms gets +slo_penalty on its unit cost, so the LP avoids it while a capacity shortfall still yields a plan.  SLO_TTFT_MS / SLO_PENALTY env vars override these at run time for sweeps.",
+    "prefill_overhead_ms": {
+      "0": 52.0,
+      "1": 184.0,
+      "4": 73.0
+    },
+    "decode_ttft_ms": {
+      "11": 56.0,
+      "12": 163.0,
+      "14": 56.0
+    },
+    "_ttft_model_comment": "Fixed TTFT-path overheads measured on 2026-09-12 from /tmp/casr-md/lp43-r{1,2}: prefill_overhead = router-observed prefill_ms - service_ms (p50: p5090 101-48.5, p3090a 252-68, p4090 112.5-39.2); decode_ttft = ttft_ms - prefill_ms (p50: d5090/d4090 56 ms, d3090a scaled by its service ratio 421.6/144.7).  Without these the predicted TTFT of an idle cluster is ~50 ms against a real ~240 ms, so no realistic SLO ever binds.",
+    "plan_gain_threshold_rel": 0.03,
+    "plan_gain_threshold_abs": 0.0,
+    "shared_links": [
+      {
+        "id": "kvlink-p5090",
+        "capacity_bytes_per_s": 115000000.0,
+        "pairs": [
+          [
+            0,
+            11
+          ],
+          [
+            0,
+            12
+          ],
+          [
+            0,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push budget on vLLM's native NixlConnector (2026-09-13): 110-257 MB/s measured, i.e. 176 MB in 0.7-1.6 s. The old 2 GB/s came from a path where the KV never actually crossed the network; keep this honest."
+      },
+      {
+        "id": "kvlink-p3090a",
+        "capacity_bytes_per_s": 115000000.0,
+        "pairs": [
+          [
+            1,
+            11
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            1,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push budget on vLLM's native NixlConnector (2026-09-13): 110-257 MB/s measured, i.e. 176 MB in 0.7-1.6 s. The old 2 GB/s came from a path where the KV never actually crossed the network; keep this honest."
+      },
+      {
+        "id": "kvlink-p3090b",
+        "capacity_bytes_per_s": 115000000.0,
+        "pairs": [
+          [
+            2,
+            11
+          ],
+          [
+            2,
+            12
+          ],
+          [
+            2,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push budget on vLLM's native NixlConnector (2026-09-13): 110-257 MB/s measured, i.e. 176 MB in 0.7-1.6 s. The old 2 GB/s came from a path where the KV never actually crossed the network; keep this honest."
+      },
+      {
+        "id": "kvlink-p4090",
+        "capacity_bytes_per_s": 115000000.0,
+        "pairs": [
+          [
+            4,
+            11
+          ],
+          [
+            4,
+            12
+          ],
+          [
+            4,
+            14
+          ]
+        ],
+        "_comment": "Producer-side KV push budget on vLLM's native NixlConnector (2026-09-13): 110-257 MB/s measured, i.e. 176 MB in 0.7-1.6 s. The old 2 GB/s came from a path where the KV never actually crossed the network; keep this honest."
+      },
+      {
+        "id": "kvlink-p_a100",
+        "capacity_bytes_per_s": 18300000.0,
+        "pairs": [
+          [
+            3,
+            11
+          ],
+          [
+            3,
+            12
+          ],
+          [
+            3,
+            14
+          ]
+        ],
+        "_comment": "A100 egress measured on the serving path (native NixlConnector, 2026-09-13): 8223 ms per 1000 prompt tokens = 18.3 MB/s (146 Mbps). The reverse direction (10.212 -> a100) measures 10163 ms/1k = 14.8 MB/s. Both match the earlier iperf3/scp calibration of the routed path (115-147 Mbps)."
+      }
+    ],
+    "_decode_capacity_comment": "Measured saturation throughput (req/s) from tests/calibrate_pd_throughput.py at a 2048-token prefix / 4 output tokens: d5090 60-70, d3090a 23-29, d4090 53-57. The derived max_num_seqs*1000/service_ms overestimates by ~2x because engine throughput does not scale linearly with batch size.",
+    "warmup_enabled": false,
+    "warmup_concurrency": 4,
+    "warmup_min_share": 0.1,
+    "_warmup_comment": "Plan policies only, disabled by default.  The mechanism is functional (the serving edge is now recorded as warm, earlier it never was -- see docs/异构环境搭建进展.md 'casr_lp 尾部调查'), but enabling it did not move the 2026-09-13 saturation tail, so the default stays off.",
+    "warm_before_switch": false,
+    "warm_switch_timeout_s": 2.0,
+    "single_home_below_rps": 1.0,
+    "_single_home_comment": "lp27 A/B: a class offering < 1 req/s is single-homed onto the Prefill the LP liked best, unless that would overflow the Prefill or its KV-push link. Targets the +74 cold first-touches the LP created by splitting low-demand classes across Prefills.",
+    "_capacity_comment": "MLA-Chat testbed capacities measured 2026-09-13 (tests/calibrate_instance_capacity.py, 12 concurrent ~180-token requests): prefill 8.3, decode 3.8 req/s.",
+    "_kv_cost_comment": "Native NixlConnector handoff cost measured 2026-09-13 (tests/calibrate_native_pd.py, unique prompt per sample): p5090->d5090 (same host) 163 ms + 585 ms/1k tokens; p5090->d4090 211 ms + 1351 ms/1k tokens; p5090->d3090a 415 ms + 1364 ms/1k tokens. For comparison the Decode recomputing the same prompt locally costs ~93 ms. A handoff is therefore 8-15x MORE expensive than recomputing, so the scheduler must treat 'transfer' as a resource it spends only when the alternative (Decode-side prefill / queueing) is worse -- the current pair-cost model still assumes a transfer always happens. A100 domain (now on vLLM 0.29 and inside the NIXL fabric): p_a100->d5090 544 ms + 8223 ms/1k (18.3 MB/s); p5090->d_a100 626 ms + 10163 ms/1k (14.8 MB/s). That is a 14x spread against the same-host 257 MB/s, i.e. the heterogeneous link the scheduler has to price.",
+    "_prefill_speed_comment": "Measured local prefill cost 2026-09-13 (TTFT of a ~850-token prompt sent directly to the instance, 3 samples, median; includes the network RTT to the instance): d5090 50.9, d4090 64.6, d3090a 156.1, d_a100 202.4 ms/1k tokens. Relative to the 5090 that is 1.00 / 0.79 / 0.33 / 0.30 (sharing the a100 node's GPU makes it the slowest, not the fastest as the earlier declared speed=2.0 assumed).",
+    "_decode_capacity_comment_measured": "Decode service capacity re-based on a measured concurrency sweep 2026-09-13 (12 concurrent ~180-token prompts, 16 output tokens, single instance): d5090 40.5, d4090 33.7, d_a100 23.8, d3090a 15.9 req/s. Values here keep d5090's declared scale and apply the measured ratios, so the fast layer's inflight/capacity ranking reflects reality instead of the declared hardware ratios (which had made the A100 look like the strongest decode).",
+    "_prefill_capacity_comment_measured": "Prefill capacity re-based on a measured concurrency sweep 2026-09-13 (12 concurrent ~180-token prompts, max_tokens=1, single instance): p5090 156.2, p4090 162.0, p3090a 80.7, p3090b 61.7, p_a100 51.3 req/s. The declared a100 value (550) was 10.7x its measured rate and made the least-loaded baseline pile 95% of prefills onto the slowest node; these values keep p5090's declared scale and apply the measured ratios."
+  }
+}

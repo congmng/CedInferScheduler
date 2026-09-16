@@ -1,0 +1,17 @@
+local_cpu: false
+max_local_cpu_size: 0
+max_local_disk_size: 0
+remote_serde: NULL
+
+enable_pd: true
+pd_role: "receiver"
+pd_peer_host: "10.212.70.196"
+pd_peer_init_port: [55555]
+pd_peer_alloc_port: [55556]
+pd_peer_query_port: [55557]
+pd_buffer_size: 1073741824
+pd_buffer_device: "cuda"
+pd_backend_mode: "sync"
+save_unfull_chunk: true
+nixl_backends: ["UCX"]
+transfer_channel: "nixl"

@@ -1,0 +1,84 @@
+{
+  "num_nodes": 5,
+  "link_bw": 0.93,
+  "link_latency": 20000,
+  "casr": {
+    "solver": "lp",
+    "lifecycle": {
+      "min_active_prefill": 2,
+      "max_active_prefill": 9,
+      "warmup_ms": 250,
+      "prefill_capacity": {"0": 90, "1": 90, "2": 110, "3": 200, "4": 200, "5": 200, "6": 200, "7": 175, "8": 175, "9": 175, "10": 175}
+    },
+    "structural": {
+      "evaluation_window_ms": 1000,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 1000,
+      "startup_cost": 0.0,
+      "warm_cost": 0.0
+    },
+    "resources": {
+      "startup_ms": 250,
+      "reclaim_ms": 50,
+      "nodes": {
+        "0": {"gpu_count": 2, "gpu_mem_gb": [24, 24]},
+        "1": {"gpu_count": 1, "gpu_mem_gb": [24]},
+        "2": {"gpu_count": 4, "gpu_mem_gb": [32, 32, 32, 32]},
+        "3": {"gpu_count": 4, "gpu_mem_gb": [24, 24, 24, 24]},
+        "4": {"gpu_count": 8, "gpu_mem_gb": [80, 80, 80, 80, 80, 80, 80, 80]}
+      }
+    },
+    "prefill_capacity": {"0": 90, "1": 90, "2": 110, "3": 200, "4": 200, "5": 200, "6": 200, "7": 175, "8": 175, "9": 175, "10": 175},
+    "decode_capacity": {"11": 110, "12": 110, "13": 110, "14": 110, "15": 110, "16": 110, "17": 110, "18": 110},
+    "overflow_penalty": 10,
+    "shared_links": [
+      {"id": "internal-1g", "capacity": 930, "pairs": [[0, 11], [1, 11], [2, 11], [3, 11], [4, 11], [5, 11], [6, 11], [7, 11], [8, 11], [9, 11], [10, 11], [0, 12], [1, 12], [2, 12], [3, 12], [4, 12], [5, 12], [6, 12], [7, 12], [8, 12], [9, 12], [10, 12], [0, 13], [1, 13], [2, 13], [3, 13], [4, 13], [5, 13], [6, 13], [7, 13], [8, 13], [9, 13], [10, 13], [0, 14], [1, 14], [2, 14], [3, 14], [4, 14], [5, 14], [6, 14], [7, 14], [8, 14], [9, 14], [10, 14], [0, 15], [1, 15], [2, 15], [3, 15], [4, 15], [5, 15], [6, 15], [7, 15], [8, 15], [9, 15], [10, 15], [0, 16], [1, 16], [2, 16], [3, 16], [4, 16], [5, 16], [6, 16], [7, 16], [8, 16], [9, 16], [10, 16], [0, 17], [1, 17], [2, 17], [3, 17], [4, 17], [5, 17], [6, 17], [7, 17], [8, 17], [9, 17], [10, 17], [0, 18], [1, 18], [2, 18], [3, 18], [4, 18], [5, 18], [6, 18], [7, 18], [8, 18], [9, 18], [10, 18]]}
+    ]
+  },
+  "nodes": [
+    {
+      "num_instances": 3,
+      "cpu_mem": {"mem_size": 128, "mem_bw": 128, "mem_latency": 0},
+      "instances": [
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX3090", "npu_mem": {"mem_size": 24, "mem_bw": 936, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX3090", "npu_mem": {"mem_size": 24, "mem_bw": 936, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX3090", "npu_mem": {"mem_size": 24, "mem_bw": 936, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true}
+      ]
+    },
+    {
+      "num_instances": 4,
+      "cpu_mem": {"mem_size": 256, "mem_bw": 256, "mem_latency": 0},
+      "instances": [
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX5090", "npu_mem": {"mem_size": 32, "mem_bw": 1792, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX5090", "npu_mem": {"mem_size": 32, "mem_bw": 1792, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX5090", "npu_mem": {"mem_size": 32, "mem_bw": 1792, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX5090", "npu_mem": {"mem_size": 32, "mem_bw": 1792, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true}
+      ]
+    },
+    {
+      "num_instances": 4,
+      "cpu_mem": {"mem_size": 256, "mem_bw": 256, "mem_latency": 0},
+      "instances": [
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "RTX4090", "npu_mem": {"mem_size": 24, "mem_bw": 1008, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "prefill", "tp_size": 1, "enable_prefix_caching": true}
+      ]
+    },
+    {
+      "num_instances": 8,
+      "cpu_mem": {"mem_size": 512, "mem_bw": 512, "mem_latency": 0},
+      "instances": [
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true},
+        {"model_name": "Qwen/Qwen3-30B-A3B-Instruct-2507", "hardware": "A100", "npu_mem": {"mem_size": 80, "mem_bw": 2039, "mem_latency": 0, "mem_util": 0.9}, "pd_type": "decode", "tp_size": 1, "enable_prefix_caching": true}
+      ]
+    }
+  ]
+}

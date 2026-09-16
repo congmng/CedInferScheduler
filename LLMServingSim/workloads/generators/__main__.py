@@ -23,6 +23,14 @@ def main() -> int:
     from workloads.generators.casr import register_args as casr_register
     casr_register(casr)
 
+    dolly = sub.add_parser("dolly", help="Databricks Dolly-15k -> LLMServingSim JSONL")
+    from workloads.generators.dolly import register_args as dolly_register
+    dolly_register(dolly)
+
+    cnndm = sub.add_parser("cnndm", help="CNN/DailyMail (long prompts) -> LLMServingSim JSONL")
+    from workloads.generators.cnndm import register_args as cnndm_register
+    cnndm_register(cnndm)
+
     args = parser.parse_args()
 
     if args.generator == "sharegpt":
@@ -30,6 +38,12 @@ def main() -> int:
         return run(args)
     if args.generator == "casr":
         from workloads.generators.casr import run
+        return run(args)
+    if args.generator == "dolly":
+        from workloads.generators.dolly import run
+        return run(args)
+    if args.generator == "cnndm":
+        from workloads.generators.cnndm import run
         return run(args)
 
     parser.error(f"Unknown generator: {args.generator}")
