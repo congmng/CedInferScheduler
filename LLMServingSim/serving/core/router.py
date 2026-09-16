@@ -44,6 +44,16 @@ class Router:
         self._rnd = random.Random(seed) if seed is not None else random
         self.prefill_rr_counter = 0
         self.decode_rr_counter = 0
+        # ``inflight`` in the real router counts the requests *dispatched to* an
+        # instance that have not completed yet -- it spans the whole request
+        # lifetime, not just the leg that instance serves.  ``_pick_load`` ranks
+        # by ``(inflight + 1) / capacity``, which is why the recorded runs pin
+        # the Prefill on the largest-capacity host even while every request is
+        # served locally.  Keeping the same counter is what makes a replay land
+        # on the same instances (measured 2026-09-16, forced-transfer arm:
+        # real 104/120 on p4090 against a flat spread here).
+        self._assigned = defaultdict(int)
+        self._request_pair = {}
         # P/D handoff vs local recompute.  The real router decides this per
         # request (``disagg_router.kv_exchange_decision``): moving KV costs
         # 585 ms (same host) / 1351 ms (cross host, +48 ms fixed) per 1000
@@ -173,19 +183,25 @@ class Router:
             sched = schedulers[idx]
             waiting = len(sched.waiting)
             running = len(sched.running)
-            raw_score = waiting * 4 + running
             # Prefer the deployment's measured capacity; ``max_num_seqs`` is the
             # fallback for configs that carry no capacity table.
             router_table = getattr(self, "router_capacity", {})
             capacity = (router_table.get(int(sched.instance_id))
                         or table.get(int(sched.instance_id))
                         or getattr(sched, "max_num_seqs", 0))
-            # ``+1`` for the request being placed, so an idle tie resolves
-            # toward the larger capacity -- the same shape as the real
-            # router's ``(inflight + 1) / capacity``.
-            score = raw_score + 1
+            # Exactly the real router's shape: ``(inflight + 1) / capacity``
+            # with ``inflight`` = requests dispatched to this instance and not
+            # finished yet.  It deliberately does *not* read the instance's own
+            # queue: the recorded ``load`` arm pins the largest-capacity host
+            # while the local-recompute path is serving every request elsewhere,
+            # so a queue-aware score sends the replay somewhere the real router
+            # never went (measured 2026-09-16 on the forced-transfer arm).
+            inflight = (self._assigned.get(int(sched.instance_id), 0)
+                        if hasattr(self, "_assigned")
+                        else waiting * 4 + running)
+            score = inflight + 1
             if capacity not in (0, float('inf')):
-                score = (raw_score + 1) / capacity
+                score = (inflight + 1) / capacity
             if score < best_score:
                 best_score = score
                 best_idx = idx
@@ -448,6 +464,23 @@ class Router:
         """
         if not self.decode_schedulers:
             return None
+        if getattr(self, "casr_enabled", False):
+            # CASR policies pick the Decode of a pair by cost -- network +
+            # measured service + wait -- exactly like the real
+            # ``_pick_decode_cost``, and that is what makes their handoffs
+            # concentrate on the same-domain fast Decode.  Measured 2026-09-16
+            # on the forced-transfer arm: real ``casr_lp`` sent 117/120
+            # handoffs to d5090 while the simulator spread them 60/19/41 and
+            # took 8x the latency.
+            prefill_sched = next(
+                (candidate for candidate in self.prefill_schedulers
+                 if candidate.instance_id == getattr(
+                     request, "pair_prefill_instance_id",
+                     getattr(request, "prefill_instance_id", None))), None)
+            if prefill_sched is not None:
+                chosen = self._decode_cost_select(prefill_sched)
+                if chosen is not None:
+                    return chosen.instance_id
         planned = self._select_planned_decode(request, current_time_ns)
         if planned is not None:
             return planned.instance_id
@@ -631,6 +664,7 @@ class Router:
             # the real router, whose ``load`` arm took the local path for
             # 200/200 requests of the Dolly trace (measured 2026-09-16).
             local_request = False
+            prefill_sched = sched          # the pair's Prefill, kept for accounting
             if self.local_prefill_mode != "never" and self.decode_schedulers:
                 # CASR policies choose the Decode by cost (that is what makes
                 # their placement differ from the baselines); everything else
@@ -680,6 +714,23 @@ class Router:
                 # ``decode_instance_id=5`` while actually running on 1).
                 request.decode_instance_id = self._decode_instance_id_for(
                     request, current_time_ns)
+            # Dispatch accounting, mirroring the real router: both legs of the
+            # chosen pair carry the request until it completes, even when the
+            # Prefill is bypassed by a local recompute.  It has to run *after*
+            # the Decode half is final -- for a transferring request that is
+            # ``decode_instance_id`` (a locally-recomputed one already owns its
+            # instance), otherwise the Decode leg is never counted and every
+            # replay piles up on the first candidate.
+            pair_prefill = prefill_sched.instance_id
+            served = (sched.instance_id if local_request
+                      else request.decode_instance_id)
+            request.pair_prefill_instance_id = pair_prefill
+            self._assigned[pair_prefill] += 1
+            if served is not None:
+                self._assigned[served] += 1
+                self._request_pair[request.id] = (pair_prefill, served)
+            else:
+                self._request_pair[request.id] = (pair_prefill,)
             if self.prefix_profiler is not None:
                 self.prefix_profiler.observe_arrival(
                     request, sched.instance_id, current_time_ns)
@@ -709,6 +760,15 @@ class Router:
 
         For flat requests (not in a session), this is a no-op.
         """
+        # Dispatch accounting first: the real router decrements ``inflight`` on
+        # the Prefill and the Decode as soon as the request completes, and that
+        # counter is what ``load`` ranks with.  Flat requests used to return
+        # early here, which would have left the counters rising forever.
+        tracker = getattr(self, "_request_pair", None)
+        if tracker is not None and request_id in tracker:
+            for instance_id in tracker.pop(request_id):
+                if instance_id in self._assigned:
+                    self._assigned[instance_id] = max(0, self._assigned[instance_id] - 1)
         session_info = self._request_to_session.pop(request_id, None)
         if session_info is None:
             return
