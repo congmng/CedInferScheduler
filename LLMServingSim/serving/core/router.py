@@ -144,6 +144,9 @@ class Router:
         self.transfer_fixed_ms_cross = float(
             options.get("transfer_fixed_ms_cross", 48.0) or 48.0)
         self.kv_bytes_per_token = float(options.get("kv_bytes_per_token", 0.0) or 0.0)
+        # Producer-side KV push ceiling (GB/s), the deployment's measured
+        # NixlConnector rate.  It is what the KV-aware arm scores against.
+        self.kv_egress_gbps = float(options.get("kv_egress_gbps", 0.0) or 0.0)
         self.local_prefill_queue_weight = float(
             options.get("local_prefill_queue_weight", 1.0) or 0.0)
         self.local_prefill_queue_cap = float(
@@ -171,6 +174,10 @@ class Router:
             # and traffic overflows to the least-loaded instance once the
             # matched one is busy.  This is the SOTA *routing* baseline the real
             # cluster compares against, and it was missing here.
+            self._select_instance = self._least_load_select
+        elif self.routing_policy == "KV_AWARE":
+            # The same least-loaded family, scored on the resource that
+            # actually binds the Prefill here: its KV push, not its engine.
             self._select_instance = self._least_load_select
         elif self.routing_policy == "CUSTOM":
             self._select_instance = self._custom_select
@@ -307,6 +314,67 @@ class Router:
         if ratio < self.CACHE_AWARE_OVERFLOW:
             return chosen
         return self._least_load_select(schedulers, role)
+
+    # -- KV-egress-aware routing (what the SOTA routers *would* do) ----------
+
+    def _kv_aware_select(self, schedulers, role, req_data=None, now_ns=0):
+        """Least-loaded on the resource that actually binds: compute or egress.
+
+        ``load`` / ``cache_aware`` both score ``(inflight+1)/capacity``, and
+        that capacity is the *engine's* requests/s.  On a P/D-disaggregated
+        deployment the Prefill's real ceiling is usually the KV push
+        (``kv_egress_gbps``), not the engine: on the pack-1 arena a 1250-token
+        Zamba2 handoff is 157 MB against a 0.26 GB/s producer, i.e. ~1.7 req/s
+        of egress against 39 req/s of compute.  A compute-only score ties
+        across instances (both look idle), the instance-id tie-break fires, and
+        every request lands on the first Prefill -- measured 2026-09-17, all
+        735 requests on instance 0 with a 419 s mean TTFT.
+
+        This arm is that baseline with the blind spot removed, the way a
+        KV-cache-centric router (Mooncake / LMCache-style pair pricing) scores
+        a producer: predict the wait for this request's own push -- the bytes
+        already queued on the producer's egress plus this handoff's
+        serialisation -- and take the better of that and the compute wait
+        (``max``, because whichever is larger is the term the request waits on).
+
+        It is deliberately *not* CASR: no affinity plan, no class LP, no
+        structural decision.  It exists so the comparison can answer "is the
+        gap a missing planner, or just a load metric that scores the wrong
+        resource?".
+        """
+        if not schedulers:
+            return 0
+        if role != "prefill":
+            return self._least_load_select(schedulers, role)
+
+        prompt_tokens = 0
+        if req_data:
+            prompt_tokens = len(req_data.get("input_hash_ids")
+                                or req_data.get("input_tok_ids") or ())
+        table = getattr(self, "capacity_tables", {}).get(role, {})
+        router_table = getattr(self, "router_capacity", {})
+        assigned = getattr(self, "_assigned", None)
+        egress_gbps = float(getattr(self, "kv_egress_gbps", 0.0) or 0.0)
+        link = getattr(self, "pd_link", None)
+
+        def wait_ns(sched):
+            instance_id = int(sched.instance_id)
+            inflight = (assigned.get(instance_id, 0) if assigned is not None
+                        else len(sched.waiting) * 4 + len(sched.running))
+            capacity = (router_table.get(instance_id)
+                        or table.get(instance_id)
+                        or getattr(sched, "max_num_seqs", 0))
+            compute_ns = ((inflight + 1) / capacity * 1e9
+                          if capacity not in (0, None, float("inf")) else float(inflight + 1))
+            if link is None or egress_gbps <= 0 or prompt_tokens <= 0:
+                return (compute_ns, instance_id)
+            need_bytes = self.kv_bytes_for(prompt_tokens, sched)
+            push_ns = need_bytes / (egress_gbps * 1e9) * 1e9
+            queued_ns = float(link.pending_ns(instance_id, now_ns))
+            return (max(compute_ns, queued_ns + push_ns), instance_id)
+
+        best = min(schedulers, key=wait_ns)
+        return schedulers.index(best)
 
     @staticmethod
     def _least_loaded(candidates):
@@ -801,6 +869,9 @@ class Router:
                     break
                 if self.routing_policy == "CACHE_AWARE":
                     instance_id = self._cache_aware_select(eligible, "prefill", req_data)
+                elif self.routing_policy == "KV_AWARE":
+                    instance_id = self._kv_aware_select(
+                        eligible, "prefill", req_data, current_time_ns)
                 else:
                     instance_id = self._select_instance(eligible, "prefill")
                 sched = eligible[instance_id]

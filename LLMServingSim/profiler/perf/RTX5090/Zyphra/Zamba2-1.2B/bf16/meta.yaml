@@ -1,0 +1,48 @@
+profiler_version: 1.0.0
+vllm_version: 0.29.0
+cuda_version: '13.0'
+gpu: NVIDIA GeForce RTX 5090
+hardware: RTX5090
+profiled_at: '2026-09-16T19:30:17+00:00'
+architecture: zamba2
+architecture_sha256: 54428320e3fcdd389e34b98ba76bf24ddc8291651e4fa887174e1c78c5b86541
+model: Zyphra/Zamba2-1.2B
+variant: bf16
+tp_degrees:
+- 1
+engine_effective:
+  load_format: dummy
+  enforce_eager: true
+  skip_tokenizer_init: true
+  enable_prefix_caching: false
+  generation_config: vllm
+  tensor_parallel_size: 1
+  block_size: 16
+  gpu_memory_utilization: 0.9
+  max_num_batched_tokens: 2048
+  max_num_seqs: 256
+  hf_overrides:
+    num_hidden_layers: 1
+    intermediate_size: 8192
+    num_attention_heads: 32
+    num_key_value_heads: 32
+    vocab_size: 32000
+  dtype: bfloat16
+  worker_extension_cls: profiler.core.hooks.extension.Extension
+  model: /tmp/profiler_model_lutk7buq
+attention_grid:
+  max_kv: 4096
+  chunk_factor: 4.0
+  kv_factor: 4.0
+  chunks: 0, 16-2048 x4
+  n_decode: 0, 1-256 x2
+  kv: 0, 16-4096 x4
+measurement_iterations: 1
+shard: null
+skew_profile:
+  enabled: false
+skew_fit:
+  enabled: false
+shards:
+- card0
+- card1

@@ -37,6 +37,9 @@ NUM_REQS = 376
 ARMS = (
     ("load", "baseline", ["--request-routing-policy", "LOAD"]),
     ("cache_aware", "baseline", ["--request-routing-policy", "CACHE_AWARE"]),
+    # The same least-loaded family with the blind spot removed: score the
+    # Prefill on the resource that binds it (KV egress) as well as its engine.
+    ("kv_aware", "baseline", ["--request-routing-policy", "KV_AWARE"]),
     ("rr", "baseline", ["--request-routing-policy", "RR"]),
     ("casr_lp", "algorithm", ["--enable-casr", "--casr-solver", "lp",
                               "--casr-control-interval-ms", "1000"]),
