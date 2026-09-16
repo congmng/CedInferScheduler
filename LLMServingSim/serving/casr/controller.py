@@ -9,6 +9,7 @@ greedy baseline without changing the router or the trace path.
 from __future__ import annotations
 
 from .affinity import AffinityPlan
+from .plan_builder import build_affinity_plan
 from .flow_solver import CapacityAwareFlowSolver, FlowSolverConfig
 from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
@@ -32,8 +33,34 @@ class CASRController:
         lifecycle_policy = dict((policy or {}).get("lifecycle", {}))
         lifecycle_policy.setdefault("prefill_capacity", (policy or {}).get("prefill_capacity", {}))
         lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
+        # The producer-side egress budget lives in the solver/lifecycle-facing
+        # policy (``casr.shared_links``, or the cluster-level ``kv_egress_gbps``
+        # that the entry point folds in).  The lifecycle's demand->worker-count
+        # heuristic needs it: without the term it only sees compute capacity and
+        # keeps one worker while the run is link-bound (measured 2026-09-15).
+        lifecycle_policy.setdefault("shared_links", (policy or {}).get("shared_links", ()))
+        lifecycle_policy.setdefault("kv_egress_gbps", (policy or {}).get("kv_egress_gbps"))
+        # Prompt-length model: the lifecycle scales capacity the same way the
+        # solver does, so it needs the measured token ceiling and the per-token
+        # KV size (the simulator's snapshots do not fill
+        # ``kv_bytes_per_request``).
+        for key in ("prefill_tokens_per_s", "capacity_reference_tokens",
+                    "kv_bytes_per_token"):
+            if (policy or {}).get(key) is not None:
+                lifecycle_policy.setdefault(key, policy[key])
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
-        self.evaluator = StructuralEvaluator((policy or {}).get("structural", {}))
+        # ``max_active_prefill`` is declared with the lifecycle block, but it is
+        # the ceiling on *structural* scale-out.  Passing only
+        # ``casr.structural`` to the evaluator left it without a cap, so a pool
+        # declared ``max_active_prefill=1`` still grew to three workers
+        # (measured 2026-09-15: the "static one worker" arm of the elasticity
+        # replay acquired Prefills 6 and 4 at t+1.8 s / t+47.3 s).
+        structural_policy = dict((policy or {}).get("structural", {}))
+        if not structural_policy.get("max_active_prefill"):
+            cap = lifecycle_policy.get("max_active_prefill")
+            if cap:
+                structural_policy["max_active_prefill"] = int(cap)
+        self.evaluator = StructuralEvaluator(structural_policy)
         self.state_collector = PrometheusStateCollector((policy or {}).get("telemetry", {}))
         self.executor = ReconfigExecutor((policy or {}).get("executor", {}))
         self.last_action_ns = -1
@@ -119,45 +146,19 @@ class CASRController:
             if not classes:
                 self.pending_warm_classes.pop(instance_id, None)
 
-        p_weights = {}
-        d_weights = {}
-        fallbacks = {}
-
         proposed = self.policy.solve(snapshot, prefill, decode, self.solver)
         self.last_flows = tuple(self._validate_flows(proposed, snapshot, prefill, decode))
         self.last_solver_diagnostics = dict(self.solver.diagnostics)
         self.last_solver_diagnostics["policy"] = self.policy_spec
         self.last_solver_diagnostics["structural"] = self.last_structural_decision
-        class_demand = {}
-        p_class_flow = {}
-        for flow in self.last_flows:
-            class_demand[flow.class_id] = class_demand.get(flow.class_id, 0.0) + flow.flow
-            p_class_flow[flow.prefill_id, flow.class_id] = (
-                p_class_flow.get((flow.prefill_id, flow.class_id), 0.0) + flow.flow)
-        for flow in self.last_flows:
-            p_weights.setdefault(flow.class_id, {})[flow.prefill_id] = (
-                p_class_flow[flow.prefill_id, flow.class_id] / class_demand[flow.class_id])
-            key = (flow.prefill_id, flow.class_id)
-            d_weights.setdefault(key, {})[flow.decode_id] = (
-                d_weights.get(key, {}).get(flow.decode_id, 0.0) +
-                flow.flow / p_class_flow[key])
-        for (prefill_id, class_id), weights in d_weights.items():
-            fallbacks[prefill_id, class_id] = tuple(s.instance_id for s in decode
-                                                    if s.instance_id not in weights)
         self.last_warmups = tuple(warmups)
 
         self.version += 1
         self.next_tick_ns = int(current_ns) + self.interval_ns
-        return AffinityPlan(
-            version=self.version,
-            expires_at_ns=int(current_ns) + self.plan_ttl_ns,
-            prefill_weights=p_weights,
-            decode_weights=d_weights,
-            fallback_decode_ids=fallbacks,
-        )
+        return build_affinity_plan(self.last_flows, decode, self.version,
+                                   int(current_ns) + self.plan_ttl_ns)
 
-    @staticmethod
-    def _validate_flows(flows, snapshot, prefill, decode):
+    def _validate_flows(self, flows, snapshot, prefill, decode):
         """Reject malformed custom-policy output before it can alter routing."""
         from .flow_solver import FlowAssignment
 
@@ -178,12 +179,19 @@ class CASRController:
         # A prefix class can be observed on more than one Prefill worker.  The
         # solver receives one row per worker and therefore emits one flow per
         # row; validate against the aggregate class demand rather than letting
-        # the last row overwrite the earlier ones.
+        # the last row overwrite the earlier ones.  This has to mirror
+        # ``CapacityAwareFlowSolver._aggregate_rows`` exactly -- it used to
+        # floor every row at 1.0 as well, which both inflated the demand the
+        # solver planned against and rejected the (correct) plan once the
+        # solver stopped doing it.
+        floor = float(self.solver.config.class_demand_floor_rps)
         expected = {}
         for row in snapshot["prefix_states"]:
             class_id = row["class_id"]
-            expected[class_id] = (expected.get(class_id, 0.0) +
-                                  max(float(row["arrival_rate_ewma"]), 1.0))
+            expected[class_id] = expected.get(class_id, 0.0) + float(
+                row["arrival_rate_ewma"])
+        for class_id, demand in expected.items():
+            expected[class_id] = max(demand, floor)
         assigned = {class_id: 0.0 for class_id in expected}
         for item in normalized:
             assigned[item.class_id] += item.flow

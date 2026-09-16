@@ -757,6 +757,24 @@ class LLMConverter:
                 decode_npu_id = (decode_npu_offset + npu_group * npus_per_group + npu_offset
                                  if decode_npu_offset is not None else npu_id + self.num_npus)
                 output_filename2 = "%s.%d.et" % (self.output_filename, decode_npu_id)
+                if decode_npu_offset is not None:
+                    # A Prefill instance owns ``2 x num_npus`` NPUs.  Under the
+                    # legacy placement those extra "sender" ranks ran the
+                    # receiver half of the handoff; once the batch names a real
+                    # Decode NPU the receiver runs there instead and the extra
+                    # ranks have no work at all.
+                    #
+                    # They still need a (valid, empty) ET: ASTRA-Sim loads a
+                    # workload for the whole managed range of the instance's
+                    # controller NPU, and a missing file aborts that load for
+                    # every rank in the range -- including the ranks that do
+                    # have a graph, which is what deadlocked the run.
+                    for extra in range(self.npu_offset + self.num_npus,
+                                       self.npu_offset + 2 * self.num_npus):
+                        extra_path = "%s.%d.et" % (self.output_filename, extra)
+                        if npu_id != extra:
+                            with open(extra_path, "wb") as x:
+                                encode_message(x, self.get_global_metadata())
                 first_comp_node = True
                 with open(output_filename1, "wb") as g, open(output_filename2, "wb") as s:
                     global_metadata = self.get_global_metadata()
@@ -936,13 +954,25 @@ class LLMConverter:
 
                     if npu_group == (num_npu_group - 1):
                         # Send output (for the last layer, to the paired decode npu)
+                        #
+                        # ``decode_npu_offset`` overrides the legacy adjacent
+                        # rank.  The receiver file (``s``) is the one written
+                        # for ``decode_npu_id``, and ASTRA-Sim keys a send/recv
+                        # pair on (tag, src, dst, size) with the receiver's
+                        # local rank as ``dst`` -- so the send has to name the
+                        # rank that actually runs the recv.  Leaving this at
+                        # ``npu_id + num_npus`` while the per-layer KV nodes
+                        # used ``decode_npu_id`` made the two files disagree and
+                        # both sides blocked forever.
+                        output_dst = (decode_npu_id if decode_npu_offset is not None
+                                      else npu_id + self.num_npus)
                         send_output_node = self.get_comm_node(
                             is_send=True,
                             layer_name=layers[layer_end - 1].name,
                             comm_type=layers[layer_end - 1].comm_type,
                             comm_size=layers[layer_end - 1].output_memory_size,
                             comm_src=npu_id,
-                            comm_dst=npu_id + self.num_npus
+                            comm_dst=output_dst
                         )
                         if layers[layer_end - 1].comm_type != "NONE" and use_comm:
                             self.add_parent(send_output_node, comm_coll_node)
@@ -958,7 +988,7 @@ class LLMConverter:
                             comm_type=layers[layer_end - 1].comm_type,
                             comm_size=layers[layer_end - 1].output_memory_size,
                             comm_src=npu_id,
-                            comm_dst=npu_id + self.num_npus
+                            comm_dst=output_dst
                         )
                         encode_message(s, recv_output_node)
                     else:

@@ -98,7 +98,20 @@ MultiDimTopology::MultiDimAddress MultiDimTopology::translate_address(const Devi
 
 int MultiDimTopology::get_dim_to_transfer(const MultiDimAddress& src_address,
                                           const MultiDimAddress& dest_address) const noexcept {
-    for (auto dim = 0; dim < dims_count; dim++) {
+    // A multi-dimensional topology is a *hierarchy*: dimension 0 is the
+    // innermost level (fewest NPUs between neighbours, e.g. the local ranks of
+    // one node) and dimension dims_count-1 is the outermost one (e.g. which
+    // node). A transfer that crosses more than one level leaves the lowest
+    // level they share and is carried by the highest level it has to cross, so
+    // the *outermost* differing dimension is the one that pays.
+    //
+    // Scanning from the innermost dimension instead (returning the first
+    // difference) charged a cross-node point-to-point transfer the intra-node
+    // link whenever the two endpoints also differed in their local rank, which
+    // made every P/D handoff look equally cheap regardless of whether the KV
+    // stayed on the node. Single-dimension-difference transfers -- every
+    // collective, and any pair inside one node -- are unaffected.
+    for (auto dim = dims_count - 1; dim >= 0; dim--) {
         // check the dim that has different address
         if (src_address[dim] != dest_address[dim]) {
             return dim;

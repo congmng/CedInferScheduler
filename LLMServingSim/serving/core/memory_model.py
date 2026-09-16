@@ -26,7 +26,7 @@ class MemoryModel():
     an allocation that cannot be satisfied says so in the call that asks.
     """
 
-    def __init__(self, model, instance_id, node_id, num_npus, tp_size, npu_mem, cpu_mem, block_size, fp, enable_prefix_caching, enable_prefix_sharing, prefix_pool, prefix_storage, cxl_mem=0, ep_size=1, pp_size=1, kv_cache_dtype='auto', npu_memory_utilization=1.0):
+    def __init__(self, model, instance_id, node_id, num_npus, tp_size, npu_mem, cpu_mem, block_size, fp, enable_prefix_caching, enable_prefix_sharing, prefix_pool, prefix_storage, cxl_mem=0, ep_size=1, pp_size=1, kv_cache_dtype='auto', npu_memory_utilization=1.0, kv_scale=1.0):
         self.model = model
         self.node_id = node_id
         self.instance_id = instance_id
@@ -79,7 +79,17 @@ class MemoryModel():
         # context, which the simulator cannot profile and does not model -- so
         # this capacity is an upper bound on vLLM's at the same utilization).
         requested = int(self.npu_mem * self.npu_memory_utilization)
-        kv_bytes = requested - self.weight
+        # ``kv_scale`` calibrates the KV pool of one card against another
+        # member of the same family (or against a measurement): it multiplies
+        # what is left after the weights.  The default 1.0 is the faithful
+        # vLLM-style sizing, which is what the deployment's numbers imply --
+        # measured 2026-09-15 on a 24 GB RTX4090 decode with 0.9 utilisation
+        # and Qwen3-8B's ~16 GB of weights: 5.6 GB of KV = 2887 16-token
+        # blocks, exactly what the simulator reports.  The knob exists so an
+        # experiment can ask "what if this card had more KV?" without editing
+        # the memory model.
+        self.kv_scale = max(0.01, float(kv_scale or 1.0))
+        kv_bytes = int((requested - self.weight) * self.kv_scale)
         if kv_bytes < self._npu_bytes_per_block:
             raise RuntimeError(
                 f"[MemoryModel] [node={self.node_id},inst={self.instance_id}]: "

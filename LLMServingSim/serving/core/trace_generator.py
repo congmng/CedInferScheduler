@@ -20,6 +20,30 @@ from dataclasses import dataclass, field
 # ----------------------------------------------------------------------
 _perf_db_cache = {}
 
+#: Timing calibration for the generated graph.
+#:
+#: The measured profiles are the ground truth for kernel time, but the graph
+#: the simulator executes is not simply the sum of those kernels: on
+#: 2026-09-12 a 256-token prefill was charged 116.5 ms on an RTX5090 where the
+#: profile sums to 30.9 ms (3.8x), and the excess grows linearly with tokens
+#: (~0.35 ms/token on top of the profile's ~0.11 ms/token) while TPOT matches
+#: reality to within 3%.  Until the excess is attributed inside ASTRA-Sim,
+#: ``prefill_scale`` lets a run bring the prefill side back onto the measured
+#: curve; ``tests/calibrate_simulator.py`` reports the factor per hardware.
+#: Default 1.0 leaves every existing result reproducible.
+_timing_calibration = {"prefill_scale": 1.0}
+
+
+def set_timing_calibration(prefill_scale=1.0):
+    """Scale prefill-side compute node times (see ``_timing_calibration``)."""
+    value = float(prefill_scale)
+    _timing_calibration["prefill_scale"] = value if value > 0 else 1.0
+    return _timing_calibration["prefill_scale"]
+
+
+def timing_calibration():
+    return dict(_timing_calibration)
+
 logger = get_logger("TraceGenerator")
 
 
@@ -1013,6 +1037,13 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
     else:  # dense
         latency_ns = _lookup_dense(ctx.perf_db, layer_name, ctx.tp_size, bctx.total_len)
 
+    # Prefill-side calibration (see ``_timing_calibration``).  Applied to the
+    # compute node only: the KV egress is emitted separately and the decode
+    # step already matches the measured TPOT.
+    scale = _timing_calibration["prefill_scale"]
+    if scale != 1.0 and getattr(getattr(bctx, "batch", None), "num_prefill", 0):
+        latency_ns = int(latency_ns * scale)
+
     # Size calculation uses the same canonical layer names.
     if layer_name == 'attention':
         kv_len_for_sizes = bctx.kv_prefill + bctx.n_decode * bctx.kv_decode_mean
@@ -1053,10 +1084,81 @@ def _pd_kv_send_bytes(ctx, bctx):
     trace's ``total_len`` instead would silently drop exactly the hit.
     """
     tokens = getattr(bctx.batch, 'pd_kv_send_tokens', 0) or 0
+    if os.environ.get("SIM_DISABLE_KV_EGRESS"):
+        # Calibration probe only: drop the KV egress to see how much of a
+        # prefill's TTFT it accounts for.
+        return 0
     if tokens <= 0:
         return 0
     kv_dim = ctx.kv_head * ctx.head_dim
     return 2 * kv_dim * tokens * ctx.kv_fp // max(ctx.tp_size, 1)
+
+
+def _aggregate_kv_handoff(rows):
+    """Move a prefill's whole KV handoff into a single SEND/RECV pair.
+
+    The Chakra converter emits a point-to-point SEND/RECV for *every* row whose
+    name contains ``v_proj`` and whose ``comm_size`` is non-zero, and
+    ASTRA-Sim's analytical backend charges the full link latency to each one.
+    With one ``qkv_proj`` row per transformer block that turned a single handoff
+    into 36 RTTs: measured 2026-09-16, 37 sends (36 x 128 KiB KV + the lm_head
+    output) cost 48 ms x 37 = 1.78 s of *exposed communication* per prefill
+    batch, i.e. 99% of a 1.9 s TTFT for a 32-token prompt, while the same
+    request answers in 50 ms on the real cluster (a NIXL push pipelines the
+    layers and pays the RTT once).
+
+    Summing the bytes onto the last ``qkv_proj`` row leaves the transport term
+    unchanged -- bytes/bandwidth still scales with the KV size -- and charges
+    the latency once, which is as close to a pipelined handoff as this
+    sequential graph model gets.  Returns a new list; callers must use the
+    result.
+    """
+    groups = {}
+    for index, row in enumerate(rows):
+        if len(row) > 9 and "v_proj" in str(row[0]) and int(row[9] or 0) > 0:
+            # Group by sub-batch tag: an interleaved trace carries two batches in
+            # one row list and each needs its own handoff.
+            groups.setdefault(row[10] if len(row) > 10 else "NONE", []).append(index)
+    rows = list(rows)
+    for indices in groups.values():
+        if len(indices) <= 1:
+            continue
+        total = sum(int(rows[i][9]) for i in indices)
+        keep = indices[-1]
+        for index in indices:
+            if index == keep:
+                continue
+            row = list(rows[index])
+            row[9] = "0"
+            rows[index] = tuple(row)
+        row = list(rows[keep])
+        row[9] = str(total)
+        rows[keep] = tuple(row)
+    return rows
+
+
+def _finalize_prefill_handoff(rows, bctx):
+    """Finish a prefill batch's P/D handoff: KV once, output token-sized.
+
+    ``_emit_final_layers`` routes the last head layer's output to ``REMOTE`` so
+    the converter emits a stage-boundary SEND, and the converter takes that
+    send's size from the row's ``output_size`` -- i.e. the whole logits tensor
+    (32 tokens x 151936 vocab x 2 B = 9.7 MB, measured 2026-09-16).  A real
+    disaggregated prefill returns the *sampled token* plus the KV handles, not
+    its logits, so the payload is a few bytes per request; the KV itself is
+    already carried by the aggregated ``qkv_proj`` send above.
+    """
+    rows = _aggregate_kv_handoff(rows)
+    requests = getattr(getattr(bctx, "batch", None), "requests", ()) or ()
+    payload = 4 * max(1, len(requests))
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        if len(row) > 7 and str(row[6]).startswith("REMOTE"):
+            row = list(row)
+            row[7] = str(payload)
+            rows[index] = tuple(row)
+            break
+    return rows
 
 
 def _tp_comm(ctx, layer_name, total_len, collective='ALLREDUCE'):
@@ -1340,7 +1442,21 @@ def _emit_final_layers(ctx, bctx, rows, batch_tag='NONE'):
     The last emitted layer routes its output to REMOTE so the Chakra
     converter places a MEM_STORE node back to CPU.
     """
-    head_layers = _sequence(ctx.perf_db, "head")
+    head_layers = [
+        layer_name for layer_name in _sequence(ctx.perf_db, "head")
+        if _layer_available(ctx.perf_db, ctx.tp_size, layer_name)
+    ]
+    skipped_head = set(_sequence(ctx.perf_db, "head")) - set(head_layers)
+    for layer_name in sorted(skipped_head):
+        key = (ctx.perf_db["variant"], ctx.perf_db["model"], layer_name)
+        if key not in _skipped_layer_warned:
+            _skipped_layer_warned.add(key)
+            logger.warning(
+                "Layer %r is in the architecture yaml sequence but missing from "
+                "the profile CSVs for %s/%s/%s — skipping. Re-profile to include it.",
+                layer_name, ctx.perf_db["hardware"],
+                ctx.perf_db["model"], ctx.perf_db["variant"],
+            )
     for i, layer_name in enumerate(head_layers):
         output_loc = f'REMOTE:{ctx.node_id}' if i == len(head_layers) - 1 else 'LOCAL'
         _emit_layer(ctx, bctx, layer_name, rows, None, batch_tag, output_loc=output_loc)
@@ -1450,7 +1566,7 @@ def _synthesize_trace(hardware, model, config, tp_size, pp_size, local_ep, ep_to
     _emit_final_layers(ctx, bctx, rows)
     _emit_pp_pd_power(ctx, bctx)
 
-    return rows, block_starts
+    return _finalize_prefill_handoff(rows, bctx), block_starts
 
 
 # ======================================================================
@@ -1548,7 +1664,7 @@ def _synthesize_interleaved_trace(hardware, model, config, tp_size, pp_size, loc
     # Sub-batch interleaving leaves both sub-batches mid-block at every
     # group edge, so there is no single tensor to hand to the next stage.
     # generate_trace refuses the combination before we get here.
-    return rows, []
+    return _finalize_prefill_handoff(rows, bctx), []
 
 
 # ======================================================================

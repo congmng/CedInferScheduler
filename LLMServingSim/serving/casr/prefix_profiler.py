@@ -51,18 +51,42 @@ class PrefixState:
     npu_hit_tokens: int = 0
     storage_hit_tokens: int = 0
     requested_tokens: int = 0
+    # ``hit_tokens_ewma`` is an EWMA *per request*, so the matching denominator
+    # must also be per request.  ``requested_tokens`` is the cumulative sum over
+    # the whole run and dividing by it makes the observed hit ratio decay like
+    # 1/N, which silently erases prefix affinity from the control plane.
+    requested_tokens_ewma: float = 0.0
     last_access_ns: int = -1
     last_arrival_ns: int = -1
+    # Arrivals counted since the last control tick.  The rate is derived from a
+    # count over the sampling window, never from the reciprocal of an
+    # inter-arrival gap: two requests dispatched in the same millisecond would
+    # otherwise produce a spike of ~1000 req/s and make the LP believe the
+    # offered load is several times what the clients actually send.
+    arrivals_since_sample: int = 0
+    arrival_sampled: bool = False
 
     def observe_arrival(self, at_ns: int, input_tokens: int, alpha: float) -> None:
-        if self.last_arrival_ns >= 0 and at_ns > self.last_arrival_ns:
-            instant_rate = 1_000_000_000.0 / (at_ns - self.last_arrival_ns)
-            self.arrival_rate_ewma = alpha * instant_rate + (1.0 - alpha) * self.arrival_rate_ewma
+        self.arrivals_since_sample += 1
         self.reuse_ewma = alpha * 1.0 + (1.0 - alpha) * self.reuse_ewma
         self.request_count += 1
         self.requested_tokens += int(input_tokens)
+        self.requested_tokens_ewma = (alpha * float(input_tokens) +
+                                      (1.0 - alpha) * self.requested_tokens_ewma)
         self.last_arrival_ns = at_ns
         self.last_access_ns = at_ns
+
+    def sample_arrivals(self, elapsed_s: float, alpha: float) -> None:
+        """Fold this window's arrival count into the rate estimate."""
+        if elapsed_s > 0.0:
+            instant = self.arrivals_since_sample / elapsed_s
+            if self.arrival_sampled:
+                self.arrival_rate_ewma = (alpha * instant +
+                                          (1.0 - alpha) * self.arrival_rate_ewma)
+            else:
+                self.arrival_rate_ewma = instant
+                self.arrival_sampled = True
+            self.arrivals_since_sample = 0
 
     def observe_lookup(self, at_ns: int, npu_hit: int, storage_hit: int,
                        alpha: float) -> None:
@@ -86,6 +110,7 @@ class PrefixProfiler:
         self._states: Dict[Tuple[int, str], PrefixState] = defaultdict(PrefixState)
         self._classes: Dict[str, Dict[str, object]] = {}
         self._representatives: Dict[str, Tuple[int, list[int]]] = {}
+        self._last_sample_ns = -1
 
     def assign(self, model_id: str, input_tokens: int, output_tokens: int,
                token_ids: Optional[Iterable[int]], kv_bytes_per_request: float = 0.0) -> Tuple[str, str]:
@@ -120,10 +145,12 @@ class PrefixProfiler:
             int(at_ns), npu_hit_tokens, storage_hit_tokens, self.ewma_alpha)
 
     def snapshot(self, at_ns: int, schedulers=()) -> Dict[str, object]:
+        elapsed_s = 0.0
+        if self._last_sample_ns >= 0 and at_ns > self._last_sample_ns:
+            elapsed_s = (at_ns - self._last_sample_ns) / 1e9
         for state in self._states.values():
-            if state.last_arrival_ns >= 0 and at_ns > state.last_arrival_ns:
-                elapsed = at_ns - state.last_arrival_ns
-                state.arrival_rate_ewma *= 0.5 ** (elapsed / self.arrival_half_life_ns)
+            state.sample_arrivals(elapsed_s, self.ewma_alpha)
+        self._last_sample_ns = int(at_ns)
         cache_by_instance = {}
         for scheduler in schedulers:
             pool = scheduler.memory.npu_pool

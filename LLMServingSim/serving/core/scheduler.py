@@ -37,7 +37,8 @@ class Scheduler:
                  enable_prefix_caching, enable_prefix_sharing, prefix_pool, prefix_storage,
                  enable_chunked_prefill=False,
                  long_prefill_token_threshold=0, cxl_mem=0, ep_size=1, kv_cache_dtype='auto',
-                 npu_memory_utilization=1.0, reserve_full_isl=True, prefix_profiler=None):
+                 npu_memory_utilization=1.0, reserve_full_isl=True, prefix_profiler=None,
+                 pd_buffer_bytes=None, pd_staging=None, kv_scale=1.0):
         self.model = model
         self.config = get_config(model)
         self.node_id = node_id
@@ -58,6 +59,17 @@ class Scheduler:
         # vLLM's scheduler_reserve_full_isl, True by default there: admit a
         # request only if its whole sequence fits, not merely its first chunk.
         self.reserve_full_isl = reserve_full_isl
+        # Decode-side staging for in-flight P/D handoffs, shared by every
+        # Scheduler of the run (the producer pushes into the consumer's buffer,
+        # so the budget belongs to the *decode* instance while the gate is
+        # enforced on the prefill side).  ``None`` keeps the historical
+        # unbounded behaviour; a value models LMCache's fixed PD buffer, whose
+        # exhaustion stalls the sender.
+        self.pd_buffer_bytes = pd_buffer_bytes
+        self.pd_staging = pd_staging if pd_staging is not None else {}
+        # How often this instance had to refuse a P/D handoff because its KV
+        # pool was full (the caller retries; see ``add_decode``).
+        self.backpressure_events = 0
         self.prefix_profiler = prefix_profiler
         # CASR models scale actions as admission-state transitions before it
         # grows a real orchestration backend around worker processes.
@@ -89,7 +101,11 @@ class Scheduler:
                                   block_size, fp, enable_prefix_caching, enable_prefix_sharing,
                                   prefix_pool, prefix_storage, cxl_mem, ep_size=ep_size,
                                   pp_size=pp_size, kv_cache_dtype=kv_cache_dtype,
-                                  npu_memory_utilization=npu_memory_utilization)
+                                  npu_memory_utilization=npu_memory_utilization,
+                                  # Per-instance KV-pool calibration (see
+                                  # MemoryModel.__init__): lets one card's pool
+                                  # be scaled without editing the memory model.
+                                  kv_scale=kv_scale)
         self.kv = self.memory.kv
 
         self.logger = get_logger(self.__class__, node_id=node_id, instance_id=instance_id)
@@ -228,6 +244,17 @@ class Scheduler:
             if matching_index is None:
                 break
             req = self.waiting[matching_index]
+
+            # PD staging gate: the Prefill engine pushes KV into the Decode's
+            # buffer, and a full buffer stalls the sender (measured as multi-
+            # second handoff glitches on the real deployment).  Requests are
+            # deferred in arrival order rather than skipped, so FCFS holds.
+            if (self.pd_type == "prefill" and self.pd_buffer_bytes
+                    and req.decode_instance_id is not None):
+                need = self.memory.pd_kv_bytes(req.original_input)
+                staged = self.pd_staging.get(req.decode_instance_id, 0.0)
+                if staged + need > float(self.pd_buffer_bytes):
+                    break
 
             num_computed = req.num_computed_tokens
             hit_blocks, num_npu_hit, num_lower_hit = [], 0, 0
@@ -388,6 +415,16 @@ class Scheduler:
                 batch.pd_decode_npu_offset = self.decode_npu_offsets.get(target)
                 if batch.pd_decode_npu_offset is None:
                     raise RuntimeError(f"Unknown Decode instance {target} for P/D handoff")
+                # Charge the target Decode's staging budget: it is released when
+                # that instance actually takes the request over (``add_decode``).
+                if self.pd_buffer_bytes:
+                    for scheduled_req in scheduled:
+                        req_obj = scheduled_req[0] if isinstance(scheduled_req, tuple) else scheduled_req
+                        if getattr(req_obj, "decode_instance_id", None) != target:
+                            continue
+                        self.pd_staging[target] = (
+                            self.pd_staging.get(target, 0.0)
+                            + self.memory.pd_kv_bytes(req_obj.original_input))
                 batch.pd_decode_npu_count = self.decode_npu_counts.get(target, 0)
                 if batch.pd_decode_npu_count != self.num_npus:
                     raise RuntimeError(
@@ -407,6 +444,19 @@ class Scheduler:
         for batch in self.inflight:
             if batch.batch_id == batch_id:
                 if sys in batch.fired:
+                    return None
+                # A Prefill instance owns ``2 x num_npus`` NPUs: the compute
+                # ranks plus the extra ranks the legacy KV egress addressed.
+                # Those extra ranks used to run the receiver half of the P/D
+                # handoff; once the batch names a real Decode NPU the receiver
+                # runs there instead and they have nothing of their own to run.
+                # Handing them the Prefill's workload made them -- and, via
+                # ASTRA-Sim's managed-range load, their neighbours -- execute a
+                # graph that is not theirs.  They pass instead; the converter
+                # leaves an empty ET in the folder so the range still loads.
+                if (self.pd_type == "prefill"
+                        and batch.pd_decode_npu_offset is not None
+                        and sys >= self.start_npu + self.num_npus):
                     return None
                 batch.fired.append(sys)
                 self.logger.info("Scheduling existing batch #%d to NPU[%d]", batch.batch_id, sys)
@@ -546,22 +596,33 @@ class Scheduler:
         carries a per-layer send to the paired decode NPU. So this only claims
         the blocks -- reporting no load bytes, or the transfer would be billed
         twice.
+
+        Returns ``True`` when the Decode admitted the request.  When its KV pool
+        cannot hold the sequence the request is *not* taken: the caller keeps it
+        pending and retries on the next opportunity.  That is the real
+        scheduler's behaviour (vLLM refuses a sequence until blocks free up, and
+        preempts only under its own pressure policy) and it is what lets a
+        long-prompt run survive a backlog.  Raising instead killed every run the
+        moment a pool filled -- measured 2026-09-15: "1251 tokens need more
+        blocks than the pool has free (43 of 2887)" at request 19/182.
         """
-        req.instance_id = self.instance_id
-        req.decode_instance_id = self.instance_id
-        req.status = RequestStatus.RUNNING
         hit_blocks, num_npu_hit, num_lower_hit = self.kv.get_computed_blocks(req)
         num_computed = req.num_computed_tokens
         if self.kv.allocate_slots(req, 1, hit_blocks, num_npu_hit, num_lower_hit) is None:
-            raise RuntimeError(
-                f"[Scheduler] [node_id={self.node_id},inst={self.instance_id}] decode "
-                f"instance cannot admit request {req.id}: {req.num_tokens_reached} tokens "
-                f"need more blocks than the pool has free "
-                f"({self.kv.npu_pool.get_num_free_blocks()} of {self.kv.npu_pool.num_blocks})"
-            )
+            self.backpressure_events += 1
+            return False
+        req.instance_id = self.instance_id
+        req.decode_instance_id = self.instance_id
+        req.status = RequestStatus.RUNNING
+        if self.pd_buffer_bytes:
+            # The buffer is consumed the moment this Decode takes the request.
+            staged = self.pd_staging.get(self.instance_id, 0.0)
+            self.pd_staging[self.instance_id] = max(
+                0.0, staged - self.memory.pd_kv_bytes(req.original_input))
         req.num_computed_tokens = num_computed
         self.kv.take_traffic()          # a P/D handoff is not a recall
         self.running.append(req)
+        return True
 
     @property
     def accepts_new_requests(self):

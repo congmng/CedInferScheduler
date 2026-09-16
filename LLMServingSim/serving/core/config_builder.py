@@ -136,7 +136,7 @@ def _resolve_parallelism(instance, model_config):
     return num_npus, tp_size, pp_size, ep_size, dp_group
 
 
-def _resolve_dp_groups(all_instances):
+def _resolve_dp_groups(all_instances, domain_layout=None):
     """Validate DP groups and compute dp_group_size and ep_total for each instance."""
     dp_groups = {}
     for inst in all_instances:
@@ -214,7 +214,7 @@ def _resolve_dp_groups(all_instances):
     # multi-dimensional topology. For a mixed TP deployment, the topology
     # dimensions are the prime factors of the largest TP degree, so a smaller
     # TP group can scope its collective to a prefix of those dimensions.
-    network_dims = _compute_network_dims(all_instances)
+    network_dims = _compute_network_dims(all_instances, domain_layout)
 
     for inst in all_instances:
         if inst.get("dp_group") is None:
@@ -264,7 +264,72 @@ def _collective_prefix_dims(group_size, network_dims):
     return involved
 
 
-def _compute_network_dims(instances):
+def _compute_domain_layout(instances, num_nodes):
+    """Return the per-node slot split of an independent-instance topology.
+
+    The simulator's P/D KV handoff is a point-to-point send between the
+    Prefill's NPU and the selected Decode's NPU, and the real router treats a
+    same-domain handoff as free while a cross-domain one pays the measured
+    link. A flat ``[tp, instances]`` topology cannot express that: every
+    instance pair is one hop apart on the same link, so ``p4090 -> d5090``
+    (cross-domain, faster kernel) and ``p5090 -> d5090`` (same host) cost the
+    same. See ``docs/模拟器与真机一致性核查.md`` 附四.
+
+    When every node owns the same number of ASTRA-Sim NPU slots, the flat
+    instance dimension can be split into ``[slots_per_node, num_nodes]`` so the
+    node boundary becomes the outermost topology dimension and the intra-node
+    link is a separate, cheaper one. Returns ``None`` when the layout is not
+    node-uniform (unequal slot counts, DP groups, or pipeline parallelism),
+    in which case the historical flat topology is kept.
+
+    A Prefill instance owns two slots: the compute NPU and the extra NPU the
+    KV egress is attached to (see the ``num_npus * 2`` accounting in
+    ``build_cluster_config``).
+    """
+    if num_nodes < 2:
+        return None
+    if any(inst.get("dp_group") is not None for inst in instances):
+        # DP groups size their topology as [tp, (pp,) dp] and scope EP
+        # collectives to those dimensions; inserting a node dimension would
+        # renumber the dims the collective masks refer to.
+        return None
+    if any(inst.get("pp_size", 1) != 1 for inst in instances):
+        return None
+    if any(inst["num_npus"] != 1 for inst in instances):
+        # Multi-NPU instances need their extra "sender" ranks to keep a graph in
+        # the Prefill's workload folder: ASTRA-Sim loads a workload for the
+        # whole managed range of an instance's controller rank, and a single
+        # missing ``llm.<npu>.et`` aborts that load for every rank in the
+        # range.  Naming a real Decode NPU moves the receiver off those ranks,
+        # so the frontend's start/end NPU bookkeeping has to be reworked before
+        # this combination can be supported.  Every deployment this model
+        # targets runs one GPU per instance.
+        return None
+
+    slots_per_node = {}
+    for inst in instances:
+        slots = inst["num_npus"] * (2 if inst.get("pd_type") == "prefill" else 1)
+        node_id = inst.get("node_id")
+        slots_per_node[node_id] = slots_per_node.get(node_id, 0) + slots
+
+    if len(slots_per_node) != num_nodes:
+        return None
+    if len(set(slots_per_node.values())) != 1:
+        return None
+    per_node = next(iter(slots_per_node.values()))
+
+    flat_dims = _compute_network_dims(instances)
+    if len(flat_dims) != 2 or flat_dims[1] != per_node * num_nodes:
+        return None
+
+    return {
+        "inner_dims": [flat_dims[0]],
+        "slots_per_node": per_node,
+        "num_nodes": num_nodes,
+    }
+
+
+def _compute_network_dims(instances, domain_layout=None):
     """Infer ASTRA-Sim topology dimensions from resolved instances."""
     dp_groups = {}
     for inst in instances:
@@ -338,6 +403,13 @@ def _compute_network_dims(instances):
             npus_per_group = total_npu // total_pp
             dims = [npus_per_group, total_pp]
 
+    # Split the instance dimension into [slots within a node, nodes] so the
+    # hierarchy carries the domain boundary (see _compute_domain_layout).
+    if domain_layout is not None and not dp_groups:
+        dims = [*domain_layout["inner_dims"],
+                domain_layout["slots_per_node"],
+                domain_layout["num_nodes"]]
+
     # Remove trailing 1s (single-element dimensions are unnecessary).
     while len(dims) > 1 and dims[-1] == 1:
         dims.pop()
@@ -382,12 +454,12 @@ def _normalize_network_dim_values(raw_value, num_dims, field_name):
         ) from exc
 
 
-def _sync_system_collective_dims(system_config_path, instances):
+def _sync_system_collective_dims(system_config_path, instances, domain_layout=None):
     """Match system collective implementation arity to final topology dims."""
     with open(system_config_path) as f:
         system_config = json.load(f)
 
-    num_dims = len(_compute_network_dims(instances))
+    num_dims = len(_compute_network_dims(instances, domain_layout))
     for key in _COLLECTIVE_IMPL_KEYS:
         system_config[key] = ["ring"] * num_dims
 
@@ -426,6 +498,38 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
     
     link_bw = cluster_config["link_bw"]
     link_latency = cluster_config["link_latency"]
+
+    # Optional domain-aware link model. Declaring the intra-node link switches
+    # the topology to [..., slots_per_node, num_nodes] so that a same-node P/D
+    # KV handoff does not pay the inter-node link. Omitting both keys keeps the
+    # historical flat topology and every existing result unchanged.
+    intra_node_link_bw = cluster_config.get("intra_node_link_bw")
+    intra_node_link_latency = cluster_config.get("intra_node_link_latency")
+    if (intra_node_link_bw is None) != (intra_node_link_latency is None):
+        raise KeyError(
+            "'intra_node_link_bw' and 'intra_node_link_latency' must be "
+            "specified together in the cluster configuration."
+        )
+    intra_node_link = (None if intra_node_link_bw is None
+                       else (float(intra_node_link_bw), float(intra_node_link_latency)))
+
+    # -- producer-side KV egress -------------------------------------------
+    # ``link_bw`` is what the *wire* sustains (measured with iperf between two
+    # hosts).  A P/D handoff is pushed by the Prefill engine itself, and that
+    # path measures 115-314 MB/s on the native NixlConnector (184 MB per
+    # 1250-token handoff in 585-731 ms) -- roughly 8x below the wire.  Without
+    # this cap the simulator prices a cross-domain handoff at wire speed and
+    # understates it by an order of magnitude, which is what made the real
+    # deployment's KV link look free.  Declaring ``kv_egress_gbps`` (GB/s, same
+    # unit as ``link_bw``) charges the handoff path at min(wire, producer).
+    kv_egress_gbps = cluster_config.get("kv_egress_gbps")
+    handoff_link_bw = _handoff_link_bandwidth(link_bw, kv_egress_gbps)
+
+    # Decode-side staging budget for in-flight handoffs.  The real deployment
+    # runs LMCache with a fixed PD buffer; when it fills, the Prefill side
+    # stalls -- the "long glitch" shape seen on 2026-09-13.  ``None`` keeps the
+    # historical unbounded behaviour.
+    pd_buffer_bytes = cluster_config.get("pd_buffer_bytes")
 
     # Memory required keys
     mem_required_keys = ["mem_size", "mem_bw", "mem_latency"]
@@ -751,15 +855,31 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
         for inst in total_instances
     )
 
+    # Domain-aware topology: split the instance dimension into
+    # [slots_per_node, num_nodes] when the layout is node-uniform. ``None``
+    # keeps the historical flat topology.
+    domain_layout = (_compute_domain_layout(total_instances, num_nodes)
+                     if intra_node_link is not None else None)
+    if intra_node_link is not None and domain_layout is None:
+        raise ValueError(
+            "The cluster configuration declares 'intra_node_link_bw' but the "
+            "instance layout is not node-uniform (unequal slots per node, DP "
+            "groups, or pipeline parallelism), so the topology cannot express "
+            "a separate intra-node link. Remove the intra-node keys or make "
+            "every node own the same number of instances."
+        )
+
     # Resolve DP groups across all instances.
-    _resolve_dp_groups(total_instances)
+    _resolve_dp_groups(total_instances, domain_layout)
 
     # Keep collective implementation arity aligned with the final global
     # ASTRA-Sim topology, while preserving the default ring implementation.
-    _sync_system_collective_dims(system_config_path, total_instances)
+    _sync_system_collective_dims(system_config_path, total_instances, domain_layout)
 
     # Generate the final ASTRA-Sim input files after all instances are known.
-    _create_network_config(network_config_path, total_instances, link_bw, link_latency)
+    _create_network_config(network_config_path, total_instances,
+                           handoff_link_bw, link_latency,
+                           domain_layout=domain_layout, intra_node_link=intra_node_link)
     with open(memory_config_path, "w", encoding="utf-8") as f:
         json.dump(memory_config, f, ensure_ascii=False, indent=2)
     _validate_memory_config(memory_config_path, placement, enable_local_offloading)
@@ -767,6 +887,11 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
     cluster = {
         "num_nodes": num_nodes,
         "num_instances": total_num_instances,
+        # Surfaced so the entry point can print them (auditability) and pass the
+        # staging budget to every Scheduler.
+        "kv_egress_gbps": kv_egress_gbps,
+        "handoff_link_bw": handoff_link_bw,
+        "pd_buffer_bytes": pd_buffer_bytes,
         "instances": total_instances,
         "inst2node_mapping": inst2node_mapping,
         "inst2npu_mapping": inst2npu_mapping,
@@ -785,6 +910,8 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
         "pim_models": pim_models,
         "link_bw": link_bw,
         "link_latency": link_latency,
+        "intra_node_link": intra_node_link,
+        "domain_layout": domain_layout,
         "inputs_root": inputs_root,
         "network_config_path": network_config_path,
         "system_config_path": system_config_path,
@@ -795,21 +922,52 @@ def build_cluster_config(astra_sim, cluster_config_path, enable_local_offloading
     return cluster
 
 # generates topology according to the input arguments
-def _create_network_config(network_config_path, instances, link_bw, link_latency):
+def _handoff_link_bandwidth(link_bw, kv_egress_gbps):
+    """Effective bandwidth charged for a P/D handoff, in GB/s.
+
+    ``link_bw`` is the wire; ``kv_egress_gbps`` is what the Prefill engine can
+    actually push (measured 115-314 MB/s on the native NixlConnector).  A
+    handoff cannot be faster than either, so the charge is the smaller one.
+    ``None`` keeps the wire value, which is what every config without the key
+    has always used.
+    """
+    if kv_egress_gbps is None:
+        return link_bw
+    return min(float(link_bw), float(kv_egress_gbps))
+
+
+def _create_network_config(network_config_path, instances, link_bw, link_latency,
+                           domain_layout=None, intra_node_link=None):
     """Create ASTRA-Sim network topology config.
 
     Topology dimensions:
       - For DP groups: [tp_size, dp_group_size] — dim 0 for TP ALLREDUCE, dim 1 for EP ALLTOALL
       - For independent instances: [tp_size, num_groups] — dim 0 for TP, dim 1 for PP/instances
       - Single GPU instances: [1]
+
+    With a node-uniform ``domain_layout`` the instance dimension is split into
+    ``[slots_per_node, num_nodes]`` and every dimension except the outermost
+    one — which is the node boundary — is given the intra-node link. ASTRA-Sim
+    charges a point-to-point send the outermost differing dimension
+    (``MultiDimTopology::get_dim_to_transfer``), so a same-node P/D handoff
+    pays the intra-node link and a cross-node one pays the measured inter-node
+    link, matching the real router's ``p.domain == d.domain`` rule.
     """
-    dims = _compute_network_dims(instances)
+    dims = _compute_network_dims(instances, domain_layout)
     num_dims = len(dims)
+    if domain_layout is not None and intra_node_link is not None:
+        intra_bw, intra_latency = intra_node_link
+        # Every dimension below the outermost (node) one lives inside a node.
+        bandwidth = [intra_bw] * (num_dims - 1) + [link_bw]
+        latency = [intra_latency] * (num_dims - 1) + [link_latency]
+    else:
+        bandwidth = _normalize_network_dim_values(link_bw, num_dims, "link_bw")
+        latency = _normalize_network_dim_values(link_latency, num_dims, "link_latency")
     topology_data = {
         "topology": FlowStyleList(["FullyConnected"] * num_dims),
         "npus_count": FlowStyleList(dims),
-        "bandwidth": _normalize_network_dim_values(link_bw, num_dims, "link_bw"),
-        "latency": _normalize_network_dim_values(link_latency, num_dims, "link_latency"),
+        "bandwidth": FlowStyleList([float(v) for v in bandwidth]),
+        "latency": FlowStyleList([float(v) for v in latency]),
     }
 
     with open(network_config_path, 'w') as yaml_file:

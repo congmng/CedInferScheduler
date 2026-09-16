@@ -30,7 +30,24 @@ class StructuralDecision:
 
 
 class StructuralEvaluator:
-    """Compare one-step P row edits using the same inner flow solver."""
+    """Compare one-step P row edits using the same inner flow solver.
+
+    Economics (added 2026-09-14 after the real-cluster measurement):
+
+    * ``evaluation_window_ms`` is the *horizon over which the edit has to pay
+      for itself* -- i.e. the expected remaining duration of the overload, not
+      a 1 s control tick.
+    * ``startup_s`` is how long a scaled-out Prefill needs before it can serve
+      anything (measured: 45 s for a container restart plus ``/metrics``), so
+      the benefit of ``+P`` only accrues over ``horizon - startup_s``.
+    * ``idle_cost_fraction`` (or an explicit ``holding_cost``) charges every
+      active Prefill for merely existing, which is what lets ``-P`` ever be
+      profitable: without a holding cost, removing an instance could only make
+      the remaining ones busier, so its counterfactual gain was mechanically
+      negative (measured on the real fabric: -1.25, -0.56, -10.09, -10.20).
+    * ``max_active_prefill`` caps scale-out; previously every configured spare
+      could be started, one per tick, with nothing to stop at.
+    """
 
     def __init__(self, config=None):
         config = config or {}
@@ -44,6 +61,42 @@ class StructuralEvaluator:
         self.warm_budget_bytes = max(0.0, float(config.get("warm_budget_bytes", 0.0)))
         self.enabled = bool(config.get("enabled", True))
         self.enable_warm = bool(config.get("enable_warm_counterfactual", True))
+        # A scale decision has to outlive its own start-up, otherwise the next
+        # tick reverses it: the cooldown is the boot time unless the operator
+        # asked for a longer one.
+        self.startup_s = max(0.0, float(config.get("startup_s", 0.0)))
+        self.dwell_ns = max(self.dwell_ns, int(self.startup_s * 1e9))
+        self.holding_cost = max(0.0, float(config.get("holding_cost", 0.0)))
+        self.idle_cost_fraction = max(0.0, float(config.get("idle_cost_fraction", 0.0)))
+        max_active = int(config.get("max_active_prefill", 0) or 0)
+        self.max_active_prefill = max_active if max_active > 0 else None
+
+    def _holding_per_instance(self, instances, solver):
+        """Per-second cost of keeping one Prefill active, in objective units.
+
+        ``holding_cost`` is used verbatim when configured.  Otherwise the cost
+        is a fraction of what a saturated instance of that class of hardware
+        costs per second (``service_s x capacity``), averaged over the active
+        set -- an explicit, tunable stand-in for the reserved-GPU opportunity
+        cost rather than a magic constant.
+        """
+        if self.holding_cost > 0.0:
+            return self.holding_cost
+        if self.idle_cost_fraction <= 0.0 or not instances:
+            return 0.0
+        config = getattr(solver, "config", None)
+        total = 0.0
+        for instance in instances:
+            instance_id = int(instance.instance_id)
+            capacity = float(getattr(config, "prefill_capacity", {}).get(instance_id, 0.0)
+                             or 0.0)
+            service_ms = float(getattr(config, "prefill_service_ms", {}).get(
+                instance_id, getattr(instance, "service_ms", 0.0)) or 0.0)
+            if capacity > 0.0 and service_ms > 0.0:
+                total += capacity * service_ms / 1000.0
+            else:
+                total += 1.0
+        return self.idle_cost_fraction * total / max(1, len(instances))
 
     @staticmethod
     def _hit_work(rows, class_id):
@@ -51,8 +104,13 @@ class StructuralEvaluator:
         for row in rows:
             if row["class_id"] != class_id:
                 continue
-            requested = max(1.0, float(row.get("requested_tokens", 0.0)))
-            ratios.append(min(0.95, float(row.get("hit_tokens_ewma", 0.0)) / requested))
+            # ``hit_tokens_ewma`` is per request, so prefer the per-request
+            # denominator and only fall back to the cumulative counter.
+            requested = float(row.get("requested_tokens_ewma", 0.0) or 0.0)
+            if requested <= 0:
+                requested = float(row.get("requested_tokens", 0.0))
+            ratios.append(min(0.95, float(row.get("hit_tokens_ewma", 0.0)) /
+                              max(1.0, requested)))
         return max(0.05, 1.0 - max(ratios or [0.0]))
 
     def _warm_classes(self, rows):
@@ -104,9 +162,25 @@ class StructuralEvaluator:
         candidates = []
         warm_classes = self._warm_classes(rows)
 
+        horizon_s = self.window_ns / 1_000_000_000.0
+        # What one more (or one fewer) active Prefill costs per second.  It
+        # appears with opposite signs on the two branches below, which is what
+        # makes the criterion symmetric instead of "grow whenever possible".
+        holding = self._holding_per_instance(active_prefill, solver)
+        # The ceiling counts every worker the pool still pays for, not only the
+        # ones already serving: a WARMING boot and a DRAINING drain both still
+        # hold their GPU, so starting another on top of them would exceed the
+        # operator's limit.  Counting only ``active_prefill`` let a booting
+        # worker be ignored and the pool overshoot.
+        pool = [item for item in (all_prefill or active_prefill)
+                if getattr(item, "admission_state", "ACTIVE") != "INACTIVE"]
+        can_grow = (self.max_active_prefill is None
+                    or len(pool) < self.max_active_prefill)
         inactive = [s for s in all_prefill if s not in active_prefill and
                     s.admission_state == "INACTIVE"]
-        for candidate in sorted(inactive, key=lambda item: item.instance_id)[:1]:
+        if not can_grow:
+            inactive = []
+        for candidate in sorted(inactive, key=lambda item: item.instance_id):
             candidate_prefill = list(active_prefill) + [candidate]
             modes = [("cold", self.startup_cost,
                       {(candidate.instance_id, row["class_id"]): 1.0 for row in rows})]
@@ -119,7 +193,10 @@ class StructuralEvaluator:
             for mode, default_cost, overrides in modes:
                 solver.solve(rows, candidate_prefill, decode, overrides)
                 candidate_objective = float(solver.diagnostics.get("objective", 0.0))
-                gain = (self.window_ns / 1_000_000_000.0) * (base_objective - candidate_objective)
+                # The new instance only contributes after it has booted, and it
+                # has to be paid for from the moment it is started.
+                effective_horizon = max(0.0, horizon_s - self.startup_s)
+                gain = effective_horizon * (base_objective - candidate_objective - holding)
                 gain -= default_cost
                 candidates.append(StructuralDecision(
                     "+P", mode, gain, base_objective, candidate_objective,
@@ -128,11 +205,16 @@ class StructuralEvaluator:
                     warm_classes if mode == "warm" else ()))
 
         if len(active_prefill) > min_active:
-            for candidate in sorted(active_prefill, key=lambda item: item.instance_id, reverse=True)[:1]:
+            # Every active instance is a candidate: which one is least useful is
+            # a question for the counterfactual, not for the instance id.
+            for candidate in sorted(active_prefill, key=lambda item: item.instance_id):
                 candidate_prefill = [item for item in active_prefill if item is not candidate]
                 solver.solve(rows, candidate_prefill, decode)
                 candidate_objective = float(solver.diagnostics.get("objective", 0.0))
-                gain = (self.window_ns / 1_000_000_000.0) * (base_objective - candidate_objective)
+                # Removal is immediate (drain only delays it), so the full
+                # horizon applies, and the holding cost it saves counts as a
+                # benefit -- this is the only way "-P" can be positive.
+                gain = horizon_s * (base_objective - candidate_objective + holding)
                 candidates.append(StructuralDecision(
                     "-P", "none", gain, base_objective, candidate_objective,
                     tuple(item.instance_id for item in candidate_prefill),

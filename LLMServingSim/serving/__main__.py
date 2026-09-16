@@ -278,9 +278,12 @@ def main():
                         help='model weight data type (vLLM-style). When omitted, defaults to the model config\'s '
                         '``torch_dtype`` (falling back to bfloat16). Overrides only take effect if the profiler '
                         'produced matching data under perf/<hw>/<model>/<variant>/tp<N>/')
-    parser.add_argument('--request-routing-policy', type=str, choices=['LOAD', 'RR', 'RAND', 'CUSTOM'], default='LOAD',
+    parser.add_argument('--request-routing-policy', type=str,
+                        choices=['LOAD', 'RR', 'RAND', 'CACHE_AWARE', 'CUSTOM'], default='LOAD',
                         help='request routing policy across instances: LOAD (vLLM-style weighted least-loaded, default), '
-                        'RR (round-robin), RAND (random), CUSTOM (user-defined)')
+                        'RR (round-robin), RAND (random), '
+                        'CACHE_AWARE (SGLang-style longest-prefix match with load overflow), '
+                        'CUSTOM (user-defined)')
     parser.add_argument('--expert-routing-policy', type=str,
                         choices=['BALANCED', 'RR', 'RAND', 'CUSTOM'],
                         default='BALANCED',
@@ -410,6 +413,19 @@ def main():
     network_backend = args.network_backend
     raw_cluster_config = _load_cluster_config_for_overrides(args.cluster_config)
     raw_instances = list(_iter_raw_instances(raw_cluster_config))
+    # Declaring an intra-node link switches on the domain-aware network model
+    # (the topology grows a node dimension).  Only then does it make sense to
+    # name the Decode half of every pair up front, which is what puts the real
+    # cross-domain KV hop on the Prefill's critical path instead of the legacy
+    # adjacent intra-node rank.  Existing configs declare no intra-node link and
+    # keep their exact previous behaviour.
+    domain_aware_links = raw_cluster_config.get("intra_node_link_bw") is not None
+    # Optional timing calibration (see trace_generator._timing_calibration).
+    calibration = raw_cluster_config.get("sim_calibration") or {}
+    if calibration.get("prefill_scale"):
+        from .core.trace_generator import set_timing_calibration
+        applied = set_timing_calibration(calibration["prefill_scale"])
+        print(f"[calibration] prefill compute scaled by {applied}", flush=True)
     build_enable_local_offloading = args.enable_local_offloading or any(
         inst.get("enable_local_offloading", False) for inst in raw_instances)
     build_enable_attn_offloading = args.enable_attn_offloading or any(
@@ -439,6 +455,51 @@ def main():
     any_prefix_caching = any(cfg["enable_prefix_caching"] for cfg in instance_runtime_configs)
     casr_profiler = PrefixProfiler(args.block_size) if args.enable_casr else None
     casr_config = dict(raw_cluster_config.get("casr") or {})
+    # The producer-side KV egress budget is a *top-level* cluster key (it is a
+    # hardware property, not a solver knob).  Fold it into the policy block so
+    # the lifecycle's demand->worker-count heuristic sees the same limit the
+    # solver prices.
+    if raw_cluster_config.get("kv_egress_gbps") is not None:
+        casr_config.setdefault("kv_egress_gbps", raw_cluster_config["kv_egress_gbps"])
+    # Same run-time override the real router honours (casr_control), so a sweep
+    # can raise the overflow price without editing the cluster JSON.
+    if os.environ.get("OVERFLOW_PENALTY"):
+        casr_config["overflow_penalty"] = float(os.environ["OVERFLOW_PENALTY"])
+    # KV-transfer pricing.  The shared solver prices a (Preill, Decode) pair as
+    # ``rtt + kv_bytes / bandwidth``, and the real router fills that from its
+    # measured per-domain links -- same-domain pairs are free because the KV
+    # never leaves the node.  The simulator never populated ``pair_costs`` at
+    # all, so every cross-node transfer looked free and the solver happily put
+    # the 4090 Prefill (faster kernel) in front of the 5090 one even though the
+    # real system stays on a same-domain pair (measured 2026-09-12: real
+    # ``casr_lp`` on Dolly used p5090+d5090 100%, the simulator 4090+5090).
+    if args.enable_casr and not casr_config.get("pair_costs"):
+        link_bw_gbps = float(raw_cluster_config.get("link_bw", 0.0) or 0.0)
+        link_latency_ms = float(raw_cluster_config.get("link_latency", 0.0) or 0.0) / 1e6
+        node_of = {}
+        for node_index, node in enumerate(raw_cluster_config.get("nodes", [])):
+            for instance in node.get("instances", []):
+                node_of[int(instance.get("instance_id", len(node_of)))] = int(
+                    node.get("node_id", node_index))
+        # The simulator charges a cross-node handoff once per layer -- a
+        # point-to-point send after every kv_proj -- so its fixed part is
+        # ``layers x link_latency``, not one RTT.  Pricing only a single RTT
+        # understates it by the layer count and is exactly the kind of gap that
+        # let the LP pick a cross-domain pair the timeline then charged far
+        # more for (docs/模拟器与真机一致性核查.md 附四/附六).
+        num_layers = int(get_config(
+            raw_instances[0]["model_name"]).get("num_hidden_layers", 1))
+        pair_costs = {}
+        prefills = [i for i in raw_instances if i.get("pd_type") == "prefill"]
+        decodes = [i for i in raw_instances if i.get("pd_type") == "decode"]
+        for p in prefills:
+            for d in decodes:
+                same_node = node_of.get(int(p["instance_id"])) == node_of.get(int(d["instance_id"]))
+                pair_costs[f"{p['instance_id']},{d['instance_id']}"] = {
+                    "rtt_ms": 0.0 if same_node else link_latency_ms * num_layers,
+                    "bandwidth_bytes_per_s": 0.0 if same_node else link_bw_gbps * 1e9,
+                }
+        casr_config["pair_costs"] = pair_costs
     if args.casr_solver is not None:
         casr_config["solver"] = args.casr_solver
     casr_controller = (CASRController(int(args.casr_control_interval_ms * 1_000_000),
@@ -542,6 +603,15 @@ def main():
             raise NotImplementedError(f"Prefix storage type {prefix_storage} is not supported or memory size is invalid")
 
     schedulers = []
+    # One staging budget per run, shared by every Scheduler: the Prefill side
+    # gates on it, the Decode side releases it (see Scheduler.add_decode).
+    pd_staging = {}
+    pd_buffer_bytes = cluster.get("pd_buffer_bytes")
+    if pd_buffer_bytes:
+        print(f"  • PD staging buffer     : {float(pd_buffer_bytes) / 2**30:.1f} GiB")
+    if cluster.get("kv_egress_gbps"):
+        print(f"  • KV egress cap (GB/s)  : {cluster['kv_egress_gbps']} "
+              f"(handoff link charged at {cluster['handoff_link_bw']} GB/s)")
     for instance_id, instance in enumerate(instances):
         prefix_pool_index = prefix_pool_inst_mapping[instance_id]
         prefix_pool = None
@@ -571,6 +641,11 @@ def main():
             npu_memory_utilization=inst_cfg["npu_memory_utilization"],
             reserve_full_isl=inst_cfg["reserve_full_isl"],
             prefix_profiler=casr_profiler,
+            pd_buffer_bytes=pd_buffer_bytes,
+            pd_staging=pd_staging,
+            # Optional per-instance KV-pool calibration, e.g.
+            # ``"npu_mem": {"mem_size": 24, "kv_scale": 1.5}``.
+            kv_scale=float((instance.get("npu_mem") or {}).get("kv_scale", 1.0) or 1.0),
         ))
 
     # The derived KV capacity, not the utilization fraction, is what decides
@@ -604,7 +679,8 @@ def main():
     controller = Controller(total_npu)
     # Global Request Router
     router = Router(num_instances, schedulers, num_req, request_routing_policy,
-                    prefix_profiler=casr_profiler)
+                    prefix_profiler=casr_profiler,
+                    name_decode_at_arrival=domain_aware_links)
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)
@@ -705,8 +781,24 @@ def main():
     # Prefill batch.  Unlike the legacy adjacent receiver rank, the selected
     # Decode NPU is outside the Prefill instance's normal rank range, so its
     # workload has to be explicitly handed to that NPU on its next poll.
-    pd_ready_workloads = defaultdict(deque)  # decode_npu_id -> deque[(batch_id, workload_path)]
-    pd_receiver_batches = {}  # (decode_npu_id, batch_id) -> prefill scheduler
+    # The source scheduler rides along so the completion can be routed back to
+    # the Prefill batch that is waiting on it.
+    pd_ready_workloads = defaultdict(deque)  # decode_npu_id -> deque[(batch_id, path, source)]
+
+    # ASTRA-Sim reports one zero-based iteration counter per NPU, and that
+    # counter counts *every* workload this frontend runs on it: the startup
+    # event handler, each Prefill batch's receiver graph (which runs on the
+    # Decode NPU and unblocks the Prefill), each DP round's shared graph, and
+    # the instance's own batches.  ``Scheduler.add_done`` wants the instance's
+    # own batch id, not that mixed ordinal, so record the hand-over order and
+    # translate through it.  On an NPU that only ever runs its own batches the
+    # translation is the identity -- which is every configuration that existed
+    # before dynamic P/D handoffs.
+    npu_workload_log = defaultdict(list)  # npu -> [(instance_id, batch_id, kind, source)]
+    for _npu in range(total_npu):
+        # ASTRA-Sim begins by running the event-handler workload handed to it on
+        # the command line, on every NPU, before the first poll.
+        npu_workload_log[_npu].append((None, None, "event", None))
 
     # ----------------------------------- Start simulation loop ------------------------------------
     print_markup("[sim.heading]▶ Starting simulation...[/]\n")
@@ -727,9 +819,14 @@ def main():
         if dataset is not None:
             router.route_arrived_requests(current)
 
+        # P/D hand-offs a full Decode refused are retried here, every iteration:
+        # they cannot ride on Prefill completions, because a stalled Prefill
+        # produces none (see Router.retry_pending_handoffs).
+        router.retry_pending_handoffs(current)
+
         if casr_controller is not None and casr_controller.due(current):
             casr_plan = casr_controller.build_plan(current, casr_profiler, schedulers)
-            router.install_affinity_plan(casr_plan)
+            router.install_affinity_plan(casr_plan, casr_controller.last_flows)
             if args.casr_state_output is not None:
                 snapshot = casr_profiler.snapshot(current, schedulers)
                 snapshot["affinity_plan_version"] = casr_plan.version
@@ -759,17 +856,27 @@ def main():
             last_end_time[instance_id] = current
             waiting_request[instance_id] = True
 
-        # check request is done
-        prompt_t, gen_t, finished_reqs = schedulers[instance_id].add_done(id, sys, current)
+        # Which workload ASTRA-Sim just finished on this NPU. ``id`` is the
+        # NPU-local ordinal, so the hand-over log is what turns it back into an
+        # instance batch id.
+        work_log = npu_workload_log[sys]
+        finished_work = work_log[id] if 0 <= id < len(work_log) else None
+        work_kind = finished_work[2] if finished_work is not None else None
         # A dynamic receiver graph runs on the selected Decode NPU, but its
         # completion unblocks the originating Prefill batch.  Decode has no
         # Python request yet at this point, so route the completion explicitly
         # back to the source scheduler.
-        pd_source = pd_receiver_batches.pop((sys, id - 1), None)
-        if pd_source is not None:
-            _, _, pd_finished = pd_source.add_done(id, sys, current)
+        if work_kind == "pd":
+            pd_source = finished_work[3]
+            _, _, pd_finished = pd_source.add_done(finished_work[1] + 1, sys, current)
             if pd_finished:
                 router.transfer_prefill_request(pd_finished, current)
+        # check request is done
+        if work_kind == "own":
+            prompt_t, gen_t, finished_reqs = schedulers[instance_id].add_done(
+                finished_work[1] + 1, sys, current)
+        else:
+            prompt_t, gen_t, finished_reqs = 0, 0, []
         # add tokens in throughput
         prompt_th += prompt_t
         total_prompt += prompt_t
@@ -806,13 +913,16 @@ def main():
 
         # Hand over a workload pre-generated by a DP round this NPU opened.
         if pd_pending:
-            _, workload = pd_pending.popleft()
+            pd_batch_id, workload, pd_source = pd_pending.popleft()
             if not pd_pending:
                 del pd_ready_workloads[sys]
+            npu_workload_log[sys].append((instance_id, pd_batch_id, "pd", pd_source))
             controller.write_flush(p, workload)
             responded = True
         elif pending:
-            controller.write_flush(p, pending.popleft())
+            dp_batch_id, dp_workload = pending.popleft()
+            npu_workload_log[sys].append((instance_id, dp_batch_id, "own", None))
+            controller.write_flush(p, dp_workload)
             if not pending:
                 del dp_ready_workloads[sys]
             responded = True
@@ -917,12 +1027,14 @@ def main():
                                              workload_name=dp_workload_name,
                                              inputs_root=run_paths.inputs_root)
                         if batch.fired[0] == sys:
-                            own_workload = ready
+                            own_workload = (batch.batch_id, ready)
                         else:
-                            dp_ready_workloads[batch.fired[0]].append(ready)
+                            dp_ready_workloads[batch.fired[0]].append((batch.batch_id, ready))
 
                     if own_workload is not None:
-                        controller.write_flush(p, own_workload)
+                        own_batch_id, own_path = own_workload
+                        npu_workload_log[sys].append((instance_id, own_batch_id, "own", None))
+                        controller.write_flush(p, own_path)
                     else:
                         controller.write_flush(p, _pass_response(router, current, state_changed=True))
                     responded = True
@@ -1002,12 +1114,14 @@ def main():
                                                  workload_name=dp_workload_name,
                                                  inputs_root=run_paths.inputs_root)
                             if batch.fired[0] == sys:
-                                own_workload = ready
+                                own_workload = (batch.batch_id, ready)
                             else:
-                                dp_ready_workloads[batch.fired[0]].append(ready)
+                                dp_ready_workloads[batch.fired[0]].append((batch.batch_id, ready))
 
                         if own_workload is not None:
-                            controller.write_flush(p, own_workload)
+                            own_batch_id, own_path = own_workload
+                            npu_workload_log[sys].append((instance_id, own_batch_id, "own", None))
+                            controller.write_flush(p, own_path)
                         else:
                             controller.write_flush(p, _pass_response(router, current, state_changed=True))
                         responded = True
@@ -1043,8 +1157,9 @@ def main():
                             new_req.pd_decode_npu_offset is not None):
                         for target_npu in range(new_req.pd_decode_npu_offset,
                                                 new_req.pd_decode_npu_offset + new_req.pd_decode_npu_count):
-                            pd_ready_workloads[target_npu].append((new_req.batch_id, workload))
-                            pd_receiver_batches[(target_npu, new_req.batch_id)] = schedulers[instance_id]
+                            pd_ready_workloads[target_npu].append(
+                                (new_req.batch_id, workload, schedulers[instance_id]))
+                    npu_workload_log[sys].append((instance_id, new_req.batch_id, "own", None))
                     controller.write_flush(p, workload)
             else:
                 # Joined an existing batch: pick up its workload. workload_name
@@ -1072,6 +1187,9 @@ def main():
                     workload = get_workload(new_req, instances[instance_id]["hardware"], instance_id,
                                             workload_name=new_req.workload_name,
                                             inputs_root=run_paths.inputs_root)
+                    if os.environ.get("PD_DEBUG"):
+                        print(f"[handover] sys={sys} inst={instance_id} batch={new_req.batch_id} target={new_req.pd_decode_npu_offset} path={workload}", flush=True)
+                    npu_workload_log[sys].append((instance_id, new_req.batch_id, "own", None))
                     controller.write_flush(p, workload)
 
         # check time to store throughput (only print on start NPU to avoid transient states)
@@ -1348,6 +1466,22 @@ def main():
         print(f"Saving each request's information to output file: {output_file}")
         for i in range(num_instances):
             schedulers[i].save_output(output_file, is_append=False if i == 0 else True)
+
+    # P/D hand-off back-pressure: how often a Decode had to refuse a hand-off
+    # because its KV pool was full (the request waits and is retried, instead of
+    # aborting the run).  Reported per instance so a long-prompt run shows
+    # whether it was admission-limited.
+    blocked = {s.instance_id: s.backpressure_events for s in schedulers
+               if getattr(s, "backpressure_events", 0)}
+    if blocked:
+        print("P/D hand-off back-pressure (refused-then-retried, per instance): "
+              + ", ".join(f"instance {i}: {n}" for i, n in sorted(blocked.items())))
+    if getattr(router, "_counters", None):
+        routing = {key: router._counters[key] for key in sorted(router._counters)
+                   if key.startswith(("prefill_", "aggregate_"))}
+        if routing:
+            print("Prefill placement path (planned / plan-aggregate / fallback): "
+                  + ", ".join(f"{key}: {value}" for key, value in routing.items()))
 
     if casr_profiler is not None and args.casr_state_output is not None:
         snapshot = casr_profiler.snapshot(current, schedulers)

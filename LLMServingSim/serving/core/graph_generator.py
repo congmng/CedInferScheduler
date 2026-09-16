@@ -1,12 +1,17 @@
 import glob
 import hashlib
 import os
+import sys
 from collections import OrderedDict
 from time import time
 from .request import *
 from .logger import get_logger
 from .run_paths import input_path
 from .trace_generator import indexed_cols, write_trace
+
+# Repository root (``.../LLMServingSim``), used to reach the test helpers
+# (``tests/check_et_pairing.py``) from the opt-in graph gate.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = get_logger("GraphGenerator")
 
@@ -132,7 +137,62 @@ def _get_llm_converter():
     if _LLMConverter is None:
         from chakra.src.converter.llm_converter import LLMConverter
         _LLMConverter = LLMConverter
+        _log_converter_provenance()
     return _LLMConverter
+
+
+_CONVERTER_LOGGED = False
+
+
+def _log_converter_provenance():
+    """Record which chakra tree this run actually executes.
+
+    On 2026-09-15 every multi-domain run deadlocked at 0 tokens/s because the
+    handoff fix lived in the checked-out tree while the runtime imported a
+    three-day-old copy from ``site-packages`` (see
+    ``tests/test_chakra_runtime_sync.py``).  Printing the path and digest makes
+    that visible in every log instead of only in a post-mortem.
+    """
+    global _CONVERTER_LOGGED
+    if _CONVERTER_LOGGED:
+        return
+    _CONVERTER_LOGGED = True
+    try:
+        import chakra.src.converter.llm_converter as module
+        path = os.path.abspath(module.__file__)
+        with open(path, "rb") as handle:
+            digest = hashlib.sha1(handle.read()).hexdigest()[:12]
+        print(f"[graph] chakra converter: {path} (sha1 {digest})", flush=True)
+    except Exception as exc:  # noqa: BLE001 - provenance must never break a run
+        print(f"[graph] chakra converter provenance unavailable: {exc!r}",
+              flush=True)
+
+
+def _et_pairing_check(workload_dir, names):
+    """Opt-in send/recv pairing gate (``SIM_ET_PAIRING_CHECK=1``).
+
+    A mismatched pair is the deadlock shape: the sender names a rank that never
+    posts the recv, ASTRA-Sim blocks, and the run reports no progress at all.
+    Parsing the freshly written graphs costs milliseconds, so it is worth doing
+    before handing them to a simulation that would otherwise spin for minutes.
+    """
+    if os.environ.get("SIM_ET_PAIRING_CHECK", "0") not in ("1", "true", "True"):
+        return
+    sys.path.insert(0, os.path.join(REPO_ROOT, "tests"))
+    try:
+        import check_et_pairing
+    except Exception as exc:  # noqa: BLE001
+        print(f"[graph] ET pairing check unavailable: {exc!r}", flush=True)
+        return
+    paths = [os.path.join(workload_dir, name) for name in sorted(names)]
+    violations = check_et_pairing.check(paths)
+    if violations:
+        for item in violations[:10]:
+            print(f"[graph] ET PAIRING VIOLATION: {item}", flush=True)
+        raise RuntimeError(
+            f"{len(violations)} send/recv mismatches in {workload_dir}; "
+            "this graph would deadlock ASTRA-Sim")
+    logger.debug("[graph] ET pairing OK (%d files)", len(paths))
 
 
 def generate_graph(batch, hardware, num_npus, node_id=0, instance_id=0, npu_offset=0, enable_local_offloading=False, event=False, workload_name=None, inputs_root=None, save_trace_text=False, *, trace):
@@ -183,5 +243,7 @@ def generate_graph(batch, hardware, num_npus, node_id=0, instance_id=0, npu_offs
     )
     converter.convert_rows(trace.header_line, indexed_cols(trace.rows))
 
-    _cache_store(cache_key, _et_names(workload_dir) - before)
+    written = _et_names(workload_dir) - before
+    _et_pairing_check(workload_dir, written)
+    _cache_store(cache_key, written)
     return

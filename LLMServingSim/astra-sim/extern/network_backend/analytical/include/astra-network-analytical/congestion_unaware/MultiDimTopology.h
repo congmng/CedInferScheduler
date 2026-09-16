@@ -56,8 +56,15 @@ class MultiDimTopology : public Topology {
 
     /**
      * Given src and dest address in multi-dimensional form,
-     * return the dimension where the transfer should happen.
-     * i.e., the dimension where the src and dest addresses differ.
+     * return the dimension where the transfer should happen: the *outermost*
+     * dimension in which the two addresses differ.
+     *
+     * Dimension 0 is the innermost level of the hierarchy and
+     * ``dims_count - 1`` the outermost. A send that crosses several levels is
+     * carried by the highest level it has to cross, so the outermost
+     * difference is the one that pays. Transfers that differ in a single
+     * dimension -- every collective, and any pair inside one node -- are
+     * unaffected by the choice.
      *
      * @param src_address src NPU ID in multi-dimensional form
      * @param dest_address dest NPU ID in multi-dimensional form

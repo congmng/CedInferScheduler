@@ -3,6 +3,7 @@ import json
 import random
 from collections import defaultdict
 from .logger import get_logger
+from .block_pool import NONE_HASH
 
 
 class Router:
@@ -13,6 +14,7 @@ class Router:
             routing_policy="RR",
             seed=42,
             prefix_profiler=None,
+            name_decode_at_arrival=False,
     ):
         self.schedulers = schedulers
         self.num_instances = num_instances
@@ -24,8 +26,18 @@ class Router:
         self.prefix_profiler = prefix_profiler
         self.affinity_plan = None
         self._plan_assignments = defaultdict(int)
+        # P/D handoffs a Decode refused because its KV pool was full; retried
+        # on the next transfer call (see ``transfer_prefill_request``).
+        self._pending_handoffs = []
+        self._counters = {}
+        # Aggregate Prefill split of the installed plan; used for classes the
+        # plan cannot name (see ``install_affinity_plan``).
+        self._plan_prefill_totals = {}
         self.routing_policy = routing_policy.upper()
         self.seed = seed
+        # Only the domain-aware cluster configs name the Decode half of every
+        # pair up front; see ``_decode_instance_id_for``.
+        self.name_decode_at_arrival = name_decode_at_arrival
         self._rnd = random.Random(seed) if seed is not None else random
         self.prefill_rr_counter = 0
         self.decode_rr_counter = 0
@@ -46,6 +58,12 @@ class Router:
         elif self.routing_policy == "RAND":
             self._select_instance = self._rand_select
         elif self.routing_policy == "LOAD":
+            self._select_instance = self._least_load_select
+        elif self.routing_policy == "CACHE_AWARE":
+            # SGLang Router's ``cache_aware`` policy: longest prefix match wins,
+            # and traffic overflows to the least-loaded instance once the
+            # matched one is busy.  This is the SOTA *routing* baseline the real
+            # cluster compares against, and it was missing here.
             self._select_instance = self._least_load_select
         elif self.routing_policy == "CUSTOM":
             self._select_instance = self._custom_select
@@ -101,6 +119,63 @@ class Router:
     def _custom_select(self, schedulers, role):
         raise NotImplementedError("Implement custom routing policy.")
 
+    # -- SGLang-style cache-aware routing (prefill side) -------------------
+
+    #: An instance whose normalized load reaches this value is "busy"; a
+    #: matching-but-busy instance loses to a slightly worse match that is idle.
+    CACHE_AWARE_OVERFLOW = 0.75
+
+    def _prefix_hit_blocks(self, sched, req_data):
+        """How many leading blocks of this request the instance already holds.
+
+        Mirrors ``request_block_hashes`` (same chained hash) but stops at the
+        first miss, so it is a routing-time probe rather than an allocation.
+        """
+        kv = getattr(sched, "kv", None)
+        if kv is None or not getattr(kv, "enable_caching", False):
+            return 0
+        tokens = req_data.get("input_hash_ids") or []
+        block_size = int(getattr(kv, "block_size", 0) or 0)
+        if not tokens or block_size <= 0:
+            return 0
+        parent = NONE_HASH
+        hits = 0
+        for start in range(0, len(tokens) - block_size + 1, block_size):
+            parent = hash((parent, tuple(tokens[start:start + block_size])))
+            if kv.npu_pool.get_cached_block(parent) is None:
+                break
+            hits += 1
+        return hits
+
+    def _cache_aware_select(self, schedulers, role, req_data=None):
+        """Longest prefix match with load-based overflow (SGLang semantic).
+
+        Mirrors the real router's ``_pick_cache_aware`` exactly, including its
+        tie-break: rank the owners of the longest matching prefix by the load
+        this request would create (``inflight + 1`` over capacity), and only
+        spill to the least-loaded instance when the best owner is busy.  The
+        earlier version returned the first idle owner in list order, so the
+        simulator and the real baseline could disagree on the same input.
+        """
+        if role != "prefill" or req_data is None:
+            return self._least_load_select(schedulers, role)
+        hits = [self._prefix_hit_blocks(sched, req_data) for sched in schedulers]
+        best = max(hits)
+        if best <= 0:
+            return self._least_load_select(schedulers, role)
+
+        def queued(idx):
+            sched = schedulers[idx]
+            return len(sched.waiting) * 4 + len(sched.running)
+
+        owners = [idx for idx, hit in enumerate(hits) if hit == best]
+        chosen = min(owners, key=lambda idx: (
+            (queued(idx) + 1) / max(1, schedulers[idx].max_num_seqs or 1), idx))
+        ratio = queued(chosen) / max(1, schedulers[chosen].max_num_seqs or 1)
+        if ratio < self.CACHE_AWARE_OVERFLOW:
+            return chosen
+        return self._least_load_select(schedulers, role)
+
     @staticmethod
     def _least_loaded(candidates):
         """Choose an eligible scheduler, retaining vLLM-style load scoring."""
@@ -111,13 +186,59 @@ class Router:
                                 else 1), sched.instance_id),
         )
 
-    def install_affinity_plan(self, plan):
-        """Atomically replace the slow-layer plan used for future requests."""
+    def install_affinity_plan(self, plan, flows=()):
+        """Atomically replace the slow-layer plan used for future requests.
+
+        ``flows`` (the solver's per-class rate assignments) are used to derive
+        the aggregate Prefill split.  Per-class *shares* are the wrong statistic
+        for that: classes are single-homed at low demand, so summing shares
+        gives every class the same weight and the aggregate ends up near
+        "all on the cheapest worker", while the plan's *rate* intent may put a
+        fifth of the load on a different one.  Measured 2026-09-15: the plan
+        asked for 1.81 / 8.86 req/s on the fresh worker, yet that worker stayed
+        idle (run 0, wait 0) while two others queued 82 and 74 requests.
+        """
         self.affinity_plan = plan
         self._plan_assignments.clear()
+        # Aggregate Prefill split of the plan.  A class the plan cannot name
+        # (every request of a unique-prompt workload is its own class, so most
+        # arrivals land here) still has to follow the *intended* load split --
+        # otherwise the router falls back to least-loaded and the workers the
+        # plan just asked for receive nothing.  Measured 2026-09-15: with three
+        # workers active the plan put 20% of the flow on the newest one, yet it
+        # served 0 of 200 requests and the elastic run matched the static one
+        # millisecond for millisecond.
+        totals = defaultdict(float)
+        for flow in (flows or ()):
+            value = getattr(flow, "flow", None)
+            if value is None and isinstance(flow, dict):
+                value = flow.get("flow")
+            instance_id = getattr(flow, "prefill_id", None)
+            if instance_id is None and isinstance(flow, dict):
+                instance_id = flow.get("prefill_id")
+            if instance_id is None or value is None or float(value) <= 0.0:
+                continue
+            totals[int(instance_id)] += float(value)
+        if not totals:
+            for weights in (getattr(plan, "prefill_weights", {}) or {}).values():
+                for instance_id, weight in (weights or {}).items():
+                    totals[int(instance_id)] += float(weight or 0.0)
+        total = sum(totals.values())
+        self._plan_prefill_totals = ({instance_id: weight / total
+                                      for instance_id, weight in totals.items()}
+                                     if total > 0 else {})
 
     def _select_weighted(self, candidates, weights, assignment_key):
-        """Approximate a fractional plan with deterministic deficit routing."""
+        """Approximate a fractional plan with deterministic deficit routing.
+
+        Mirrors ``deploy/real_lmcache_pd/disagg_router._select_weighted``: the
+        plan sets the *ratios*, and any candidate within a small band of the
+        best deficit score is ordered by the current queue.  Without the band,
+        deficit routing sends a run of consecutive requests to one instance
+        (invisible when idle, a p95 tail under load -- measured 2026-09-13:
+        identical pair shares but p95 3973 ms for the plan replay against
+        3186 ms for the queue-aware heuristic).
+        """
         total = sum(self._plan_assignments[(assignment_key, sched.instance_id)]
                     for sched in candidates)
         def score(sched):
@@ -125,8 +246,9 @@ class Router:
             desired = weights[sched.instance_id] * (total + 1)
             return desired - observed
         highest = max(score(sched) for sched in candidates)
+        band = max(1.0, abs(highest)) * 0.05
         selected = self._least_loaded([sched for sched in candidates
-                                       if score(sched) == highest])
+                                       if score(sched) >= highest - band])
         self._plan_assignments[(assignment_key, selected.instance_id)] += 1
         return selected
 
@@ -156,6 +278,25 @@ class Router:
         candidates = [sched for sched in self.decode_schedulers
                       if sched.accepts_new_requests and sched.instance_id in fallback_ids]
         return self._least_loaded(candidates) if candidates else None
+
+    def _decode_instance_id_for(self, request, current_time_ns):
+        """Decode instance the arriving request is paired with, or ``None``.
+
+        Mirrors what ``transfer_prefill_request`` does after the Prefill
+        completes -- the affinity plan first, then the routing policy -- but
+        runs at arrival so the Prefill graph has a real receiver NPU to send
+        its KV to.
+        """
+        if not self.decode_schedulers:
+            return None
+        planned = self._select_planned_decode(request, current_time_ns)
+        if planned is not None:
+            return planned.instance_id
+        eligible = [candidate for candidate in self.decode_schedulers
+                    if candidate.accepts_new_requests]
+        if not eligible:
+            return None
+        return eligible[self._select_instance(eligible, "decode")].instance_id
 
     def _decorate_req_data(self, req_data):
         if self.prefix_profiler is None:
@@ -278,12 +419,37 @@ class Router:
                 break
 
             sched = self._select_planned_prefill(req_data, current_time_ns)
+            self._counters["prefill_planned"] = (
+                self._counters.get("prefill_planned", 0) + (1 if sched is not None else 0))
+            if sched is None and self._plan_prefill_totals:
+                # The plan does not name this class; follow its aggregate split
+                # instead of dropping straight to least-loaded (see
+                # ``install_affinity_plan``).
+                candidates = [candidate for candidate in self.prefill_schedulers
+                              if candidate.accepts_new_requests
+                              and candidate.instance_id in self._plan_prefill_totals]
+                if candidates:
+                    sched = self._select_weighted(
+                        candidates, self._plan_prefill_totals,
+                        ("prefill_aggregate",))
+                    self._counters["prefill_aggregate"] = (
+                        self._counters.get("prefill_aggregate", 0) + 1)
+                    self._counters[f"aggregate_pick_{sched.instance_id}"] = (
+                        self._counters.get(f"aggregate_pick_{sched.instance_id}", 0) + 1)
+                    if len(self._plan_prefill_totals) > 1:
+                        self._counters["aggregate_multi_weight"] = (
+                            self._counters.get("aggregate_multi_weight", 0) + 1)
             if sched is None:
+                self._counters["prefill_fallback"] = (
+                    self._counters.get("prefill_fallback", 0) + 1)
                 eligible = [candidate for candidate in self.prefill_schedulers
                             if candidate.accepts_new_requests]
                 if not eligible:
                     break
-                instance_id = self._select_instance(eligible, "prefill")
+                if self.routing_policy == "CACHE_AWARE":
+                    instance_id = self._cache_aware_select(eligible, "prefill", req_data)
+                else:
+                    instance_id = self._select_instance(eligible, "prefill")
                 sched = eligible[instance_id]
 
             request = sched.add_request([
@@ -293,13 +459,19 @@ class Router:
                 req_data.get('input_hash_ids', []), req_data.get('output_hash_ids', []),
                 req_data['class_id'], req_data['prefix_id'],
             ], is_init=self._is_init)
-            # Decode affinity is applied at the completed-Prefill handoff in
-            # ``transfer_prefill_request``.  The ASTRA-Sim P/D backend owns a
-            # legacy adjacent KV receiver rank while Prefill is executing, so
-            # selecting a non-adjacent Decode rank here would generate a graph
-            # that the backend cannot legally dispatch.  Delaying the choice
-            # keeps the physical KV protocol correct and still makes Decode
-            # admission class-aware.
+            if self.name_decode_at_arrival:
+                # Pick the Decode half of the pair now, the way the real router
+                # does (``disagg_router._pick_decode`` runs on the same request
+                # before anything is dispatched).  This is not just
+                # bookkeeping: the Prefill graph sends its per-layer KV to
+                # *this* Decode's NPU, so the choice is what the network model
+                # charges.  Leaving it to the post-Prefill handoff made every
+                # KV send target the Prefill instance's own adjacent NPU -- an
+                # intra-node hop -- and the cross-domain link the solver priced
+                # was never actually paid in the timeline (see
+                # docs/模拟器与真机一致性核查.md 附七).
+                request.decode_instance_id = self._decode_instance_id_for(
+                    request, current_time_ns)
             if self.prefix_profiler is not None:
                 self.prefix_profiler.observe_arrival(
                     request, sched.instance_id, current_time_ns)
@@ -412,7 +584,15 @@ class Router:
             )
 
     def transfer_prefill_request(self, requests, current_time_ns=0):
-        for req in requests:
+        # A Decode whose KV pool is full refuses the handoff (``add_decode``
+        # returns False); keep those requests here and retry them on the next
+        # call instead of dropping them or aborting the run.  This is the
+        # simulator's back-pressure: the request's KV is already in flight, so
+        # the wait is charged to the Decode, exactly as the real deployment's
+        # PD buffer does.
+        queue = list(self._pending_handoffs) + list(requests)
+        self._pending_handoffs = []
+        for req in queue:
             sched = next((candidate for candidate in self.decode_schedulers
                           if candidate.instance_id == req.decode_instance_id
                           and candidate.accepts_new_requests), None)
@@ -427,4 +607,23 @@ class Router:
                 sched = eligible[instance_id]
             if self.affinity_plan is not None:
                 req.affinity_version = self.affinity_plan.version
-            sched.add_decode(req)
+            if not sched.add_decode(req):
+                self._pending_handoffs.append(req)
+                self._counters["handoff_backpressure"] = (
+                    self._counters.get("handoff_backpressure", 0) + 1)
+        return tuple(self._pending_handoffs)
+
+    def retry_pending_handoffs(self, current_time_ns=0):
+        """Re-attempt hand-offs whose Decode was full.
+
+        ``transfer_prefill_request`` is only called when a Prefill *finishes*
+        something, so a pending hand-off that is waiting on a full Decode would
+        never be retried once the Prefill goes idle -- measured 2026-09-15: a
+        long-prompt run drained to "Prefill instance 4: Waiting 59, Running 0"
+        with zero throughput and the simulated clock still advancing.  The main
+        loop calls this every iteration, which is what makes the back-pressure
+        progress rather than deadlock.
+        """
+        if not self._pending_handoffs:
+            return ()
+        return self.transfer_prefill_request((), current_time_ns)
