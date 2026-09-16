@@ -28,6 +28,7 @@ import json
 import pathlib
 import statistics
 import subprocess
+import time
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -305,6 +306,16 @@ def build_placement(real_dir, policy, names):
     return placement
 
 
+def _git_revision():
+    """HEAD of the simulator checkout, so a matrix can prove freshness."""
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO,
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except Exception:                                   # noqa: BLE001
+        return "unknown"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--real-dir", required=True)
@@ -372,6 +383,15 @@ def main() -> int:
         print(f"{'':<12}{'sim':<5}{sim['n']:>5}{sim['e2e_p50']:>10.1f}"
               f"{sim['e2e_p95']:>10.1f}{sim['ttft_p50']:>10.1f}{sim['tpot_p50']:>10.1f}"
               f"   {sim['exchange']} / {sim['served']}   ({ratio:.2f}x)")
+    report["_meta"] = {
+        "replay_placement": bool(args.replay_placement),
+        "replay_client_pacing": bool(args.replay_client_pacing),
+        "client_concurrency": int(args.client_concurrency or 0),
+        "cluster_config": str(args.cluster_config),
+        "real_dir": str(real_dir),
+        "simulator_revision": _git_revision(),
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
     (out_dir / "alignment.json").write_text(json.dumps(report, indent=2),
                                             encoding="utf-8")
     print(f"\nwrote {out_dir / 'alignment.json'}")

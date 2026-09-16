@@ -1,0 +1,575 @@
+{
+  "num_nodes": 6,
+  "link_bw": 0.11,
+  "link_latency": 48000000,
+  "intra_node_link_bw": 0.257,
+  "intra_node_link_latency": 1000,
+  "kv_egress_gbps": 0.26,
+  "pd_buffer_bytes": 34359738368,
+  "_generated": "Derived from the profiler bundles by tests/make_hetero_cluster.py: the per-instance service times and capacities are the profiled engine rates, so the plan is priced against what the timeline executes.  Link numbers are the deployment's measured ones.",
+  "_link_comment": "Same-host P/D handoff 0.257 GB/s (measured 585 ms per 1000 prompt tokens), cross-domain 0.11 GB/s at 48 ms RTT, producer push ceiling 0.26 GB/s (measured 239-314 MB/s).",
+  "nodes": [
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 0,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 1,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 2,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 3,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX5090",
+          "npu_mem": {
+            "mem_size": 32,
+            "mem_bw": 1792,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 4,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 5,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX4090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 1008,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 6,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 7,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 8,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 9,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "RTX3090",
+          "npu_mem": {
+            "mem_size": 24,
+            "mem_bw": 936,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    },
+    {
+      "num_instances": 2,
+      "cpu_mem": {
+        "mem_size": 128,
+        "mem_bw": 256,
+        "mem_latency": 0
+      },
+      "instances": [
+        {
+          "instance_id": 10,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "A100",
+          "npu_mem": {
+            "mem_size": 80,
+            "mem_bw": 2039,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "prefill",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        },
+        {
+          "instance_id": 11,
+          "model_name": "Qwen/Qwen3-8B",
+          "hardware": "A100",
+          "npu_mem": {
+            "mem_size": 80,
+            "mem_bw": 2039,
+            "mem_latency": 0,
+            "mem_util": 0.9
+          },
+          "pd_type": "decode",
+          "tp_size": 1,
+          "enable_prefix_caching": true
+        }
+      ]
+    }
+  ],
+  "casr": {
+    "solver": "lp",
+    "control_interval_s": 1.0,
+    "lifecycle": {
+      "min_active_prefill": 2,
+      "max_active_prefill": 6,
+      "warmup_ms": 45000,
+      "scale_on_demand": false,
+      "prefill_capacity": {
+        "0": 9.337,
+        "2": 9.337,
+        "4": 6.583,
+        "6": 2.745,
+        "8": 2.745,
+        "10": 12.993
+      },
+      "prefill_tokens_per_s": {
+        "0": 9560.9,
+        "2": 9560.9,
+        "4": 6741.2,
+        "6": 2810.6,
+        "8": 2810.6,
+        "10": 13304.9
+      },
+      "capacity_reference_tokens": 1024,
+      "kv_egress_gbps": 0.26
+    },
+    "structural": {
+      "evaluation_window_ms": 60000.0,
+      "gain_threshold_abs": 0.001,
+      "gain_threshold_rel": 0.01,
+      "dwell_time_ms": 3000.0,
+      "startup_cost": 0.0,
+      "warm_cost": 0.0,
+      "enabled": false,
+      "startup_s": 45.0,
+      "idle_cost_fraction": 0.1,
+      "enable_warm_counterfactual": false
+    },
+    "resources": {
+      "startup_ms": 45000,
+      "reclaim_ms": 50,
+      "nodes": {
+        "0": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            32,
+            32
+          ]
+        },
+        "1": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            32,
+            32
+          ]
+        },
+        "2": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "3": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "4": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            24,
+            24
+          ]
+        },
+        "5": {
+          "gpu_count": 2,
+          "gpu_mem_gb": [
+            80,
+            80
+          ]
+        }
+      }
+    },
+    "prefill_capacity": {
+      "0": 9.337,
+      "2": 9.337,
+      "4": 6.583,
+      "6": 2.745,
+      "8": 2.745,
+      "10": 12.993
+    },
+    "decode_capacity": {
+      "1": 4.213,
+      "3": 4.213,
+      "5": 2.439,
+      "7": 2.012,
+      "9": 2.012,
+      "11": 5.773
+    },
+    "prefill_service_ms": {
+      "0": 107.103,
+      "2": 107.103,
+      "4": 151.903,
+      "6": 364.333,
+      "8": 364.333,
+      "10": 76.964
+    },
+    "decode_service_ms": {
+      "1": 237.381,
+      "3": 237.381,
+      "5": 409.985,
+      "7": 497.104,
+      "9": 497.104,
+      "11": 173.227
+    },
+    "router_capacity": {
+      "0": 149.4,
+      "1": 67.4,
+      "2": 149.4,
+      "3": 67.4,
+      "4": 105.3,
+      "5": 39.0,
+      "6": 43.9,
+      "7": 32.2,
+      "8": 43.9,
+      "9": 32.2,
+      "10": 207.9,
+      "11": 92.4
+    },
+    "prefill_tokens_per_s": {
+      "0": 9560.9,
+      "2": 9560.9,
+      "4": 6741.2,
+      "6": 2810.6,
+      "8": 2810.6,
+      "10": 13304.9
+    },
+    "capacity_reference_tokens": 1024,
+    "decode_reference_tokens": 16,
+    "overflow_penalty": 10,
+    "utilization_weight": 1.0,
+    "utilization_segments": 8,
+    "compute_weight": 1.0,
+    "network_weight": 1.0,
+    "single_home_below_rps": 1.0,
+    "kv_bytes_per_token": 147456,
+    "shared_links": [
+      {
+        "id": "kvlink-d0-5090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            3
+          ],
+          [
+            0,
+            5
+          ],
+          [
+            0,
+            7
+          ],
+          [
+            0,
+            9
+          ],
+          [
+            0,
+            11
+          ]
+        ]
+      },
+      {
+        "id": "kvlink-d1-5090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            2,
+            9
+          ],
+          [
+            2,
+            11
+          ]
+        ]
+      },
+      {
+        "id": "kvlink-d2-4090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            4,
+            1
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            4,
+            7
+          ],
+          [
+            4,
+            9
+          ],
+          [
+            4,
+            11
+          ]
+        ]
+      },
+      {
+        "id": "kvlink-d3-3090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            6,
+            1
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            6,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            6,
+            9
+          ],
+          [
+            6,
+            11
+          ]
+        ]
+      },
+      {
+        "id": "kvlink-d4-3090",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            8,
+            1
+          ],
+          [
+            8,
+            3
+          ],
+          [
+            8,
+            5
+          ],
+          [
+            8,
+            7
+          ],
+          [
+            8,
+            9
+          ],
+          [
+            8,
+            11
+          ]
+        ]
+      },
+      {
+        "id": "kvlink-d5-a100",
+        "capacity_bytes_per_s": 260000000.0,
+        "pairs": [
+          [
+            10,
+            1
+          ],
+          [
+            10,
+            3
+          ],
+          [
+            10,
+            5
+          ],
+          [
+            10,
+            7
+          ],
+          [
+            10,
+            9
+          ],
+          [
+            10,
+            11
+          ]
+        ]
+      }
+    ],
+    "local_prefill": "never"
+  }
+}
