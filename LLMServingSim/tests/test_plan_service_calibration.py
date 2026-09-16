@@ -21,7 +21,8 @@ import unittest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from serving.core.hw_service import rescale_service_times, step_cost_ns  # noqa: E402
+from serving.core.hw_service import (rescale_capacities, rescale_service_times,
+                                     step_cost_ns)  # noqa: E402
 
 
 class _UnderAstraSim(unittest.TestCase):
@@ -34,9 +35,25 @@ class _UnderAstraSim(unittest.TestCase):
     def tearDown(self):
         os.chdir(self._cwd)
 
+    def _instances(self):
+        return [
+            {"instance_id": 0, "hardware": "RTX5090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "prefill"},
+            {"instance_id": 1, "hardware": "RTX5090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "decode"},
+            {"instance_id": 2, "hardware": "RTX3090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "prefill"},
+            {"instance_id": 3, "hardware": "RTX3090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "decode"},
+            {"instance_id": 4, "hardware": "RTX4090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "prefill"},
+            {"instance_id": 5, "hardware": "RTX4090", "model_name": "Qwen/Qwen3-8B",
+             "tp_size": 1, "pd_type": "decode"},
+        ]
+
 
 class StepCostTests(_UnderAstraSim):
-    def test_a_decode_step_is_a_weight_read(self):
+    def test_a_step_cost_matches_the_measured_cluster(self):
         """One card's step cost ranks the cards the way the cluster does.
 
         Measured TPOT at 1250-token prompts: d5090 14.5-15.0 ms, d4090
@@ -46,23 +63,21 @@ class StepCostTests(_UnderAstraSim):
                  for hw in ("RTX5090", "RTX4090", "RTX3090")}
         self.assertLess(costs["RTX5090"], costs["RTX4090"])
         self.assertLess(costs["RTX4090"], costs["RTX3090"])
+        # The absolute level is the engine's, not a proxy: the 5090's 41-token
+        # Decode at 15 ms/step is what the cluster reports as TPOT.
+        self.assertAlmostEqual(costs["RTX5090"] / 1e6, 14.8, delta=1.0)
         # 5090 -> 4090 measured 1.70x on the cluster, profiled ~1.70x.
         self.assertGreater(costs["RTX4090"] / costs["RTX5090"], 1.5)
         self.assertLess(costs["RTX4090"] / costs["RTX5090"], 1.95)
 
+    def test_prefill_cost_scales_with_the_prompt(self):
+        short = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1)
+        long = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1024)
+        self.assertGreater(long / short, 5.0)
+        self.assertAlmostEqual(long / 1e6, 107.0, delta=10.0)
+
 
 class RescaleServiceTimesTests(_UnderAstraSim):
-    def _instances(self):
-        return [
-            {"instance_id": 0, "hardware": "RTX5090", "model_name": "Qwen/Qwen3-8B",
-             "tp_size": 2, "pd_type": "prefill"},
-            {"instance_id": 1, "hardware": "RTX5090", "model_name": "Qwen/Qwen3-8B",
-             "tp_size": 1, "pd_type": "decode"},
-            {"instance_id": 3, "hardware": "RTX3090", "model_name": "Qwen/Qwen3-8B",
-             "tp_size": 1, "pd_type": "decode"},
-            {"instance_id": 5, "hardware": "RTX4090", "model_name": "Qwen/Qwen3-8B",
-             "tp_size": 1, "pd_type": "decode"},
-        ]
 
     def test_the_anchor_keeps_its_measured_value_and_the_rest_follow_the_profiler(self):
         config = {"decode_service_ms": {"1": 144.7, "3": 421.6, "5": 157.1}}
@@ -88,6 +103,24 @@ class RescaleServiceTimesTests(_UnderAstraSim):
             rescale_service_times(config, self._instances(), "decode_service_ms",
                                   verbose=False),
             {})
+
+
+class CapacityTests(_UnderAstraSim):
+    """Capacities are requests/s of reference-length work, at engine speed."""
+
+    def test_capacity_comes_from_the_profiled_step(self):
+        config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024}
+        prefill, decode = rescale_capacities(config, self._instances(), verbose=False)
+        # One 5090: 16 reference output tokens x ~14.8 ms per step.
+        self.assertAlmostEqual(decode[1], 1000.0 / (16 * 14.84), delta=0.3)
+        # A 1024-token prefill costs ~107 ms, so ~9 reference requests/s.
+        self.assertAlmostEqual(prefill[0], 1000.0 / 107.1, delta=1.0)
+        self.assertLess(decode[5], decode[1])
+        # Slower card, lower capacity: 3090a (2) < 4090 (4) < 5090 (0).
+        self.assertLess(prefill[2], prefill[4])
+        self.assertLess(prefill[4], prefill[0])
+        self.assertEqual(sorted(config["prefill_capacity"]), ["0", "2", "4"])
+        self.assertEqual(sorted(config["decode_capacity"]), ["1", "3", "5"])
 
 
 if __name__ == "__main__":

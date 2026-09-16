@@ -561,11 +561,19 @@ def main():
         # (d4090 157 ms against d5090 145 ms) while both the profiler and the
         # cluster's own measured TPOT put the 4090 at ~1.7x (see
         # serving/core/hw_service.py).
-        from serving.core.hw_service import rescale_service_times
+        from serving.core.hw_service import rescale_capacities, rescale_service_times
         rescale_service_times(casr_config, instances, "decode_service_ms", tokens=1)
         rescale_service_times(
             casr_config, instances, "prefill_service_ms",
             tokens=int(casr_config.get("capacity_reference_tokens", 1024) or 1024))
+        # Off by default: the profiled capacity is ~16x below the declared
+        # one (4.2 against 65 reference-length requests/s on a 5090), and
+        # turning it on today makes the router spill traffic cross-domain to
+        # escape an engine queue the real router prices as a *link* queue.
+        # The numbers and the experiment are in
+        # docs/模拟器与真机一致性核查.md 附十之十五.
+        if casr_config.get("capacity_from_profile"):
+            rescale_capacities(casr_config, instances)
     casr_controller = (CASRController(int(args.casr_control_interval_ms * 1_000_000),
                                       policy=casr_config,
                                       policy_spec=args.casr_policy)
