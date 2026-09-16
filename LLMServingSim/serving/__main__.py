@@ -365,6 +365,10 @@ def main():
                         help='number of entries (requests or sessions) to load from the dataset. '
                         'For agentic datasets, each entry is a session with multiple sub-requests. '
                         '0 = load all entries')
+    parser.add_argument('--max-output-tokens', type=int, default=0,
+                        help='cap generated tokens per request (0 = use the trace). '
+                        'The real comparison client runs with 16, so a replay that '
+                        'must match it has to cap here too.')
     parser.add_argument('--log-interval', type=float, default=1.0,
                         help='interval in seconds between throughput/memory usage log messages')
     parser.add_argument('--log-level', type=str, choices=['WARNING', 'INFO', 'DEBUG'], default='WARNING',
@@ -680,7 +684,8 @@ def main():
     # Global Request Router
     router = Router(num_instances, schedulers, num_req, request_routing_policy,
                     prefix_profiler=casr_profiler,
-                    name_decode_at_arrival=domain_aware_links)
+                    name_decode_at_arrival=domain_aware_links,
+                    policy_options=casr_config)
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)
@@ -688,7 +693,9 @@ def main():
         power_model = None
     # Load requests into router (routed in real-time during simulation)
     if dataset != None:
-        router.load_requests(dataset, enable_prefix_caching=any_prefix_caching, is_init=is_init)
+        router.load_requests(dataset, enable_prefix_caching=any_prefix_caching,
+                             is_init=is_init,
+                             max_output_tokens=args.max_output_tokens)
     else:
         # Manually adding request (legacy: route all upfront)
         for i in range(16):

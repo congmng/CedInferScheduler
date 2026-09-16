@@ -317,6 +317,22 @@ def build(real=None, template=None, keep_nonuniform=False, kv_heavy=False,
                 "class_demand_floor_rps", "plan_uncovered_penalty"):
         if key in real_casr:
             casr[key] = real_casr[key]
+    # P/D handoff vs local recompute.  The real router decides this per request
+    # (``disagg_router.kv_exchange_decision``) and defaults to ``auto``; the
+    # constants are the ones calibrated on the deployment
+    # (``tests/calibrate_native_pd.py``, 2026-09-13) and exposed as env knobs
+    # there.  They belong in the config so a generated simulator run makes the
+    # same choice the recorded real run made: measured 2026-09-16, the real
+    # ``load`` arm answered 200/200 requests by recomputing locally
+    # (``prefill_ms`` p50 = 0) while the simulator shipped every KV.
+    casr.setdefault("local_prefill", real_casr.get("local_prefill", "auto"))
+    for key, default in (("local_prefill_ms_per_1k", 93.0),
+                         ("transfer_ms_per_1k_local", 585.0),
+                         ("transfer_ms_per_1k_cross", 1351.0),
+                         ("transfer_fixed_ms_cross", 48.0),
+                         ("local_prefill_queue_weight", 1.0),
+                         ("local_prefill_queue_cap", 3.0)):
+        casr.setdefault(key, real_casr.get(key, default))
     tokens_per_s = real_casr.get("prefill_tokens_per_s") or {}
     if tokens_per_s:
         casr["prefill_tokens_per_s"] = {

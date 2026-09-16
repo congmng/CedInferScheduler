@@ -2,6 +2,7 @@ import bisect
 import json
 import random
 from collections import defaultdict
+from types import SimpleNamespace
 from .logger import get_logger
 from .block_pool import NONE_HASH
 
@@ -15,6 +16,7 @@ class Router:
             seed=42,
             prefix_profiler=None,
             name_decode_at_arrival=False,
+            policy_options=None,
     ):
         self.schedulers = schedulers
         self.num_instances = num_instances
@@ -41,6 +43,45 @@ class Router:
         self._rnd = random.Random(seed) if seed is not None else random
         self.prefill_rr_counter = 0
         self.decode_rr_counter = 0
+        # P/D handoff vs local recompute.  The real router decides this per
+        # request (``disagg_router.kv_exchange_decision``): moving KV costs
+        # 585 ms (same host) / 1351 ms (cross host, +48 ms fixed) per 1000
+        # prompt tokens while the Decode prefilling the prompt itself costs
+        # ~93 ms/1k.  The simulator used to *always* hand the KV over, which
+        # put it on the egress budget instead of on compute and made short
+        # prompts 25x slower than the measured cluster (2026-09-16: the real
+        # ``load`` arm answered 200/200 requests on the local path).
+        # ``never`` (the default here) keeps the historical behaviour so
+        # existing configs and comparisons are unchanged; the deployment-derived
+        # configs opt in with ``casr.local_prefill: auto``.
+        options = dict(policy_options or {})
+        self.local_prefill_mode = str(options.get("local_prefill", "never")).lower()
+        # Per-instance capacity from the deployment-derived config.  The real
+        # router's ``load`` policy ranks candidates by
+        # ``(inflight + 1) / capacity``; the simulator normalized by
+        # ``max_num_seqs`` instead, which is the *same* number for every
+        # instance and therefore degenerates into round-robin.  Measured
+        # 2026-09-16 on the 3-domain run: the real Decode split was
+        # 112/73/15 (proportional to 230/191/90), the simulator's 98/47/55.
+        self.capacity_tables = {
+            "prefill": {int(key): float(value) for key, value in
+                        (options.get("prefill_capacity") or {}).items()},
+            "decode": {int(key): float(value) for key, value in
+                       (options.get("decode_capacity") or {}).items()},
+        }
+        self.local_prefill_ms_per_1k = float(
+            options.get("local_prefill_ms_per_1k", 93.0) or 93.0)
+        self.transfer_ms_per_1k_local = float(
+            options.get("transfer_ms_per_1k_local", 585.0) or 585.0)
+        self.transfer_ms_per_1k_cross = float(
+            options.get("transfer_ms_per_1k_cross", 1351.0) or 1351.0)
+        self.transfer_fixed_ms_cross = float(
+            options.get("transfer_fixed_ms_cross", 48.0) or 48.0)
+        self.kv_bytes_per_token = float(options.get("kv_bytes_per_token", 0.0) or 0.0)
+        self.local_prefill_queue_weight = float(
+            options.get("local_prefill_queue_weight", 1.0) or 0.0)
+        self.local_prefill_queue_cap = float(
+            options.get("local_prefill_queue_cap", 3.0) or 0.0)
 
         # Pending requests (loaded but not yet routed)
         self._pending_requests = []
@@ -100,16 +141,23 @@ class Router:
         best_score = float('inf')
         num_instances = len(schedulers)
         start = self._get_counter(role) % num_instances
+        table = getattr(self, "capacity_tables", {}).get(role, {})
         for offset in range(num_instances):
             idx = (start + offset) % num_instances
             sched = schedulers[idx]
             waiting = len(sched.waiting)
             running = len(sched.running)
             raw_score = waiting * 4 + running
-            capacity = getattr(sched, "max_num_seqs", 0)
-            score = raw_score
+            # Prefer the deployment's measured capacity; ``max_num_seqs`` is the
+            # fallback for configs that carry no capacity table.
+            capacity = table.get(int(sched.instance_id)) or getattr(
+                sched, "max_num_seqs", 0)
+            # ``+1`` for the request being placed, so an idle tie resolves
+            # toward the larger capacity -- the same shape as the real
+            # router's ``(inflight + 1) / capacity``.
+            score = raw_score + 1
             if capacity not in (0, float('inf')):
-                score = raw_score / capacity
+                score = (raw_score + 1) / capacity
             if score < best_score:
                 best_score = score
                 best_idx = idx
@@ -279,6 +327,60 @@ class Router:
                       if sched.accepts_new_requests and sched.instance_id in fallback_ids]
         return self._least_loaded(candidates) if candidates else None
 
+    def _decode_scheduler_for(self, req_data, current_time_ns, prefill_sched):
+        """Decode instance this arriving request would be paired with."""
+        if not self.decode_schedulers:
+            return None
+        # ``_select_planned_decode`` reads the pair off a *routed* request; at
+        # arrival we only have the dataset row, so hand it the two fields it
+        # needs (the Prefill it would have used and the class).
+        planned = self._select_planned_decode(
+            SimpleNamespace(prefill_instance_id=prefill_sched.instance_id,
+                            class_id=req_data.get("class_id")),
+            current_time_ns)
+        if planned is not None:
+            return planned
+        eligible = [candidate for candidate in self.decode_schedulers
+                    if candidate.accepts_new_requests]
+        if not eligible:
+            return None
+        return eligible[self._select_instance(eligible, "decode")]
+
+    def kv_exchange_decision(self, prefill, decode, tokens):
+        """Local recompute vs P/D handoff, mirroring the real router.
+
+        The real deployment decides this per request
+        (``disagg_router.kv_exchange_decision``) from measured constants: moving
+        KV costs 585 ms (same host) / 1351 ms + 48 ms fixed (cross host) per
+        1000 prompt tokens, while the Decode prefilling the prompt itself costs
+        ~93 ms/1k plus an M/G/1 queue externality on the Decode's own batch
+        (capped, and zero when the Decode is idle).
+
+        The simulator used to always hand the KV over, which made short prompts
+        egress-bound and 25x slower than the measured cluster -- the real
+        ``load`` arm answered 200/200 requests by recomputing locally.
+        Returns ``(use_local, local_ms, transfer_ms)``.
+        """
+        if tokens <= 0:
+            return False, 0.0, 0.0
+        thousands = float(tokens) / 1000.0
+        same_node = int(getattr(prefill, "node_id", -1)) == int(getattr(decode, "node_id", -2))
+        if same_node:
+            transfer_ms = self.transfer_ms_per_1k_local * thousands
+        else:
+            transfer_ms = (self.transfer_fixed_ms_cross
+                           + self.transfer_ms_per_1k_cross * thousands)
+        local_ms = self.local_prefill_ms_per_1k * thousands
+        if self.local_prefill_queue_weight:
+            budget = max(1.0, float(getattr(decode, "max_num_seqs", 1) or 1))
+            inflight = float(len(getattr(decode, "running", ()) or ())
+                             + len(getattr(decode, "waiting", ()) or ()))
+            rho = min(1.0, inflight / budget)
+            externality = min(self.local_prefill_queue_cap,
+                              local_ms * (rho / max(1e-6, 1.0 - rho)))
+            local_ms += self.local_prefill_queue_weight * externality
+        return local_ms < transfer_ms, local_ms, transfer_ms
+
     def _decode_instance_id_for(self, request, current_time_ns):
         """Decode instance the arriving request is paired with, or ``None``.
 
@@ -318,7 +420,8 @@ class Router:
     # Request loading and real-time routing
     # -----------------------------------------------------------------------
 
-    def load_requests(self, path, enable_prefix_caching=False, is_init=True):
+    def load_requests(self, path, enable_prefix_caching=False, is_init=True,
+                      max_output_tokens=0):
         """Load requests from dataset into pending queue (not yet routed).
 
         Supports two JSONL formats:
@@ -328,10 +431,17 @@ class Router:
         For agentic sessions, only the first sub-request is added to the
         pending queue. Subsequent sub-requests are released dynamically
         via notify_request_completed() when predecessors finish.
+
+        ``max_output_tokens`` mirrors the real client's flag of the same name:
+        the recorded comparisons cap generation at 16 tokens, so a replay that
+        let the trace's own 26-653 token outputs run would compare a different
+        workload (measured 2026-09-16: real completion_tokens were 16/16 for all
+        200 requests while the simulator generated 74.7 on average).
         """
         path = f'../{path}'
         self._enable_prefix_caching = enable_prefix_caching
         self._is_init = is_init
+        self._max_output_tokens = int(max_output_tokens or 0)
         loaded_lines = 0
 
         with open(path) as f:
@@ -358,14 +468,20 @@ class Router:
         """Load a single flat request into pending queue."""
         req_id = self._next_request_id
         self._next_request_id += 1
+        output_toks = int(row['output_toks'])
+        output_ids = list(row.get('output_tok_ids', []))
+        limit = getattr(self, "_max_output_tokens", 0)
+        if limit and output_toks > limit:
+            output_toks = limit
+            output_ids = output_ids[:limit]
         req_data = {
             'index': req_id,
             'input_toks': int(row['input_toks']),
-            'output_toks': int(row['input_toks'] + row['output_toks']),
+            'output_toks': int(row['input_toks']) + output_toks,
             'arrival_time_ns': int(row['arrival_time_ns']),
             'model_id': row.get('model_id', self.prefill_schedulers[0].model),
             'input_hash_ids': row.get('input_tok_ids', []),
-            'output_hash_ids': row.get('output_tok_ids', []),
+            'output_hash_ids': output_ids,
             'kv_bytes_per_request': row.get('kv_bytes_per_request', 0.0),
         }
         self._pending_requests.append(self._decorate_req_data(req_data))
@@ -452,13 +568,37 @@ class Router:
                     instance_id = self._select_instance(eligible, "prefill")
                 sched = eligible[instance_id]
 
+            # P/D handoff vs local recompute.  When the Decode is going to
+            # recompute the prompt anyway, dispatch the request straight to it:
+            # no Prefill instance runs, no KV crosses the fabric.  This mirrors
+            # the real router, whose ``load`` arm took the local path for
+            # 200/200 requests of the Dolly trace (measured 2026-09-16).
+            local_request = False
+            if self.local_prefill_mode != "never" and self.decode_schedulers:
+                decode_sched = self._decode_scheduler_for(req_data, current_time_ns, sched)
+                if decode_sched is not None and decode_sched is not sched:
+                    if self.local_prefill_mode == "always":
+                        use_local = True
+                    else:
+                        use_local, _, _ = self.kv_exchange_decision(
+                            sched, decode_sched, req_data['input_toks'])
+                    if use_local:
+                        sched = decode_sched
+                        local_request = True
+
             request = sched.add_request([
                 req_data['index'], sched.model,
                 req_data['input_toks'], req_data['output_toks'],
                 req_data['arrival_time_ns'], sched.instance_id,
                 req_data.get('input_hash_ids', []), req_data.get('output_hash_ids', []),
                 req_data['class_id'], req_data['prefix_id'],
-            ], is_init=self._is_init)
+            ], is_init=True if local_request else self._is_init)
+            if local_request:
+                # The Decode owns the whole request: it runs the Prefill chunk
+                # itself, so the handoff path never sees it.
+                request.local_prefill = True
+                request.decode_instance_id = sched.instance_id
+                self._counters["local_prefill"] = self._counters.get("local_prefill", 0) + 1
             if self.name_decode_at_arrival:
                 # Pick the Decode half of the pair now, the way the real router
                 # does (``disagg_router._pick_decode`` runs on the same request

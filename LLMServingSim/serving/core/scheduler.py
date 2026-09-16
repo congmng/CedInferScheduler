@@ -711,7 +711,8 @@ class Scheduler:
                                 'queuing_delay', 'TTFT', 'TPOT', 'ITL',
                                 'class_id', 'prefix_id', 'prefill_instance_id',
                                 'decode_instance_id', 'npu_hit_tokens',
-                                'storage_hit_tokens', 'pd_kv_bytes', 'affinity_version'])
+                                'storage_hit_tokens', 'pd_kv_bytes', 'affinity_version',
+                                'exchange'])
             
             # Write each request's information
             for req in self.done:
@@ -736,6 +737,9 @@ class Scheduler:
                     req.storage_cache_hit,
                     req.pd_kv_bytes,
                     req.affinity_version,
+                    # Same column the real router records, so a recorded real
+                    # run and a simulated replay can be joined on it.
+                    "local" if getattr(req, "local_prefill", False) else "transfer",
                 ])
 
 

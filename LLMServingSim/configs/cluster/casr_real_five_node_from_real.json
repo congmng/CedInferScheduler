@@ -294,6 +294,13 @@
     "decode_ms_per_1k_tokens": 14000.0,
     "backlog_rps_multiple": 4.0,
     "single_home_below_rps": 1.0,
+    "local_prefill": "auto",
+    "local_prefill_ms_per_1k": 93.0,
+    "transfer_ms_per_1k_local": 585.0,
+    "transfer_ms_per_1k_cross": 1351.0,
+    "transfer_fixed_ms_cross": 48.0,
+    "local_prefill_queue_weight": 1.0,
+    "local_prefill_queue_cap": 3.0,
     "prefill_tokens_per_s": {
       "0": 14000.0,
       "2": 7300.0,
