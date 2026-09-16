@@ -128,3 +128,39 @@ python3 -m profiler slice Zyphra/Zamba2-1.2B --tp-refresh 1 --group attention \
   通过 rank-128 adapter 复用它；模拟器按"6 个独立 hybrid 层"求和，得到约 1.66B 参数
   （真实 1.215B）。偏大只会让显存上限检查更严格。
 * attention 表用的是 4 倍粗网格（见第 3 节）。
+
+## 8. 多卡并行采集：`--shard I/N`
+
+一个 shot 的固定开销（~3.5 s 的 `torch.profiler` 记账）与形状无关，所以
+**缩短一个网格的唯一办法是少发 shot，或者同时在多张卡上发**。profiler 现在
+支持后者的最小原语：
+
+```bash
+# 在 N 张卡上各起一个进程（各自独立的 --out-root），然后合并
+docker run ... -m profiler profile <model> ... --shard 0/2 --out-root /out/card0
+docker run ... -m profiler profile <model> ... --shard 1/2 --out-root /out/card1
+python3 tests/merge_profile_shards.py --out-root profiler/perf \
+    --hardware RTX5090 --model Zyphra/Zamba2-1.2B --variant bf16 --tp 1 \
+    /out/card0 /out/card1
+```
+
+`--shard i/N` 保留组合网格里位置 `≡ i (mod N)` 的 shot。`compose_shots` 走的是
+固定几何轴，顺序确定，所以每个分片对"全局第几个"的判断一致，切片两两不交且
+恰好覆盖整个网格。合并脚本**不相信**这一点：它按 category 的主键断言两两不交
+（重叠会报出重复的 shot key），因为重叠或漏采都会产出一个"能加载但悄悄错"的
+bundle。`tests/test_profile_shard.py` 对 N=1…64 钉住这条性质。
+
+**实测**：Zamba2-1.2B 在 5090 节点（10.212.70.196）的 GPU 2/3 上各跑一半
+网格，dense 76 + per_sequence 20 + attention 431 shot 每片，约 37 分钟完成，
+而单卡需要 4 小时。合并后 `tests/check_profile_bundle.py` 通过：
+
+| hardware | dense | per_sequence | attention |
+|---|---:|---:|---:|
+| RTX4090 | 1824 | 40 | 860 |
+| **RTX5090** | **1824** | **40** | **861** |
+
+5090 上 Zamba2 的 decode 步 **3.04 ms**（4090 是 4.86 ms，1.6×）、
+1024-token prefill **19.5 ms**（4090 是 25.5 ms，1.31×）、`mamba_mixer`
+57.2 µs（4090 是 87.5 µs）。这份 bundle 的意义不是"又一个数字"，而是
+**真混合模型终于能做硬件异构实验**了（见
+`docs/混合注意力模型的调度实验.md` 第 7.1 节）。
