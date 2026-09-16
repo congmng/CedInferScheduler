@@ -162,6 +162,23 @@ def control_interval_s():
     return float((config.get("casr") or {}).get("control_interval_s", 1.0))
 
 
+def deployment_max_num_seqs():
+    """The engine's concurrency budget, which the deployment sets explicitly.
+
+    ``start_multidomain_pd.sh`` launches every instance with ``max_num_seqs``
+    (16 on this deployment).  A replay that leaves the simulator's default in
+    place runs with a different engine: measured 2026-09-16, a forced-transfer
+    arm piled 100+ sequences into one Decode and paid the worst-case batch
+    lookup on every step.
+    """
+    config = json.loads((REPO / "deploy" / "real_lmcache_pd"
+                         / "router_config.json").read_text(encoding="utf-8"))
+    values = [int(item.get("max_num_seqs", 0) or 0)
+              for key in ("prefills", "decodes") for item in config[key]]
+    values = [value for value in values if value > 0]
+    return min(values) if values else 0
+
+
 def run_sim_arm(policy, args, run_config, sim_config, out_dir):
     csv_path = out_dir / f"{policy}.csv"
     command = [sys.executable, "-m", "serving",
@@ -173,6 +190,9 @@ def run_sim_arm(policy, args, run_config, sim_config, out_dir):
                "--max-output-tokens", str(args.max_output_tokens),
                "--output", str(csv_path),
                "--inputs-root", str(out_dir / f"{policy}-inputs")]
+    budget = deployment_max_num_seqs()
+    if budget:
+        command += ["--max-num-seqs", str(budget)]
     command += sim_args(policy, control_interval_s())
     print("   $ " + " ".join(command[1:8]) + " ...")
     subprocess.run(command, cwd=REPO, check=True,

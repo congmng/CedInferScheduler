@@ -73,9 +73,73 @@ class CASRController:
         self.pending_warm_classes = {}
         self.last_telemetry = {}
         self.last_execution = ()
+        # Backlog-aware demand, mirroring the real controller's
+        # ``_sample_backlog``: the profiler only sees the requests the router
+        # already admitted, so under back-pressure the observed arrival rate
+        # collapses to the *served* rate and the LP is told "demand == capacity"
+        # exactly when the pool is drowning.  The unserved part of the offered
+        # load is sitting in the Prefills' waiting queues, so its growth rate is
+        # the missing demand.  Measured 2026-09-16 on the small-cluster
+        # elasticity A/B: the simulator reported 108 req/s of capacity against
+        # 9 req/s of demand while the run was 23 s deep in backlog, so every
+        # ``+P`` counterfactual came out "gain below threshold" and the elastic
+        # arm stayed bit-identical to the static one.
+        self.alpha = float((policy or {}).get("ewma_alpha", 0.2) or 0.2)
+        self.backlog_rps_multiple = max(
+            0.0, float((policy or {}).get("backlog_rps_multiple", 4.0) or 0.0))
+        self._backlog_rps = 0.0
+        self._last_backlog_waiting = None
+        self._last_backlog_ns = 0
+        self._backlog_active = False
 
     def due(self, current_ns: int) -> bool:
         return int(current_ns) >= self.next_tick_ns
+
+    def _sample_backlog(self, current_ns, prefill):
+        """Recover the offered load from the Prefills' waiting queues.
+
+        Only *growth* counts: a draining queue must not subtract demand, and the
+        EWMA decays the term once the backlog stops building.  Identical to the
+        real controller's version (``deploy/real_lmcache_pd/casr_control.py``),
+        which scrapes the same number off vLLM's metrics; here the schedulers
+        are in-process.
+        """
+        waiting = float(sum(len(s.waiting) for s in prefill))
+        # ``_last_backlog_waiting`` is the "have we sampled yet" sentinel: a
+        # timestamp cannot be one, because the first control tick is at t=0.
+        elapsed_s = ((current_ns - self._last_backlog_ns) / 1e9
+                     if self._last_backlog_waiting is not None else 0.0)
+        growth = 0.0
+        if elapsed_s > 0.0 and self._last_backlog_waiting is not None:
+            growth = max(0.0, waiting - self._last_backlog_waiting) / elapsed_s
+        self._last_backlog_waiting = waiting
+        self._last_backlog_ns = int(current_ns)
+        if not self._backlog_active:
+            self._backlog_rps = growth
+            self._backlog_active = True
+        else:
+            self._backlog_rps = (self.alpha * growth +
+                                 (1.0 - self.alpha) * self._backlog_rps)
+        return self._backlog_rps
+
+    def _inflate_demand(self, rows):
+        """Add the backlog growth back to the observed class rates.
+
+        The queue is not class-attributed, so the missing rate is spread
+        proportionally to each class's observed share (a mean-field
+        approximation), capped at ``backlog_rps_multiple`` times the observed
+        total so a transient cannot invent unbounded demand.
+        """
+        observed = sum(max(0.0, float(row.get("arrival_rate_ewma") or 0.0))
+                       for row in rows)
+        if observed <= 0.0 or self._backlog_rps <= 0.0:
+            return rows
+        backlog = min(self._backlog_rps, self.backlog_rps_multiple * observed)
+        scale = 1.0 + backlog / observed
+        for row in rows:
+            rate = float(row.get("arrival_rate_ewma") or 0.0)
+            row["arrival_rate_ewma"] = max(0.0, rate) * scale
+        return rows
 
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         self.last_execution = ()
@@ -95,6 +159,13 @@ class CASRController:
             prefill = [s for s in schedulers if s.accepts_new_requests]
         if not decode:
             decode = [s for s in schedulers if s.accepts_new_requests]
+
+        # Recover the offered load before anything prices it: the evaluator, the
+        # LP and the lifecycle's length-aware capacity all read
+        # ``arrival_rate_ewma``, and under back-pressure that only reflects what
+        # was *served*.
+        self._sample_backlog(current_ns, prefill)
+        self._inflate_demand(snapshot["prefix_states"])
 
         decision = self.evaluator.evaluate(
             snapshot, prefill, all_prefill, decode, self.solver, current_ns,

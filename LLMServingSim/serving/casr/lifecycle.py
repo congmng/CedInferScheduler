@@ -14,6 +14,11 @@ class PrefillLifecycle:
         config = config or {}
         self.min_active = max(0, int(config.get("min_active_prefill", 1)))
         self.max_active = config.get("max_active_prefill")
+        # Whether the lifecycle may resize the pool from observed demand.  The
+        # real deployment decides pool size only through the router's structural
+        # actions, so an alignment arm that models "no scaling" must switch this
+        # off; the default stays on to preserve the existing elastic behaviour.
+        self.scale_on_demand = bool(config.get("scale_on_demand", True))
         self.warmup_ns = max(0, int(float(config.get("warmup_ms", 0)) * 1_000_000))
         self.resources = ResourceOrchestrator(config.get("resources"))
         self._bootstrapped = False
@@ -94,7 +99,17 @@ class PrefillLifecycle:
         demand = sum(max(float(row["arrival_rate_ewma"]), 0.0) for row in rows)
         average_capacity = max(1.0, sum(self._effective_capacity(s, rows)
                                         for s in schedulers) / len(schedulers))
-        desired = max(self.min_active, int(math.ceil(demand / average_capacity)))
+        if self.scale_on_demand:
+            desired = max(self.min_active, int(math.ceil(demand / average_capacity)))
+        else:
+            # The deployment has no demand-driven autoscaler of its own: the
+            # pool only changes when the router takes a structural action
+            # (``casr_full`` with ``scale_backend=docker``).  Leaving this
+            # heuristic on made a "structural actions disabled" arm grow anyway
+            # -- measured 2026-09-16 on the small-cluster elasticity A/B, where
+            # the spare Prefill served 101 requests in the arm that was
+            # supposed to keep it stopped.
+            desired = self.min_active
         if self.max_active is not None:
             desired = min(desired, int(self.max_active))
         desired = min(desired, len(schedulers))

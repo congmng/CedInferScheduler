@@ -606,6 +606,18 @@ class Scheduler:
         moment a pool filled -- measured 2026-09-15: "1251 tokens need more
         blocks than the pool has free (43 of 2887)" at request 19/182.
         """
+        # Concurrency budget first.  The engine's ``max_num_seqs`` bounds how
+        # many sequences step together; ``running`` used to grow without it
+        # because a handoff only consulted the KV pool, so a forced-transfer run
+        # piled 100+ sequences into one Decode and every step then paid the
+        # worst-case batch lookup -- measured 2026-09-16: the decode phase of the
+        # small-cluster elasticity arm was 15.6 s against 0.21 s on the cluster,
+        # while the local-recompute arm (which goes through ``add_request`` and
+        # its scheduler) stayed at 15 ms/token.
+        budget = max(1, int(getattr(self, "max_num_seqs", 1) or 1))
+        if len(self.running) >= budget:
+            self.backpressure_events += 1
+            return False
         hit_blocks, num_npu_hit, num_lower_hit = self.kv.get_computed_blocks(req)
         num_computed = req.num_computed_tokens
         if self.kv.allocate_slots(req, 1, hit_blocks, num_npu_hit, num_lower_hit) is None:
