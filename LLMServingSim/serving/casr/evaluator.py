@@ -70,6 +70,13 @@ class StructuralEvaluator:
         self.idle_cost_fraction = max(0.0, float(config.get("idle_cost_fraction", 0.0)))
         max_active = int(config.get("max_active_prefill", 0) or 0)
         self.max_active_prefill = max_active if max_active > 0 else None
+        # Predictive scale-out: start a spare once the offered load is within
+        # ``prescale_utilization`` of what the active pool can actually push.
+        # A counterfactual that has to *observe* the gain cannot pay for a 45 s
+        # boot inside a 90 s peak -- measured in the six-domain arena, the
+        # reactive ``+P`` arm settled at 14572 ms where an egress-sized pool
+        # reached 1120 ms.  ``0`` disables the predictive branch.
+        self.prescale_utilization = float(config.get("prescale_utilization", 0.8) or 0.0)
 
     def _holding_per_instance(self, instances, solver):
         """Per-second cost of keeping one Prefill active, in objective units.
@@ -136,6 +143,48 @@ class StructuralEvaluator:
             used_bytes += bytes_per_request
         return tuple(selected)
 
+    def _predictive_scale_decision(self, rows, active_prefill, all_prefill, solver,
+                                   decode, current_ns, base_objective, warm_classes):
+        """Start a spare when the offer approaches the pool's *push* capacity.
+
+        The gain-evaluated counterfactual has to see the overload before it acts,
+        and then pays the boot inside what is left of the peak: in the six-domain
+        arena (90 s at 4 req/s against a 45 s boot) the reactive arm reached only
+        14572 ms while an egress-sized pool reached 1120 ms.  The signal used
+        here is available *before* the backlog: the offered rate the profiler
+        already reports against the capacity the solver prices, both of which
+        the controller fills with the producer's 0.26 GB/s egress for 1250-token
+        prompts (~1.4 req/s per worker).  Ordering by lowest cost keeps the
+        choice of *which* spare consistent with the plan's own objective.
+        """
+        pool = [item for item in (all_prefill or active_prefill)
+                if getattr(item, "admission_state", "ACTIVE") != "INACTIVE"]
+        if self.max_active_prefill is not None and len(pool) >= self.max_active_prefill:
+            return None
+        inactive = [s for s in all_prefill
+                    if s.admission_state == "INACTIVE"]
+        if not inactive:
+            return None
+        offered = sum(max(0.0, float(row.get("arrival_rate_ewma", 0.0))) for row in rows)
+        if offered <= 0.0:
+            return None
+        capacities = getattr(solver.config, "prefill_capacity", {})
+        active_capacity = sum(
+            float(capacities.get(int(s.instance_id), 0.0) or 0.0)
+            for s in active_prefill)
+        if active_capacity <= 0.0:
+            return None
+        if offered <= self.prescale_utilization * active_capacity:
+            return None
+        candidate = sorted(inactive, key=lambda item: item.instance_id)[0]
+        return StructuralDecision(
+            "+P", "cold", offered - active_capacity, base_objective, base_objective,
+            tuple(item.instance_id for item in active_prefill) + (candidate.instance_id,),
+            f"predictive scale-out: offered {offered:.2f} req/s is above "
+            f"{self.prescale_utilization:.0%} of the active pool's "
+            f"{active_capacity:.2f} req/s push capacity",
+            tuple(warm_classes or ()))
+
     def evaluate(self, snapshot, active_prefill, all_prefill, decode, solver,
                  current_ns, last_action_ns=-1, min_active=1, backlog_rps=0.0):
         rows = snapshot["prefix_states"]
@@ -161,6 +210,12 @@ class StructuralEvaluator:
         demand_scale = max(1.0, sum(float(row.get("arrival_rate_ewma", 0.0)) for row in rows))
         candidates = []
         warm_classes = self._warm_classes(rows)
+        if self.prescale_utilization > 0.0:
+            predictive = self._predictive_scale_decision(
+                rows, active_prefill, all_prefill, solver, decode,
+                current_ns, base_objective, warm_classes)
+            if predictive is not None:
+                return predictive
 
         horizon_s = self.window_ns / 1_000_000_000.0
         # A *growing* backlog means the imbalance is not a transient: the

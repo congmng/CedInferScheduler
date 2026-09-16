@@ -301,3 +301,59 @@ class StructuralPoolCeilingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PredictiveScaleOutTests(unittest.TestCase):
+    """Start a spare when the offer approaches the pool's *push* capacity.
+
+    An evaluator that has to observe the gain cannot pay for a 45 s boot inside
+    a 90 s peak: measured in the six-domain arena, the reactive ``+P`` arm
+    settled at 14572 ms where an egress-sized pool reached 1120 ms.  The signal
+    used here is the offer the profiler already reports against the capacity the
+    solver prices (which the controller fills with the producer's 0.26 GB/s
+    egress, ~1.4 req/s for a 1250-token prompt).
+    """
+
+    def _evaluator(self, **config):
+        policy = {"enabled": True, "startup_s": 0.0, "max_active_prefill": 3}
+        policy.update(config)
+        return StructuralEvaluator(policy)
+
+    def _pref(self, instance_id, capacity=0.0, active=True):
+        class _Sched:
+            pass
+        sched = _Sched()
+        sched.instance_id = instance_id
+        sched.pd_type = "prefill"
+        sched.admission_state = "ACTIVE" if active else "INACTIVE"
+        sched.running = []
+        sched.waiting = []
+        sched.max_num_seqs = 16
+        sched.memory = _Memory()
+        return sched
+
+    def test_an_offer_above_the_push_capacity_starts_a_spare(self):
+        class _Solver:
+            class config:
+                prefill_capacity = {0: 1.4, 2: 1.4, 4: 1.4}
+                prefill_service_ms = {}
+        evaluator = self._evaluator()
+        decision = evaluator._predictive_scale_decision(
+            [{"arrival_rate_ewma": 2.0, "class_id": "c"}],
+            [self._pref(0, 1.4)], [self._pref(0, 1.4), self._pref(2, 1.4, active=False)],
+            _Solver(), [self._pref(1)], 0, 1.0, ())
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, "+P")
+        self.assertIn(2, decision.wanted_ids)
+
+    def test_an_offer_inside_the_push_capacity_leaves_the_pool_alone(self):
+        class _Solver:
+            class config:
+                prefill_capacity = {0: 2.8, 2: 2.8}
+                prefill_service_ms = {}
+        evaluator = self._evaluator()
+        decision = evaluator._predictive_scale_decision(
+            [{"arrival_rate_ewma": 1.0, "class_id": "c"}],
+            [self._pref(0, 2.8)], [self._pref(0, 2.8), self._pref(2, 2.8, active=False)],
+            _Solver(), [self._pref(1)], 0, 1.0, ())
+        self.assertIsNone(decision)
