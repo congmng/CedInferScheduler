@@ -44,6 +44,7 @@ def summarise_csv(path: pathlib.Path) -> dict:
         "local_share": round(exchange.get("local", 0) / len(rows), 4),
         "exchange": dict(exchange),
         "e2e_mean_ms": round(statistics.mean(lat), 1),
+        "e2e_p50_ms": round(statistics.median(lat), 1),
         "e2e_p95_ms": round(lat[int(0.95 * len(lat)) - 1], 1),
         "ttft_p50_ms": round(statistics.median(
             float(row["TTFT"]) / 1e6 for row in rows), 1),

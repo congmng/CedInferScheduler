@@ -1,0 +1,80 @@
+{
+  "r8c-cap3/casr_lp": {
+    "n": 576,
+    "mean_output_tokens": 16,
+    "local_share": 1.0,
+    "exchange": {
+      "local": 576
+    },
+    "e2e_mean_ms": 1420.6,
+    "e2e_p50_ms": 1419.3,
+    "e2e_p95_ms": 2639.2,
+    "ttft_p50_ms": 1327.2,
+    "prefills": {
+      "1": 576
+    },
+    "decodes": {
+      "1": 576
+    }
+  },
+  "r8c-cap3/load": {
+    "n": 576,
+    "mean_output_tokens": 16,
+    "local_share": 1.0,
+    "exchange": {
+      "local": 576
+    },
+    "e2e_mean_ms": 1420.6,
+    "e2e_p50_ms": 1419.3,
+    "e2e_p95_ms": 2639.2,
+    "ttft_p50_ms": 1327.2,
+    "prefills": {
+      "1": 576
+    },
+    "decodes": {
+      "1": 576
+    }
+  },
+  "r8c-cap50/casr_lp": {
+    "n": 576,
+    "mean_output_tokens": 16,
+    "local_share": 0.8958,
+    "exchange": {
+      "local": 516,
+      "transfer": 60
+    },
+    "e2e_mean_ms": 2127.9,
+    "e2e_p50_ms": 250.6,
+    "e2e_p95_ms": 16666.6,
+    "ttft_p50_ms": 172.8,
+    "prefills": {
+      "1": 516,
+      "0": 42,
+      "2": 18
+    },
+    "decodes": {
+      "1": 576
+    }
+  },
+  "r8c-cap50/load": {
+    "n": 576,
+    "mean_output_tokens": 16,
+    "local_share": 0.8958,
+    "exchange": {
+      "local": 516,
+      "transfer": 60
+    },
+    "e2e_mean_ms": 1913.7,
+    "e2e_p50_ms": 200.8,
+    "e2e_p95_ms": 16024.1,
+    "ttft_p50_ms": 108.8,
+    "prefills": {
+      "1": 516,
+      "0": 42,
+      "2": 18
+    },
+    "decodes": {
+      "1": 576
+    }
+  }
+}

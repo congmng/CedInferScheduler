@@ -7,6 +7,7 @@
       "transfer": 176
     },
     "e2e_mean_ms": 14731.0,
+    "e2e_p50_ms": 14873.4,
     "e2e_p95_ms": 27977.3,
     "ttft_p50_ms": 14823.9,
     "prefills": {
@@ -26,6 +27,7 @@
       "transfer": 176
     },
     "e2e_mean_ms": 14731.0,
+    "e2e_p50_ms": 14873.4,
     "e2e_p95_ms": 27977.3,
     "ttft_p50_ms": 14823.9,
     "prefills": {
@@ -45,6 +47,7 @@
       "transfer": 336
     },
     "e2e_mean_ms": 28171.0,
+    "e2e_p50_ms": 28102.5,
     "e2e_p95_ms": 55282.1,
     "ttft_p50_ms": 28053.0,
     "prefills": {
@@ -66,6 +69,7 @@
       "transfer": 336
     },
     "e2e_mean_ms": 29257.6,
+    "e2e_p50_ms": 29364.9,
     "e2e_p95_ms": 55624.6,
     "ttft_p50_ms": 29315.4,
     "prefills": {
@@ -85,6 +89,7 @@
       "transfer": 496
     },
     "e2e_mean_ms": 33995.3,
+    "e2e_p50_ms": 32792.0,
     "e2e_p95_ms": 68879.3,
     "ttft_p50_ms": 32742.5,
     "prefills": {
@@ -106,6 +111,7 @@
       "transfer": 496
     },
     "e2e_mean_ms": 43721.4,
+    "e2e_p50_ms": 43794.6,
     "e2e_p95_ms": 83094.4,
     "ttft_p50_ms": 43745.1,
     "prefills": {
@@ -125,6 +131,7 @@
       "transfer": 976
     },
     "e2e_mean_ms": 51228.0,
+    "e2e_p50_ms": 49926.4,
     "e2e_p95_ms": 111039.8,
     "ttft_p50_ms": 49876.9,
     "prefills": {
@@ -148,6 +155,7 @@
       "transfer": 976
     },
     "e2e_mean_ms": 87035.6,
+    "e2e_p50_ms": 87081.9,
     "e2e_p95_ms": 165541.8,
     "ttft_p50_ms": 87032.4,
     "prefills": {

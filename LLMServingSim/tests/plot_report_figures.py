@@ -339,6 +339,50 @@ def fig_elastic_horizon(out):
     plt.close(fig)
 
 
+
+def fig_q2_switch_payoff(out):
+    """What the substitution actually does: helps the many, wrecks the moved few.
+
+    Prefill-heavy, Decode-saturated regime (2500-token prompts, 16-token
+    outputs, one Decode with max_num_seqs 2, 16 req/s).  ``cap=3`` is the
+    deployment-derived rule, which never transfers; ``cap=50`` is the fixed one.
+    """
+    data = _load("r8b-switch-payoff.json")
+    arms = [("r8c-cap3", "casr_lp", "no switch (cap = 3 ms)", GREY),
+            ("r8c-cap50", "casr_lp", "switch on (cap = 50x)", RED)]
+    keys = ["e2e_p50_ms", "e2e_mean_ms", "e2e_p95_ms"]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.2, 3.4))
+
+    x = np.arange(3)
+    for i, (run, arm, label, colour) in enumerate(arms):
+        rec = data[f"{run}/{arm}"]
+        vals = [rec[k] for k in keys]
+        ax1.bar(x + (i - 0.5) * 0.4, vals, 0.4, label=label, color=colour)
+        for xi, v in zip(x + (i - 0.5) * 0.4, vals):
+            ax1.text(xi, v * 1.1, f"{v:,.0f}", ha="center", fontsize=7)
+    ax1.set_yscale("log")
+    ax1.set_xticks(x, ["p50*", "mean", "p95"])
+    ax1.set_ylabel("E2E (ms, log)")
+    ax1.set_title("Aggregate: the tail is where it shows")
+    ax1.legend(fontsize=7)
+    ax1.grid(axis="y", alpha=0.3)
+
+    groups = [("local, no switch", 1419), ("local, switch on", 241),
+              ("transferred (10.4%)", 16490)]
+    # p50s are the per-group medians measured on /tmp/r8c-cap{3,50}/casr_lp.csv
+    colours = [GREY, BLUE, RED]
+    ax2.bar(range(3), [g[1] for g in groups], 0.55, color=colours)
+    for xi, (name, value) in enumerate(groups):
+        ax2.text(xi, value * 1.12, f"{value:,.0f} ms", ha="center", fontsize=8)
+    ax2.set_yscale("log")
+    ax2.set_xticks(range(3), [g[0] for g in groups], fontsize=7.5)
+    ax2.set_title("Per-request p50: the moved 10% pay 68x")
+    ax2.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig-q2-switch-payoff.png", dpi=200)
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(REPO.parent / "docs" / "figs"))
@@ -348,7 +392,7 @@ def main() -> int:
     figures = (fig_arms_hetero, fig_waterfall, fig_kv_size_flip,
                fig_hotprefix, fig_slo, fig_models,
                fig_q2_output_length, fig_q2_decode_load, fig_tiebreak,
-               fig_elastic_horizon)
+               fig_elastic_horizon, fig_q2_switch_payoff)
     for fn in figures:
         fn(out)
         print("wrote", fn.__name__)
