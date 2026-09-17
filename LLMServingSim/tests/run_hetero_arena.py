@@ -36,6 +36,9 @@ NUM_REQS = 376
 
 ARMS = (
     ("load", "baseline", ["--request-routing-policy", "LOAD"]),
+    # Same score as ``load``, round-robin tie-break: separates "the score has
+    # no signal" from "the tie-break pinned everything to instance 0".
+    ("load_rr", "baseline", ["--request-routing-policy", "LOAD_RR"]),
     ("cache_aware", "baseline", ["--request-routing-policy", "CACHE_AWARE"]),
     # The same least-loaded family with the blind spot removed: score the
     # Prefill on the resource that binds it (KV egress) as well as its engine.
@@ -51,7 +54,9 @@ ARMS = (
 
 
 def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS, model="Qwen/Qwen3-8B",
-                  prompt_tokens=1250, cross_gbps=None, cross_rtt_ms=None):
+                  prompt_tokens=1250, cross_gbps=None, cross_rtt_ms=None,
+                  local_prefill=None, kv_egress_gbps=None,
+                  inactive_decodes=None, local_queue_cap=None):
     """Three variants of the arena: static-2, elastic, and all-active."""
     domain_count = len([d for d in domains.split(",") if d.strip()])
     configs = {}
@@ -63,6 +68,14 @@ def build_configs(out_dir, domains=DOMAINS, peak=PEAK_RPS, model="Qwen/Qwen3-8B"
             link += ["--cross-gbps", str(cross_gbps)]
         if cross_rtt_ms is not None:
             link += ["--cross-rtt-ms", str(cross_rtt_ms)]
+        if kv_egress_gbps is not None:
+            link += ["--kv-egress-gbps", str(kv_egress_gbps)]
+        if local_prefill is not None:
+            link += ["--local-prefill", str(local_prefill)]
+        if inactive_decodes:
+            link += ["--inactive-decodes", str(inactive_decodes)]
+        if local_queue_cap is not None:
+            link += ["--local-queue-cap", str(local_queue_cap)]
         subprocess.run([sys.executable, str(REPO / "tests" / "make_hetero_cluster.py"),
                         "--domains", domains, "--model", model,
                         "--prompt-tokens", str(prompt_tokens),
@@ -150,6 +163,37 @@ def main() -> int:
                         dest="cross_rtt_ms",
                         help="override the inter-domain RTT in ms "
                              "(default: the deployment's measured 48 ms)")
+    parser.add_argument("--local-prefill", default=None,
+                        choices=["never", "auto", "always"],
+                        dest="local_prefill",
+                        help="give every policy the option to skip the Prefill "
+                             "leg and recompute on the Decode.  Default: the "
+                             "generator's ``never``, under which only CASR arms "
+                             "have the option -- an unfair main table.")
+    parser.add_argument("--kv-egress-gbps", type=float, default=None,
+                        dest="kv_egress_gbps",
+                        help="override the producer-side KV push ceiling "
+                             "(bandwidth sweep knob)")
+    parser.add_argument("--local-queue-cap", type=float, default=None,
+                        dest="local_queue_cap",
+                        help="cap on the Decode-queue amplification factor a "
+                             "local recompute is charged; raise it to let the "
+                             "transfer/local substitution fire")
+    parser.add_argument("--inactive-decodes", type=int, default=0,
+                        dest="inactive_decodes",
+                        help="stop this many Decode instances -- raises Decode "
+                             "utilisation at a fixed arrival rate, which is the "
+                             "axis the Q2 crossover actually depends on")
+    parser.add_argument("--max-num-seqs", type=int, default=16,
+                        dest="max_num_seqs",
+                        help="Decode concurrency cap; lowering it is what makes "
+                             "a prefill-heavy Decode reachable at a modest "
+                             "arrival rate")
+    parser.add_argument("--max-output-tokens", type=int, default=16,
+                        dest="max_output_tokens",
+                        help="cap the generated output length; the pool's own "
+                             "outputs run up to 297 tokens, so this is the "
+                             "knob for the output-length crossover sweep")
     parser.add_argument("--arms", default="",
                         help="comma separated subset of " +
                              ",".join(arm for arm, _, _ in ARMS))
@@ -160,7 +204,11 @@ def main() -> int:
     configs = build_configs(out_dir, args.domains, args.peak_rps,
                             model=args.model, prompt_tokens=args.prompt_tokens,
                             cross_gbps=args.cross_gbps,
-                            cross_rtt_ms=args.cross_rtt_ms)
+                            cross_rtt_ms=args.cross_rtt_ms,
+                            local_prefill=args.local_prefill,
+                            kv_egress_gbps=args.kv_egress_gbps,
+                            inactive_decodes=args.inactive_decodes,
+                            local_queue_cap=args.local_queue_cap)
     if args.trace:
         trace = pathlib.Path(args.trace)
         if not trace.is_absolute():
@@ -185,7 +233,8 @@ def main() -> int:
                    "--cluster-config", str(config),
                    "--dataset", str(trace), "--num-reqs", str(num_reqs),
                    "--dtype", "bfloat16", "--block-size", "16",
-                   "--max-output-tokens", "16", "--max-num-seqs", "16",
+                   "--max-output-tokens", str(args.max_output_tokens),
+                   "--max-num-seqs", str(args.max_num_seqs),
                    "--log-level", "WARNING", "--output", str(csv_path),
                    "--inputs-root", str(out_dir / f"{arm}-inputs"), *extra_args]
         print(f"== {arm} ({kind})", flush=True)

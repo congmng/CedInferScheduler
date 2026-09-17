@@ -1,0 +1,169 @@
+{
+  "r8d-cap50-rps8/casr_lp": {
+    "n": 376,
+    "mean_output_tokens": 512,
+    "local_share": 1.0,
+    "exchange": {
+      "local": 376
+    },
+    "e2e_mean_ms": 2144.9,
+    "e2e_p95_ms": 2213.3,
+    "ttft_p50_ms": 23.8,
+    "prefills": {
+      "3": 195,
+      "1": 181
+    },
+    "decodes": {
+      "3": 195,
+      "1": 181
+    }
+  },
+  "r8d-cap50-rps8/load": {
+    "n": 376,
+    "mean_output_tokens": 512,
+    "local_share": 1.0,
+    "exchange": {
+      "local": 376
+    },
+    "e2e_mean_ms": 2140.0,
+    "e2e_p95_ms": 2159.2,
+    "ttft_p50_ms": 23.8,
+    "prefills": {
+      "1": 196,
+      "3": 180
+    },
+    "decodes": {
+      "1": 196,
+      "3": 180
+    }
+  },
+  "r8d-cap50-rps12/casr_lp": {
+    "n": 556,
+    "mean_output_tokens": 512,
+    "local_share": 0.8453,
+    "exchange": {
+      "local": 470,
+      "transfer": 86
+    },
+    "e2e_mean_ms": 2357.4,
+    "e2e_p95_ms": 3386.7,
+    "ttft_p50_ms": 24.2,
+    "prefills": {
+      "1": 241,
+      "3": 229,
+      "2": 61,
+      "0": 25
+    },
+    "decodes": {
+      "3": 290,
+      "1": 266
+    }
+  },
+  "r8d-cap50-rps12/load": {
+    "n": 556,
+    "mean_output_tokens": 512,
+    "local_share": 1.0,
+    "exchange": {
+      "local": 556
+    },
+    "e2e_mean_ms": 2237.2,
+    "e2e_p95_ms": 2258.5,
+    "ttft_p50_ms": 23.5,
+    "prefills": {
+      "1": 286,
+      "3": 270
+    },
+    "decodes": {
+      "1": 286,
+      "3": 270
+    }
+  },
+  "r8d-cap50-rps16/casr_lp": {
+    "n": 736,
+    "mean_output_tokens": 512,
+    "local_share": 0.7812,
+    "exchange": {
+      "local": 575,
+      "transfer": 161
+    },
+    "e2e_mean_ms": 5397.1,
+    "e2e_p95_ms": 25175.0,
+    "ttft_p50_ms": 212.5,
+    "prefills": {
+      "3": 303,
+      "1": 272,
+      "2": 81,
+      "0": 80
+    },
+    "decodes": {
+      "3": 384,
+      "1": 352
+    }
+  },
+  "r8d-cap50-rps16/load": {
+    "n": 736,
+    "mean_output_tokens": 512,
+    "local_share": 0.8438,
+    "exchange": {
+      "local": 621,
+      "transfer": 115
+    },
+    "e2e_mean_ms": 5266.1,
+    "e2e_p95_ms": 25674.3,
+    "ttft_p50_ms": 344.2,
+    "prefills": {
+      "1": 319,
+      "3": 302,
+      "2": 58,
+      "0": 57
+    },
+    "decodes": {
+      "1": 374,
+      "3": 362
+    }
+  },
+  "r8d-cap50-rps20/casr_lp": {
+    "n": 916,
+    "mean_output_tokens": 512,
+    "local_share": 0.8177,
+    "exchange": {
+      "local": 749,
+      "transfer": 167
+    },
+    "e2e_mean_ms": 11669.6,
+    "e2e_p95_ms": 45227.6,
+    "ttft_p50_ms": 3909.0,
+    "prefills": {
+      "3": 404,
+      "1": 345,
+      "2": 84,
+      "0": 83
+    },
+    "decodes": {
+      "3": 486,
+      "1": 430
+    }
+  },
+  "r8d-cap50-rps20/load": {
+    "n": 916,
+    "mean_output_tokens": 512,
+    "local_share": 0.8865,
+    "exchange": {
+      "local": 812,
+      "transfer": 104
+    },
+    "e2e_mean_ms": 11617.1,
+    "e2e_p95_ms": 44126.7,
+    "ttft_p50_ms": 6391.3,
+    "prefills": {
+      "1": 409,
+      "3": 403,
+      "0": 53,
+      "2": 51
+    },
+    "decodes": {
+      "1": 462,
+      "3": 454
+    }
+  }
+}

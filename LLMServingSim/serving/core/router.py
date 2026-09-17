@@ -179,6 +179,10 @@ class Router:
             # The same least-loaded family, scored on the resource that
             # actually binds the Prefill here: its KV push, not its engine.
             self._select_instance = self._least_load_select
+        elif self.routing_policy == "LOAD_RR":
+            # ``load`` with a round-robin tie-break: separates "the score has
+            # no signal" from "our tie-break pinned everything to id 0".
+            self._select_instance = self._least_load_rr_select
         elif self.routing_policy == "CUSTOM":
             self._select_instance = self._custom_select
         else:
@@ -254,6 +258,50 @@ class Router:
                   + f" -> {best.instance_id}", flush=True)
         self._set_counter(role, (best_idx + 1) % len(schedulers))
         return best_idx
+
+    def _least_load_rr_select(self, schedulers, role):
+        """``load`` with a round-robin tie-break instead of the instance id.
+
+        ``_least_load_select`` ranks by ``((inflight+1)/capacity, instance_id)``,
+        so whenever the score stops discriminating the lowest id wins every
+        time.  The score stops discriminating exactly when the engine is fast
+        enough that ``inflight`` never accumulates: measured 2026-09-17 on
+        Zamba2-1.2B (31 ms Prefill), all 735 requests of the arena trace landed
+        on instance 0 while Qwen3-8B (185 ms Prefill) spread 375/360.
+
+        This arm keeps the score and changes *only* the tie-break, so a skew
+        that survives it is not a tie-break artifact.  That separation is the
+        point: the review of the paper draft asked whether 735/0 is a property
+        of the load metric or of our deterministic tie-breaking.
+        """
+        if not schedulers:
+            return 0
+        table = getattr(self, "capacity_tables", {}).get(role, {})
+        router_table = getattr(self, "router_capacity", {})
+        assigned = getattr(self, "_assigned", None)
+
+        def score(sched):
+            if assigned is not None:
+                inflight = assigned.get(int(sched.instance_id), 0)
+            else:
+                inflight = len(sched.waiting) * 4 + len(sched.running)
+            capacity = (router_table.get(int(sched.instance_id))
+                        or table.get(int(sched.instance_id))
+                        or getattr(sched, "max_num_seqs", 0))
+            if capacity not in (0, float('inf')):
+                return (inflight + 1) / capacity
+            return float(inflight + 1)
+
+        scores = [score(sched) for sched in schedulers]
+        best_score = min(scores)
+        tied = {index for index, value in enumerate(scores)
+                if value <= best_score + 1e-12}
+        start = self._get_counter(role) % len(schedulers)
+        chosen = next((start + step) % len(schedulers)
+                      for step in range(len(schedulers))
+                      if (start + step) % len(schedulers) in tied)
+        self._set_counter(role, (chosen + 1) % len(schedulers))
+        return chosen
 
     def _custom_select(self, schedulers, role):
         raise NotImplementedError("Implement custom routing policy.")
@@ -603,7 +651,7 @@ class Router:
             return None
         return eligible[self._select_instance(eligible, "decode")]
 
-    def kv_exchange_decision(self, prefill, decode, tokens):
+    def kv_exchange_decision(self, prefill, decode, tokens, now_ns=0):
         """Local recompute vs P/D handoff, mirroring the real router.
 
         The real deployment decides this per request
@@ -616,6 +664,27 @@ class Router:
         The simulator used to always hand the KV over, which made short prompts
         egress-bound and 25x slower than the measured cluster -- the real
         ``load`` arm answered 200/200 requests by recomputing locally.
+
+        **Both sides now price their own queue**, which is what makes this a
+        resource substitution rather than a service-time comparison:
+
+        * the transfer side adds the producer's egress backlog
+          (``PdHandoffLink.pending_ns``), so moving KV onto an already-backed-up
+          producer is charged for the wait it creates;
+        * the local side's externality is ``T_prefill * rho/(1-rho)`` capped at
+          ``local_prefill_queue_cap`` -- an **amplification factor**, since the
+          cost of inserting ``T_prefill`` of work into a queue at utilisation
+          ``rho`` is the wait it inflicts on everything behind it, not the
+          service time itself.
+
+        Measured 2026-09-17 (2 Decode instances, 512-token outputs, 1250-token
+        prompts): with the old reading of the cap -- a literal 3 *milliseconds*
+        -- the externality was inert against a 731 ms transfer, so the rule
+        chose local in 100% of requests at *every* Decode utilisation up to
+        125%, including the runs where TTFT p50 had already reached 9.4 s.
+        The cap is still 3.0 by default, so the decision on the deployment's own
+        calibration is unchanged; raising it (``--local-queue-cap``) is what
+        enables the substitution, and §6.9 of the paper draft contrasts the two.
         Returns ``(use_local, local_ms, transfer_ms)``.
         """
         if tokens <= 0:
@@ -627,14 +696,20 @@ class Router:
         else:
             transfer_ms = (self.transfer_fixed_ms_cross
                            + self.transfer_ms_per_1k_cross * thousands)
-        local_ms = self.local_prefill_ms_per_1k * thousands
+        link = getattr(self, "pd_link", None)
+        if link is not None and now_ns:
+            transfer_ms += float(link.pending_ns(
+                int(getattr(prefill, "instance_id", -1)), int(now_ns))) / 1e6
+        local_service_ms = self.local_prefill_ms_per_1k * thousands
+        local_ms = local_service_ms
         if self.local_prefill_queue_weight:
             budget = max(1.0, float(getattr(decode, "max_num_seqs", 1) or 1))
             inflight = float(len(getattr(decode, "running", ()) or ())
                              + len(getattr(decode, "waiting", ()) or ()))
             rho = min(1.0, inflight / budget)
-            externality = min(self.local_prefill_queue_cap,
-                              local_ms * (rho / max(1e-6, 1.0 - rho)))
+            amplification = rho / max(1e-6, 1.0 - rho)
+            externality = local_service_ms * min(self.local_prefill_queue_cap,
+                                                 amplification)
             local_ms += self.local_prefill_queue_weight * externality
         return local_ms < transfer_ms, local_ms, transfer_ms
 
@@ -899,7 +974,8 @@ class Router:
                         use_local = True
                     else:
                         use_local, _, _ = self.kv_exchange_decision(
-                            sched, decode_sched, req_data['input_toks'])
+                            sched, decode_sched, req_data['input_toks'],
+                            current_time_ns)
                     if use_local:
                         sched = decode_sched
                         local_request = True

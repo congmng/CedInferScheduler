@@ -67,27 +67,35 @@ def fig_arms_hetero(out):
 
 
 def fig_waterfall(out):
-    """Where the 9x comes from: metric fix, planning, elasticity."""
-    stages = [("load /\ncache_aware", 403.0, BLUE),
-              ("+ binding-resource\nmetric", 179.7, GREEN),
-              ("+ byte-budget\nplanning", 65.3, ORANGE),
-              ("+ structural\nelasticity", 45.2, RED)]
-    fig, ax = plt.subplots(figsize=(6.4, 3.4))
-    prev = stages[0][1]
-    for i, (label, value, colour) in enumerate(stages):
+    """Where the 9.7x comes from, on one board, with every level measured.
+
+    The review of the draft pointed out that the middle step was mis-attributed:
+    the jump from `load` to `kv_aware` is reproduced almost exactly by `load_rr`
+    (the *same* score with a round-robin tie-break), so it is the tie-break, not
+    the binding-resource metric, that recovers it.  Levels are `load` ->
+    `load_rr` -> `casr_lp` -> `casr_full` on 6xRTX4090 (r9-tiebreak.json).
+    """
+    data = _load("r9-tiebreak.json")
+    stages = [("load", "load", GREY),
+              ("+ round-robin\ntie-break", "load_rr", "#8fbcd4"),
+              ("+ byte-budget\nplanning", "casr_lp", ORANGE),
+              ("+ structural\nelasticity", "casr_full", RED)]
+    fig, ax = plt.subplots(figsize=(6.6, 3.4))
+    prev = data[stages[0][1]]["e2e_mean_ms"] / 1000
+    for i, (label, arm, colour) in enumerate(stages):
+        value = data[arm]["e2e_mean_ms"] / 1000
         ax.bar(i, value, 0.55, color=colour)
         ax.text(i, value + 12, f"{value:.0f} s", ha="center", fontsize=8)
         if i:
-            drop = prev / value
             ax.annotate("", xy=(i - 0.28, value), xytext=(i - 0.72, prev),
                         arrowprops=dict(arrowstyle="->", color="#555", lw=1))
-            ax.text(i - 0.5, (value + prev) / 2 - 30, f"{drop:.2f}x",
+            ax.text(i - 0.5, (value + prev) / 2 - 34, f"{prev / value:.2f}x",
                     ha="center", fontsize=8, color="#555")
         prev = value
-    ax.set_xticks(range(len(stages)), [s[0] for s in stages], fontsize=8)
-    ax.set_ylabel("E2E mean latency (s)")
-    ax.set_ylim(0, 470)
-    ax.set_title("Decomposing the gap: 403 s -> 45 s (9.0x)")
+    ax.set_xticks(range(len(stages)), [s_[0] for s_ in stages], fontsize=8)
+    ax.set_ylabel("E2E mean (s)")
+    ax.set_ylim(0, 500)
+    ax.set_title("One board, four measured levels: 419 s -> 43 s (9.7x)")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(out / "fig-waterfall.png", dpi=200)
@@ -202,14 +210,146 @@ def fig_models(out):
     plt.close(fig)
 
 
+def _r8_rows(name, order_key):
+    """Parse an R8 archive into {(setting, arm): record}, sorted by setting."""
+    data = _load(name)
+    rows = []
+    for key, value in data.items():
+        tag, arm = key.split("/")
+        rows.append((order_key(tag), tag, arm, value))
+    return sorted(rows)
+
+
+def _rps(tag):
+    return int(tag.split("rps")[1])
+
+
+def _outlen(tag):
+    return int(tag.split("-out")[1])
+
+
+def fig_q2_output_length(out):
+    """Output length alone does not move the Q2 decision on this board."""
+    rows = _r8_rows("r8-output-length.json", _outlen)
+    fig, ax = plt.subplots(figsize=(6.4, 3.4))
+    for arm, colour, marker in (("load", GREY, "s"), ("casr_lp", RED, "o")):
+        pts = [(tag, rec["local_share"] * 100) for _, tag, a, rec in rows if a == arm]
+        ax.plot([_outlen(t) for t, _ in pts], [v for _, v in pts],
+                marker=marker, color=colour, label=arm, lw=2)
+    ax.set_xscale("log")
+    ax.set_ylim(-5, 110)
+    ax.set_xticks([16, 64, 128, 256, 512], ["16", "64", "128", "256", "512"])
+    ax.set_xlabel("output length, tokens (forced)")
+    ax.set_ylabel("requests served locally (%)")
+    ax.set_title("Q2 vs output length: no crossover, the Decode never saturates")
+    ax.text(20, 50, "6 Decodes x 16 slots ~ 48 req/s of headroom,\n"
+                    "offered load is 8 req/s", fontsize=7.5, color="#555")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig-q2-output-length.png", dpi=200)
+    plt.close(fig)
+
+
+def fig_q2_decode_load(out):
+    """The substitution fires once the Decode queue is priced.
+
+    Two rules on the same traces and the same board: ``cap=3`` is the
+    deployment-derived reading (the externality was capped at 3 *milliseconds*,
+    i.e. inert against a 731 ms transfer), ``cap=50`` treats the cap as an
+    amplification factor and also charges the producer's egress backlog.
+    """
+    inert = _r8_rows("r8-decodeload-cap3.json", _rps)
+    fixed = _r8_rows("r8-decodeload-cap50.json", _rps)
+    fig, ax = plt.subplots(figsize=(6.6, 3.4))
+    for rows, style, label in ((inert, "--", "queue term inert (cap = 3 ms)"),
+                               (fixed, "-", "queue term priced (cap = 50x)")):
+        for arm, colour, marker in (("load", GREY, "s"), ("casr_lp", RED, "o")):
+            pts = [(_rps(tag), rec["local_share"] * 100)
+                   for _, tag, a, rec in rows if a == arm]
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], style,
+                    marker=marker, color=colour, lw=1.8,
+                    label=f"{arm}, {label}")
+    ax.set_ylim(-5, 110)
+    ax.set_xlabel("offered load (req/s)  --  512-token outputs, 2 Decodes")
+    ax.set_ylabel("requests served locally (%)")
+    ax.set_title("Q2 switches only when the Decode queue is in the price")
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig-q2-decode-load.png", dpi=200)
+    plt.close(fig)
+
+
+def fig_tiebreak(out):
+    """Is the 735/0 skew the metric's fault, or the tie-break's?"""
+    data = _load("r9-tiebreak.json")
+    arms = ["load", "load_rr", "kv_aware", "casr_lp", "casr_full"]
+    means = [data[a]["e2e_mean_ms"] / 1000 for a in arms]
+    x = np.arange(len(arms))
+    fig, ax = plt.subplots(figsize=(6.8, 3.5))
+    colours = [GREY, "#8fbcd4", BLUE, ORANGE, RED]
+    ax.bar(x, means, 0.6, color=colours)
+    for xi, arm, value in zip(x, arms, means):
+        ax.text(xi, value + 8, f"{value:.0f} s", ha="center", fontsize=8)
+    # The landing goes under the arm name rather than inside the bars: the
+    # spread is the point (735/0 against 368/367), and in-bar text either
+    # overflows the short bars or collides with the tall one.
+    ax.set_xticks(x, [f"{arm}\n" + " / ".join(str(v) for v in data[arm]["prefills"].values())
+                      for arm in arms], fontsize=8)
+    ax.tick_params(axis="x", pad=2)
+    ax.set_ylim(0, 480)
+    ax.set_ylabel("E2E mean (s)")
+    ax.set_title("The 735/0 skew is the tie-break: load_rr recovers 2.56x\n"
+                 "(Prefill landing under each arm)", fontsize=10)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig-tiebreak.png", dpi=200)
+    plt.close(fig)
+
+
+def fig_elastic_horizon(out):
+    """Structural elasticity pays only after the peak outlives the 45 s boot."""
+    data = _load("r7-peak-duration.json")
+    points = sorted((int(key.split("-peak")[1].split("/")[0]),
+                     key.split("/")[1], value) for key, value in data.items())
+    peaks = sorted({peak for peak, _, _ in points})
+    lp = [v["e2e_mean_ms"] / 1000 for p, arm, v in points if arm == "casr_lp"]
+    full = [v["e2e_mean_ms"] / 1000 for p, arm, v in points if arm == "casr_full"]
+    gains = [(a - b) / a * 100 for a, b in zip(lp, full)]
+
+    fig, ax = plt.subplots(figsize=(6.8, 3.5))
+    x = np.arange(len(peaks))
+    ax.bar(x - 0.2, lp, 0.4, label="casr_lp (static pool)", color=ORANGE)
+    ax.bar(x + 0.2, full, 0.4, label="casr_full (+P allowed)", color=RED)
+    for xi, gain, a, b in zip(x, gains, lp, full):
+        ax.text(xi, max(a, b) + 3, f"{gain:+.1f}%", ha="center", fontsize=8.5)
+    ax.axvspan(-0.5, 0.5, color="#bbb", alpha=0.25)
+    ax.text(0.08, 62, "peak shorter than the 45 s\ncontainer boot: no gain",
+            ha="center", fontsize=7.5, color="#444")
+    ax.set_xticks(x, [f"{p} s" for p in peaks])
+    ax.set_xlabel("peak duration  (1250-token prompts, 8 req/s, 45 s boot)")
+    ax.set_ylabel("E2E mean (s)")
+    ax.set_ylim(0, 100)
+    ax.set_title("Elasticity's break-even: the peak has to outlive the boot")
+    ax.legend(fontsize=8, loc="upper left", framealpha=0.95)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out / "fig-elastic-horizon.png", dpi=200)
+    plt.close(fig)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", default=str(REPO.parent / "docs" / "figs"))
     args = parser.parse_args()
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    for fn in (fig_arms_hetero, fig_waterfall, fig_kv_size_flip,
-               fig_hotprefix, fig_slo, fig_models):
+    figures = (fig_arms_hetero, fig_waterfall, fig_kv_size_flip,
+               fig_hotprefix, fig_slo, fig_models,
+               fig_q2_output_length, fig_q2_decode_load, fig_tiebreak,
+               fig_elastic_horizon)
+    for fn in figures:
         fn(out)
         print("wrote", fn.__name__)
     return 0

@@ -93,7 +93,8 @@ def _kv_bytes_per_token(model, prompt_tokens):
 def build(domains, min_active=2, max_active=None, structural=False,
           prefix_caching=True, model=MODEL, prompt_tokens=1250,
           cross_gbps=CROSS_GBPS, cross_rtt_ms=CROSS_LATENCY_NS / 1e6,
-          kv_egress_gbps=KV_EGRESS_GBPS):
+          kv_egress_gbps=KV_EGRESS_GBPS, local_prefill="never",
+          inactive_decodes=0, local_queue_cap=None):
     """``cross_gbps``/``cross_rtt_ms`` describe the *inter-domain* link.
 
     They are the environment knob: the same fleet with a 0.11 GB/s / 48 ms
@@ -164,9 +165,16 @@ def build(domains, min_active=2, max_active=None, structural=False,
         # has to buy.  ``inactive_instances`` keeps them in the topology but off
         # every policy's candidate list, and the controller still revives them
         # when it scales out (casr/lifecycle.py sets ACTIVE on start).
-        "inactive_instances": [prefill_ids[index]
-                               for index in range(len(domains))
-                               if index >= min_active],
+        "inactive_instances": (
+            [prefill_ids[index] for index in range(len(domains))
+             if index >= min_active]
+            # Decode spares, optionally stopped outright.  Shrinking the Decode
+            # pool is what makes a Decode-utilisation sweep affordable: six
+            # Decodes x max_num_seqs 16 is ~48 req/s of headroom, so at the
+            # arena's 8 req/s no output length saturates them (measured
+            # 2026-09-17: queueing stayed at 0-4 ms even at 512 output tokens).
+            + [decode_ids[index] for index in range(len(domains))
+               if inactive_decodes and index >= len(domains) - int(inactive_decodes)]),
         "link_bw": cross_gbps,
         "link_latency": cross_latency_ns,
         "intra_node_link_bw": SAME_HOST_GBPS,
@@ -236,7 +244,18 @@ def build(domains, min_active=2, max_active=None, structural=False,
             # over-price its egress five-fold at 1250 tokens.
             "kv_bytes_per_token": _kv_bytes_per_token(model, prompt_tokens),
             "shared_links": shared_links,
-            "local_prefill": "never",
+            # ``never`` (historical default) charges every request the P/D
+            # handoff; ``auto`` lets *every* policy -- baselines included --
+            # price the handoff against a local recompute on the Decode.  The
+            # latter is what a fair main table needs: with ``never`` only the
+            # CASR arms had the option (see docs/CASR小论文稿.md 1.3 / 9 R4).
+            "local_prefill": local_prefill,
+            # Amplification the Decode's queue may add to a local recompute.
+            # 3.0 is the deployment-derived default; raising it lets the
+            # substitution actually fire on a saturated Decode (see
+            # Router.kv_exchange_decision).
+            **({"local_prefill_queue_cap": float(local_queue_cap)}
+               if local_queue_cap is not None else {}),
         },
     }
 
@@ -264,6 +283,21 @@ def main() -> int:
     parser.add_argument("--kv-egress-gbps", type=float,
                         default=KV_EGRESS_GBPS, dest="kv_egress_gbps",
                         help="producer-side KV push ceiling")
+    parser.add_argument("--local-prefill", default="never",
+                        choices=["never", "auto", "always"],
+                        dest="local_prefill",
+                        help="whether a request may skip the Prefill leg and "
+                             "recompute on its Decode (never/auto/always)")
+    parser.add_argument("--local-queue-cap", type=float, default=None,
+                        dest="local_queue_cap",
+                        help="cap on the Decode-queue amplification factor a "
+                             "local recompute is charged (default 3.0, the "
+                             "deployment-derived value)")
+    parser.add_argument("--inactive-decodes", type=int, default=0,
+                        dest="inactive_decodes",
+                        help="stop this many Decode instances (they stay in the "
+                             "topology but no policy may use them); used to "
+                             "raise Decode utilisation at a fixed arrival rate")
     parser.add_argument("--out", default="configs/cluster/hetero6_generated.json")
     args = parser.parse_args()
 
@@ -277,7 +311,10 @@ def main() -> int:
                    structural=args.structural, model=args.model,
                    prompt_tokens=args.prompt_tokens,
                    cross_gbps=args.cross_gbps, cross_rtt_ms=args.cross_rtt_ms,
-                   kv_egress_gbps=args.kv_egress_gbps)
+                   kv_egress_gbps=args.kv_egress_gbps,
+                   local_prefill=args.local_prefill,
+                   inactive_decodes=args.inactive_decodes,
+                   local_queue_cap=args.local_queue_cap)
     path = pathlib.Path(args.out)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8")

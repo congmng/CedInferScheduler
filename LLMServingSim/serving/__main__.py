@@ -357,12 +357,13 @@ def main():
                         '``torch_dtype`` (falling back to bfloat16). Overrides only take effect if the profiler '
                         'produced matching data under perf/<hw>/<model>/<variant>/tp<N>/')
     parser.add_argument('--request-routing-policy', type=str,
-                        choices=['LOAD', 'RR', 'RAND', 'CACHE_AWARE', 'KV_AWARE', 'CUSTOM'], default='LOAD',
+                        choices=['LOAD', 'LOAD_RR', 'RR', 'RAND', 'CACHE_AWARE', 'KV_AWARE', 'CUSTOM'], default='LOAD',
                         help='request routing policy across instances: LOAD (vLLM-style weighted least-loaded, default), '
                         'RR (round-robin), RAND (random), '
                         'CACHE_AWARE (SGLang-style longest-prefix match with load overflow), '
                         'KV_AWARE (least-loaded on the binding resource: KV egress '
                         'wait vs compute wait, the fixed version of the above), '
+                        'LOAD_RR (LOAD with a round-robin tie-break), '
                         'CUSTOM (user-defined)')
     parser.add_argument('--expert-routing-policy', type=str,
                         choices=['BALANCED', 'RR', 'RAND', 'CUSTOM'],

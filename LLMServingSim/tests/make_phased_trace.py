@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
                              "and the P/D handoff only become visible once the "
                              "prompt is long enough that the KV -- not the "
                              "weights -- is the expensive thing to move.")
+    parser.add_argument("--force-output-tokens", type=int, default=0,
+                        dest="force_output_tokens",
+                        help="Force every request to generate this many tokens "
+                             "(0 = keep the pool's own lengths).  The pool's "
+                             "outputs are median 68 tokens, so capping them with "
+                             "--max-output-tokens cannot sweep the Decode-side "
+                             "load; this flag is what makes an output-length "
+                             "sweep an actual sweep.  Output ids are cycled from "
+                             "the row's own ids so the arrays stay consistent.")
     return parser.parse_args()
 
 
@@ -82,6 +91,15 @@ def main() -> int:
 
     source = pathlib.Path(args.input)
     rows = [json.loads(line) for line in source.open(encoding="utf-8") if line.strip()]
+    if args.force_output_tokens:
+        want = int(args.force_output_tokens)
+        for row in rows:
+            ids = list(row.get("output_tok_ids") or [1])
+            if not ids:
+                ids = [1]
+            reps = (want + len(ids) - 1) // len(ids)
+            row["output_tok_ids"] = (ids * reps)[:want]
+            row["output_toks"] = want
     if args.pack > 1:
         packed = []
         for start in range(0, len(rows) - args.pack + 1, args.pack):
