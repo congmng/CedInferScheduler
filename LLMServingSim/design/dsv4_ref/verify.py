@@ -15,7 +15,7 @@ Three checks, in the order the design depends on them:
    Hopper-only; the Triton port later has to reproduce the same numbers.
 
     python3 -m design.dsv4_ref.verify --config small --tokens 256
-    python3 -m design.dsv4_ref.verify --config p13b --tokens 512 --device cuda
+    python3 -m design.dsv4_ref.verify --config p15b --tokens 512 --device cuda
 """
 
 from __future__ import annotations
@@ -118,4 +118,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

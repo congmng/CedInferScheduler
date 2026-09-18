@@ -35,6 +35,25 @@ docker run --rm --entrypoint python3 -v "$PWD":/work -w /work \
 冒烟档的层结构：ratio-0 层 window 128 / states 0；ratio-4 层 states 32(每 128 token)、
 window 8；ratio-128 层 states 1、window 128 —— 与 `coff·ratio` 的定义一致。
 
+## 四档配置（`REF_CONFIGS`，`--summary-only` 直接报出）
+
+结构一律是 MLA latent + single-head indexer + compressor + MoE，词表 64k，
+ratio 走官方交替模式。
+
+| 档 | 层/hidden/heads | MoE | 总参 / 激活 | KV/token (bf16 / fp8) | 权重 bf16 / fp8 |
+|---|---|---:|---:|---:|---:|
+| `small` | 12 / 1024 / 16 | 32, top-2 | 0.877B / 0.176B | 8.44 / 4.22 KB | 1.75 / 0.88 GB |
+| `p5b` | 20 / 1792 / 14 | 40, top-2 | 5.131B / 0.712B | 12.50 / 6.25 KB | 10.26 / 5.13 GB |
+| `p15b` | 28 / 2560 / 20 | 48, top-3 | 14.866B / 2.145B | 16.56 / 8.28 KB | 29.73 / 14.87 GB |
+| `p29b` | 30 / 3072 / 24 | 64, top-3 | 29.610B / 3.302B | 17.58 / 8.79 KB | 59.22 / 29.61 GB |
+
+**估算器 vs 模块树（`small`，逐项对过账）**：估算 877,000,000，模块树
+831,341,312 → **估算高 5.2%**。差在三处：
+① 估算器给每层都计 `index_n_heads` 头的 indexer（31.5M），而模块里 indexer 是
+**单头**且只在压缩层（1.21M）→ 高估 30.2M；
+② 估算器没有 `kv_state_proj`（compress state → `head_dim`），模块里有 3.67M → 低估；
+③ MoE 估算比模块高 1.57M/层 → 高估 18.9M。
+
 ## 设计上踩过并修掉的两个坑
 
 1. **compressor 不能对整窗做 dense 投影**（参数 `hidden×window×state`，

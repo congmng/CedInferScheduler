@@ -171,4 +171,28 @@ def _p15b() -> DSV4RefConfig:
     )
 
 
-REF_CONFIGS: dict[str, DSV4RefConfig] = {"small": _small(), "p15b": _p15b()}
+def _p5b() -> DSV4RefConfig:
+    """The tier that fits on one 24GB card in bf16 (10.3GB of weights)."""
+    return DSV4RefConfig(
+        hidden_size=1792, num_hidden_layers=20, num_attention_heads=14,
+        head_dim=512, qk_rope_head_dim=64, q_lora_rank=448, o_lora_rank=384,
+        o_groups=7, index_head_dim=128, index_n_heads=14, index_topk=384,
+        n_routed_experts=40, num_experts_per_tok=2, moe_intermediate_size=1024,
+        vocab_size=65536,
+    )
+
+
+def _p29b() -> DSV4RefConfig:
+    """The A100 tier: bf16 weights alone are 59GB, so it needs an 80GB card."""
+    return DSV4RefConfig(
+        hidden_size=3072, num_hidden_layers=30, num_attention_heads=24,
+        head_dim=512, qk_rope_head_dim=64, q_lora_rank=768, o_lora_rank=640,
+        o_groups=8, index_head_dim=128, index_n_heads=24, index_topk=512,
+        n_routed_experts=64, num_experts_per_tok=3, moe_intermediate_size=1536,
+        vocab_size=65536,
+    )
+
+
+REF_CONFIGS: dict[str, DSV4RefConfig] = {
+    "small": _small(), "p5b": _p5b(), "p15b": _p15b(), "p29b": _p29b(),
+}
