@@ -31,14 +31,36 @@ _perf_db_cache = {}
 #: ``prefill_scale`` lets a run bring the prefill side back onto the measured
 #: curve; ``tests/calibrate_simulator.py`` reports the factor per hardware.
 #: Default 1.0 leaves every existing result reproducible.
-_timing_calibration = {"prefill_scale": 1.0}
+#:
+#: ``decode_scale`` is the same idea on the Decode side, and it is *not* 1.0,
+#: because on 2026-09-18 the profile bundles were re-collected on vLLM 0.29.0
+#: (the engine the deployment actually runs) and the profiled Decode step
+#: covers only the kernels: 9.68 / 16.63 / 31.07 ms on 5090 / 4090 / 3090
+#: where the cluster reports 14.8 / 24.6 / 43.1-47.1 ms.  The ratio is
+#: 1.53 / 1.48 / 1.45 -- one constant, three cards, which is why the missing
+#: third is modelled as a multiplier on the profiled step rather than an
+#: additive per-step term (an additive fit would need 6.0 / 9.7 / 14.0 ms,
+#: a 2.3x spread).  The excess is attention + sampling + scheduler + host,
+#: none of which the layer-wise eager profile times.
+#:
+#: With the *old* 0.27.1 bundles the same ratios were 1.00 / 0.96 / 1.45, so
+#: no single constant fit them; that is the evidence that the re-measurement
+#: is the right one and the profile was the thing that was off.
+DECODE_STEP_SCALE = 1.5
+
+_timing_calibration = {"prefill_scale": 1.0, "decode_scale": DECODE_STEP_SCALE}
 
 
-def set_timing_calibration(prefill_scale=1.0):
-    """Scale prefill-side compute node times (see ``_timing_calibration``)."""
+def set_timing_calibration(prefill_scale=1.0, decode_scale=DECODE_STEP_SCALE):
+    """Scale per-side compute node times (see ``_timing_calibration``).
+
+    ``decode_scale=1.0`` restores the raw profiled kernel time.
+    """
     value = float(prefill_scale)
     _timing_calibration["prefill_scale"] = value if value > 0 else 1.0
-    return _timing_calibration["prefill_scale"]
+    decode = float(decode_scale)
+    _timing_calibration["decode_scale"] = decode if decode > 0 else DECODE_STEP_SCALE
+    return dict(_timing_calibration)
 
 
 def timing_calibration():
@@ -1058,11 +1080,18 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
     else:  # dense
         latency_ns = _lookup_dense(ctx.perf_db, layer_name, ctx.tp_size, bctx.total_len)
 
-    # Prefill-side calibration (see ``_timing_calibration``).  Applied to the
-    # compute node only: the KV egress is emitted separately and the decode
-    # step already matches the measured TPOT.
-    scale = _timing_calibration["prefill_scale"]
-    if scale != 1.0 and getattr(getattr(bctx, "batch", None), "num_prefill", 0):
+    # Per-side calibration (see ``_timing_calibration``).  Applied to the
+    # compute node only: the KV egress is emitted separately.
+    batch = getattr(bctx, "batch", None)
+    num_prefill = getattr(batch, "num_prefill", 0)
+    if num_prefill:
+        scale = _timing_calibration["prefill_scale"]
+    else:
+        # Pure Decode step: the profile times the kernels, the cluster's TPOT
+        # also carries attention, sampling, scheduler and host (see the
+        # ``DECODE_STEP_SCALE`` note above).
+        scale = _timing_calibration["decode_scale"]
+    if scale != 1.0:
         latency_ns = int(latency_ns * scale)
 
     # Size calculation uses the same canonical layer names.

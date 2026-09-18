@@ -5,15 +5,21 @@ The CASR policy's per-instance service times come from the *deployment's*
 output tokens at concurrency 8).  The simulator, however, executes from the
 profiler bundles, and the two disagree about how much slower a second card is:
 
-===========  ===================  ===============  ==================
-Decode        deployment           profiled step     cluster TPOT
-instance      ``service_ms``        (1250-token        (1250-token
-              implied per token     context, 1 seq)    prompt, 16 out)
-===========  ===================  ===============  ==================
-``d5090``     9.0 ms                14.8 ms           15.0 ms
-``d4090``     9.8 ms                25.8 ms           24.6 ms
-``d3090a``    26.4 ms               31.3 ms           43.1-47.1 ms
-===========  ===================  ===============  ==================
+===========  ================  ==============  ==============  ==========
+Decode        profiled kernels  with the        cluster TPOT    overhead
+instance      (0.29.0 bundle)   Decode scale    (1250-token     ratio
+                                 1.5x            prompt, 16 out)
+===========  ================  ==============  ==============  ==========
+``d5090``     9.68 ms           14.5 ms         14.5-15.0 ms    1.53x
+``d4090``     16.63 ms          24.9 ms         24.6 ms         1.48x
+``d3090a``    31.07 ms          46.6 ms         43.1-47.1 ms    1.45x
+===========  ================  ==============  ==============  ==========
+
+The third column is ``step_cost_ns(..., decode=True)``; the last is what the
+profiled kernel time would have to be multiplied by to reach the cluster --
+one constant for three cards, which is why the gap is modelled as a multiplier
+rather than an additive per-step term (an additive fit needs 6.0 / 9.7 /
+14.0 ms).  See ``trace_generator.DECODE_STEP_SCALE``.
 
 The deployment's spread is nearly flat (1.09x between the 5090 and the 4090)
 while both the profiler (1.74x) and the cluster's own measured TPOT (1.64x)
@@ -32,11 +38,12 @@ will actually behave.  Source of the TPOT column:
 """
 
 from .trace_generator import (_load_architecture, _load_perf_db, _lookup_1d,
-                              _tp_tables, plan_layer_sequences, resolve_variant)
+                              _tp_tables, plan_layer_sequences, resolve_variant,
+                              timing_calibration)
 from .utils import get_config
 
 
-def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None):
+def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None, decode=False):
     """Profiled cost of one forward pass, in ns.
 
     Prologue plus ``num_hidden_layers`` blocks plus the head, each layer read
@@ -46,6 +53,12 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None):
     ~0.01 ms at 1k context, three orders of magnitude below the dense term, so
     the ratio between two cards is carried by the weight read -- which is what
     the cluster's TPOT and prefill times measure.
+
+    ``decode=True`` applies the Decode-side calibration the simulator executes
+    with (``trace_generator.DECODE_STEP_SCALE``): the layer-wise profile times
+    kernels only, while the cluster's TPOT also carries attention, sampling,
+    scheduler and host.  Passing ``False`` gives the raw profiled figure --
+    useful when the question is what the profile itself says.
     """
     config = get_config(model)
     variant = variant or resolve_variant("bfloat16", "auto", config)
@@ -85,6 +98,8 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None):
                 total += dense_time(layer, blocks)
     for layer in sequence.get("head") or ():
         total += sequence_time(layer, 1)
+    if decode:
+        total = int(total * timing_calibration().get("decode_scale", 1.0))
     return total
 
 
@@ -113,7 +128,8 @@ def rescale_service_times(casr_config, instances, key="decode_service_ms",
         try:
             steps[instance_id] = step_cost_ns(
                 instance["hardware"], instance["model_name"],
-                tp=int(instance.get("tp_size", 1) or 1), tokens=tokens)
+                tp=int(instance.get("tp_size", 1) or 1), tokens=tokens,
+                decode=(tokens == 1))
         except (FileNotFoundError, KeyError, ImportError):
             # No profiler bundle for this card: keep the measured value.
             continue
@@ -162,7 +178,8 @@ def rescale_capacities(casr_config, instances, verbose=True):
         try:
             step_ms = step_cost_ns(instance["hardware"], instance["model_name"],
                                    tp=int(instance.get("tp_size", 1) or 1),
-                                   tokens=1 if role == "decode" else prefill_ref) / 1e6
+                                   tokens=1 if role == "decode" else prefill_ref,
+                                   decode=(role == "decode")) / 1e6
         except (FileNotFoundError, KeyError, ImportError):
             continue
         if step_ms <= 0:

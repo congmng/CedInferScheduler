@@ -517,10 +517,13 @@ def main():
     domain_aware_links = raw_cluster_config.get("intra_node_link_bw") is not None
     # Optional timing calibration (see trace_generator._timing_calibration).
     calibration = raw_cluster_config.get("sim_calibration") or {}
-    if calibration.get("prefill_scale"):
-        from .core.trace_generator import set_timing_calibration
-        applied = set_timing_calibration(calibration["prefill_scale"])
-        print(f"[calibration] prefill compute scaled by {applied}", flush=True)
+    if calibration.get("prefill_scale") or calibration.get("decode_scale"):
+        from .core.trace_generator import DECODE_STEP_SCALE, set_timing_calibration
+        applied = set_timing_calibration(
+            prefill_scale=calibration.get("prefill_scale", 1.0),
+            decode_scale=calibration.get("decode_scale", DECODE_STEP_SCALE),
+        )
+        print(f"[calibration] compute scaled by {applied}", flush=True)
     build_enable_local_offloading = args.enable_local_offloading or any(
         inst.get("enable_local_offloading", False) for inst in raw_instances)
     build_enable_attn_offloading = args.enable_attn_offloading or any(
