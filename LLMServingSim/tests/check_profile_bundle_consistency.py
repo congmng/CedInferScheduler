@@ -9,12 +9,12 @@ while 3090 and A100 used 0.29.0, and A100's attention grid stopped at
 noticed, because each bundle only describes itself.
 
 This walks the ``meta.yaml`` files and prints the fields that have to agree,
-flagging the ones that do not.  It is a report, not a test: a bundle that
-deliberately differs (like ``profiler/perf-v029``, which exists precisely to
-compare two engines) must still be inspectable.
+flagging the ones that do not.  It is a report, not a test, because a bundle
+may differ on purpose -- ``--root`` can point at any tree, so an A/B of two
+engines stays inspectable instead of tripping an assertion.
 
     python3 tests/check_profile_bundle_consistency.py --model Qwen/Qwen3-8B
-    python3 tests/check_profile_bundle_consistency.py --root profiler/perf-v029
+    python3 tests/check_profile_bundle_consistency.py --root /tmp/other-bundles
 """
 
 from __future__ import annotations
