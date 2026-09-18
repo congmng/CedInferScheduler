@@ -75,6 +75,39 @@ class MemoryModel():
             self.full_attention_layers = len(
                 [i for i in indices if 0 <= int(i) < self.n_layer])
         self.window_tokens = int(geometry.get("window_tokens", 0) or 0)
+        # Per-layer compression (DeepSeek-V4 style).  ``kv_geometry`` above can
+        # only say "this many layers are full, the rest hold a window", and it
+        # prices every token-slot the same.  A CSA/HCA stack is different in two
+        # ways: each layer stores a different number of *values* per state
+        # (``2*coff*head_dim`` when compressed, ``head_dim + rope`` when full),
+        # and each state covers ``ratio`` tokens.  So this path returns bytes
+        # directly instead of going through the single-slot ``kv_tokens``
+        # arithmetic.  The numbers must match the reference implementation in
+        # ``design/dsv4_ref`` -- tests/test_dsv4_kv_layout.py pins that.
+        self.kv_layout = self.config.get("kv_layout") or {}
+        self._kv_values_per_token = None
+        if self.kv_layout:
+            ratios = [int(r) for r in (self.kv_layout.get("compress_ratios") or [])]
+            if len(ratios) != self.n_layer:
+                raise ValueError(
+                    f"kv_layout.compress_ratios has {len(ratios)} entries for "
+                    f"{self.n_layer} layers in {self.model}"
+                )
+            layout_head = int(self.kv_layout.get("head_dim") or self.head_dim)
+            rope = int(self.kv_layout.get("rope_head_dim", 0) or 0)
+            # Values stored per *state*: a full layer stores the MLA latent once
+            # per token, a compressed layer stores 2*coff*head_dim every `ratio`
+            # tokens.  ``_kv_values_per_token`` is the per-token figure the byte
+            # arithmetic uses (already divided by the ratio).
+            self._kv_state_values = [
+                (layout_head + rope) if r == 0
+                else 2 * (2 if r == 4 else 1) * layout_head
+                for r in ratios
+            ]
+            self._kv_values_per_token = [
+                v / (r if r else 1)
+                for v, r in zip(self._kv_state_values, ratios)
+            ]
         self.vocab_size = self.config['vocab_size']
         # Accept either the Mistral-style ``num_local_experts`` or the
         # HF/Qwen-style ``num_experts`` key — profiler configs track
@@ -287,8 +320,24 @@ class MemoryModel():
         # (kv_head, batch_size, n_embd//n_head, seq_len) per layer
         # return batch_size = 1 to caclulate max batch_size in scheduler
 
+        if self._kv_values_per_token is not None:
+            return self._kv_layout_bytes(seq)
         # K & V multiply 2
         return 2 * self.kv_dim * self.kv_tokens(seq) * self.kv_fp // self.num_npus
+
+    def _kv_layout_bytes(self, seq):
+        """Bytes a ``seq``-token context occupies on one rank, per-layer ratios.
+
+        A full layer holds one ``(head_dim + rope)`` latent per token; a
+        compressed layer holds one ``2*coff*head_dim`` state every ``ratio``
+        tokens, i.e. ``seq / ratio`` states.  Unlike the windowed path this is
+        linear in ``seq``, so the *marginal* and the *average* cost coincide --
+        which is why ``_kv_values_per_token`` (already ratio-divided) times
+        ``seq`` is the whole arithmetic.
+        """
+        # ``_kv_values_per_token`` already accounts for the compression ratio.
+        return int(sum(self._kv_values_per_token) * seq
+                   * self.kv_fp // self.num_npus)
 
     def kv_tokens(self, seq):
         """Token-slots of KV a sequence of ``seq`` tokens occupies on one rank.
@@ -322,6 +371,8 @@ class MemoryModel():
         more at wider GQA ratios. It also honours ``kv_cache_dtype``, which the
         activation size did not.
         """
+        if self._kv_values_per_token is not None:
+            return self._kv_layout_bytes(num_tokens)
         return 2 * self.kv_dim * self.kv_tokens(num_tokens) * self.kv_fp // self.tp_size
 
     def free_weight(self):
@@ -516,6 +567,28 @@ def full_cluster_kv_bytes_per_token(model, fp, kv_cache_dtype='auto', tokens=0):
     kv_dim = kv_head * head_dim
     n_layer = config['num_hidden_layers']
     kv_fp = 1 if kv_cache_dtype == 'fp8' else fp // 8
+    # Per-layer compression (DeepSeek-V4 style): every layer declares how many
+    # tokens one stored state covers, and the *state width* differs between full
+    # and compressed layers.  Averaged over a prompt this is length-independent
+    # (each compressed layer contributes ``values/ratio`` per token), so the
+    # ``tokens`` argument below does not change the answer here -- unlike the
+    # windowed geometry, whose layers stop growing at the window.
+    layout = config.get("kv_layout") or {}
+    ratios = [int(r) for r in (layout.get("compress_ratios") or [])]
+    if ratios:
+        if len(ratios) != n_layer:
+            raise ValueError(
+                f"kv_layout.compress_ratios has {len(ratios)} entries for "
+                f"{n_layer} layers in {model}"
+            )
+        layout_head = int(layout.get("head_dim") or head_dim)
+        rope = int(layout.get("rope_head_dim", 0) or 0)
+        values = sum(
+            (layout_head + rope) if r == 0
+            else 2 * (2 if r == 4 else 1) * layout_head / r
+            for r in ratios
+        )
+        return int(round(values * kv_fp))
     geometry = config.get("kv_geometry") or {}
     full_layers = max(0, min(n_layer, int(geometry.get("full_layers", n_layer))))
     indices = geometry.get("full_layer_indices")

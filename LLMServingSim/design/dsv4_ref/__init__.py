@@ -25,5 +25,19 @@ Design decisions taken here (see docs/DSV4_10-30B跨卡设计.md):
 """
 
 from .config import DSV4RefConfig, REF_CONFIGS                       # noqa: F401
-from .model import DSV4RefModel                                      # noqa: F401
 
+__all__ = ["DSV4RefConfig", "REF_CONFIGS", "DSV4RefModel"]
+
+
+def __getattr__(name):
+    """Import the model lazily so ``.config`` works without torch installed.
+
+    The simulator's test-suite runs on hosts that have no torch (only the vLLM
+    image does), and it needs ``REF_CONFIGS`` for the KV cross-check in
+    ``tests/test_dsv4_kv_layout.py``.  Importing the module tree at package
+    import time made that cross-check impossible.
+    """
+    if name == "DSV4RefModel":
+        from .model import DSV4RefModel
+        return DSV4RefModel
+    raise AttributeError(name)
