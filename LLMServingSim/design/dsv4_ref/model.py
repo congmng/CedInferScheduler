@@ -49,9 +49,14 @@ def rope(x: torch.Tensor, positions: torch.Tensor, rope_dim: int,
         return x
     nope, rope_part = x[..., :-rope_dim], x[..., -rope_dim:]
     half = rope_dim // 2
+    # Angles are built in fp32 (that is where the precision is), then cast back
+    # to the activation dtype: leaving them fp32 would silently upcast the whole
+    # attention path and make the bf16 model fail at the first o_lora_a matmul.
+    angles_dtype = rope_part.dtype
     freqs = theta ** (-torch.arange(half, device=x.device, dtype=torch.float32) / half)
     angles = positions.float()[:, :, None] * freqs[None, None, :]      # (B,T,half)
-    cos, sin = angles.cos()[:, :, None, :], angles.sin()[:, :, None, :]
+    cos = angles.cos()[:, :, None, :].to(angles_dtype)
+    sin = angles.sin()[:, :, None, :].to(angles_dtype)
     a, b = rope_part[..., :half], rope_part[..., half:]
     rotated = torch.cat([a * cos - b * sin, a * sin + b * cos], dim=-1)
     return torch.cat([nope, rotated], dim=-1)
@@ -297,4 +302,3 @@ class DSV4RefModel(nn.Module):
             x, info = layer(x, positions)
             infos.append(info)
         return self.lm_head(self.norm(x)), infos
-

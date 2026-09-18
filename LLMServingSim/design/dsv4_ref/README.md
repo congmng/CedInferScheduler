@@ -25,12 +25,20 @@ docker run --rm --entrypoint python3 -v "$PWD":/work -w /work \
 
 ## 已记录的实测（2026-09-18）
 
-| 检查 | 4090 (sm89) | 5090 (sm120) |
-|---|---|---|
-| 参数（模块树） | 831.3M | 831.3M |
-| 与估算器之差 | 5.2% | 5.2% |
-| KV/token | 8.438 KB | 8.438 KB |
-| logits checksum | -257011226.4 | -257010971.9（相对差 1e-6） |
+`--config small --tokens 128`，fp32：
+
+| 检查 | 3090 (sm86) | 4090 (sm89) | 5090 (sm120) |
+|---|---|---|---|
+| 参数（模块树） | 831,341,312 | 同 | 同 |
+| 与估算器之差 | 5.2% | 5.2% | 5.2% |
+| KV/token | 8.438 KB | 8.438 KB | 8.438 KB |
+| logits checksum | -257011068.9 | -257011226.4 | -257010971.9 |
+| 与 4090 相对差 | 6.1e-7 | — | 9.9e-7 |
+
+**Ampere / Ada / Blackwell 三档一致到 1e-6**（差异只是归约顺序）。
+bf16 也跑通了（4090 checksum `-257179527.3`）；修掉的那条 fp32 泄漏见
+`model.py` 的 `rope()`：角度在 fp32 里算完必须 cast 回激活 dtype，
+否则整条注意力路径被上采成 fp32，bf16 权重会在第一个 `o_lora_a` 报 dtype 错。
 
 冒烟档的层结构：ratio-0 层 window 128 / states 0；ratio-4 层 states 32(每 128 token)、
 window 8；ratio-128 层 states 1、window 128 —— 与 `coff·ratio` 的定义一致。
