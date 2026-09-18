@@ -26,6 +26,7 @@ import platform
 
 import torch
 
+from . import model as model_module
 from .config import REF_CONFIGS
 from .model import DSV4RefModel
 
@@ -75,6 +76,10 @@ def main() -> int:
                         help="print the budget and KV accounting without "
                              "building the model (for sizes that do not fit "
                              "this GPU in fp32)")
+    parser.add_argument("--kernel", default="torch", choices=("torch", "triton"),
+                        help="sparse-state attention path; 'triton' is the "
+                             "portable kernel that has to replace FlashMLA / "
+                             "FlashInfer-sparse on sm80/86/89")
     args = parser.parse_args()
 
     cfg = REF_CONFIGS[args.config]
@@ -90,12 +95,14 @@ def main() -> int:
         print(json.dumps(out, indent=2))
         return 0
     dtype = getattr(torch, args.dtype)
+    model_module.USE_TRITON_SPARSE = args.kernel == "triton"
     model = DSV4RefModel(cfg).to(device=args.device, dtype=dtype).eval()
 
     report = {
         "device": args.device,
         "device_name": torch.cuda.get_device_name(0) if args.device == "cuda" else platform.machine(),
         "dtype": args.dtype,
+        "kernel": args.kernel,
         "config": cfg.summary(),
         "kv": kv_accounting(model),
     }

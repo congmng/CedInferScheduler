@@ -31,6 +31,11 @@ import torch.nn.functional as F
 
 from .config import DSV4RefConfig
 
+# Set by verify.py --kernel triton.  The sparse-state attention is the one
+# operator upstream only ships for Hopper+, so the layer has to be able to run
+# on either path while the port is being brought up.
+USE_TRITON_SPARSE = False
+
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float):
@@ -187,10 +192,11 @@ class Attention(nn.Module):
         if self.ratio and self.window < t:
             causal = causal & torch.ones(t, t, dtype=torch.bool,
                                          device=x.device).triu(1 - self.window)
-        weights = logits.masked_fill(~causal[None, None], float("-inf")).softmax(-1)
+        masked = logits.masked_fill(~causal[None, None], float("-inf"))
         values = base.unsqueeze(1).expand(b, t, t, self.head_dim)        # per-query view
 
         # compressed states: append the top-k selected values behind the window
+        sparse = None
         if self.compressor is not None and t >= self.ratio:
             kv_state, score_state, state_pos = self.compressor(x, positions)
             idx, _ = self.indexer(q_lat, score_state)                    # (B,T,K)
@@ -200,18 +206,44 @@ class Attention(nn.Module):
             gathered_pos = torch.gather(
                 state_pos[:, None].expand(b, t, -1), 2, idx)      # (B,T,K)
             valid = gathered_pos <= positions.unsqueeze(-1)
-            extra = torch.einsum("bthd,btkd->bhtk", q, sel) / math.sqrt(self.head_dim)
-            # A query whose whole top-k lands in the future has no valid entry:
-            # mask with a large finite value (not -inf, which would make the
-            # softmax NaN) and zero the block's contribution afterwards.
-            extra = extra.masked_fill(~valid[:, None], -1e30).softmax(-1)
-            extra = extra * valid[:, None].any(-1, keepdim=True).to(extra.dtype)
-            weights = torch.cat([weights, extra], dim=-1)
-            values = torch.cat([values, sel], dim=2)
+            # A query whose whole top-k lands in the future has no valid entry;
+            # -1e30 is a finite floor so the joint softmax below stays finite.
+            sparse_logits = (torch.einsum("bthd,btkd->bhtk", q, sel)
+                             / math.sqrt(self.head_dim))
+            sparse_logits = sparse_logits.masked_fill(~valid[:, None], -1e30)
+            sparse = (sparse_logits, sel)
             info["states"] = score_state.shape[1]
             info["selected"] = int(valid.sum(-1).float().mean().item())
 
-        out = torch.einsum("bhts,btsd->bthd", weights, values)
+        if sparse is not None and USE_TRITON_SPARSE and b == 1:
+            # Only the selected-state branch goes through triton_sparse_attn;
+            # the window branch stays dense (a banded attention torch handles
+            # fine, and a real stack would give it its own kernel).  Because
+            # the layer runs ONE joint softmax over window + states, the two
+            # branches have to be merged in log space -- normalising them
+            # separately and adding would give each set weight 1 no matter how
+            # much score mass it holds.
+            from .triton_sparse_attn import merge, triton_forward
+
+            m_w = masked.max(-1, keepdim=True).values
+            p_w = torch.exp(masked - m_w)
+            s_w = p_w.sum(-1, keepdim=True)
+            lse_w = (m_w + torch.log(s_w.clamp_min(1e-20))).squeeze(-1)
+            # einsum's output order follows its subscript string, so this is
+            # (B,T,H,D) even though the inputs are (B,H,T,*).
+            out_w = (torch.einsum("bhts,btsd->bthd", p_w, values)
+                     / s_w.transpose(1, 2).clamp_min(1e-20))
+            out_s, lse_s = triton_forward(q[0], proj[0], idx[0], valid[0])
+            out = merge(out_w, lse_w.transpose(1, 2), out_s.unsqueeze(0),
+                        lse_s.unsqueeze(0)).to(x.dtype)
+            info["kernel"] = "triton"
+        else:
+            if sparse is not None:
+                logits = torch.cat([masked, sparse[0]], dim=-1)
+                values = torch.cat([values, sparse[1]], dim=2)
+            else:
+                logits = masked
+            out = torch.einsum("bhts,btsd->bthd", logits.softmax(-1), values)
         out = out.reshape(b, t, self.n_heads * self.head_dim)
         chunks = torch.chunk(out, self.o_groups, dim=-1)
         out = torch.cat([proj_(chunk) for proj_, chunk in zip(self.o_lora_a, chunks)], dim=-1)

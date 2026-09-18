@@ -43,7 +43,9 @@ if triton is not None:
         s_ptr,            # (N, D)  -- compressed states, already projected
         idx_ptr,          # (T, K)  -- which state each query selected
         valid_ptr,        # (T, K)  -- 1 if that state is at or before the query
-        out_ptr,          # (T, H, D)
+        acc_ptr,          # (T, H, D)  unnormalised weighted sum
+        mx_ptr,           # (T, H)     running max of the scores
+        lse_ptr,          # (T, H)     log-sum-exp of the scores
         T, K,
         scale,
         H: tl.constexpr, D: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -78,8 +80,15 @@ if triton is not None:
             running_sum = running_sum * alpha + tl.sum(weights, axis=0)
             running_max = new_max
 
-        out = acc / tl.maximum(running_sum, 1e-20)
-        tl.store(out_ptr + t * H * D + h * D + d, out.to(out_ptr.dtype.element_ty))
+        tl.store(acc_ptr + t * H * D + h * D + d,
+                 acc.to(acc_ptr.dtype.element_ty))
+        # log-sum-exp rather than a normalised vector: a real layer has to merge
+        # this branch with the sliding-window branch before normalising.  `acc`
+        # is shifted by the running max, so the max has to travel with it --
+        # dividing by exp(lse) alone would be wrong by a factor of exp(max).
+        tl.store(mx_ptr + t * H + h, running_max)
+        lse = running_max + tl.log(tl.maximum(running_sum, 1e-20))
+        tl.store(lse_ptr + t * H + h, lse)
 
 
 def reference(q, states, idx, valid):
@@ -92,15 +101,32 @@ def reference(q, states, idx, valid):
 
 
 def triton_forward(q, states, idx, valid, block_k=64):
+    """Returns (attention output, log-sum-exp); see the kernel's acc/lse split."""
     t, h, d = q.shape
     k = idx.shape[1]
-    out = torch.empty_like(q)
+    # fp32 accumulator: the layer merges this branch with the window branch in
+    # log space, so rounding it here would cost accuracy for nothing.
+    acc = torch.empty(q.shape, device=q.device, dtype=torch.float32)
+    mx = torch.empty((t, h), device=q.device, dtype=torch.float32)
+    lse = torch.empty((t, h), device=q.device, dtype=torch.float32)
     _sparse_state_attn[(t, h)](
-        q, states, idx, valid.to(torch.int8), out,
+        q, states, idx, valid.to(torch.int8), acc, mx, lse,
         t, k, 1.0 / math.sqrt(d),
         H=h, D=d, BLOCK_K=block_k,
     )
-    return out
+    return acc / torch.exp(lse - mx)[..., None], lse
+
+
+def merge(branch_out, branch_lse, other_out, other_lse):
+    """Combine two softmax branches (window vs selected states) exactly.
+
+    Both branches softmax over disjoint key sets that the model attends to as
+    one set, so the exact merge is a log-sum-exp shift, not a weighted average.
+    """
+    top = torch.maximum(branch_lse, other_lse)[..., None]
+    w = torch.exp(branch_lse[..., None] - top)
+    v = torch.exp(other_lse[..., None] - top)
+    return (branch_out * w + other_out * v) / (w + v)
 
 
 def main() -> int:
@@ -130,7 +156,7 @@ def main() -> int:
     valid = torch.rand(args.tokens, args.topk, device=device) > 0.25
     valid[:, 0] = True
 
-    got = triton_forward(q, states, idx, valid, args.block_k)
+    got, _ = triton_forward(q, states, idx, valid, args.block_k)
     torch_bf16 = reference(q, states, idx, valid)
     # float64 reference on the same inputs: the yardstick for both paths
     exact = reference(q.double(), states.double(), idx, valid)
