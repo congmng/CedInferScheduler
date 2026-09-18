@@ -32,34 +32,62 @@ _perf_db_cache = {}
 #: curve; ``tests/calibrate_simulator.py`` reports the factor per hardware.
 #: Default 1.0 leaves every existing result reproducible.
 #:
-#: ``decode_scale`` is the same idea on the Decode side, and it is *not* 1.0,
-#: because on 2026-09-18 the profile bundles were re-collected on vLLM 0.29.0
-#: (the engine the deployment actually runs) and the profiled Decode step
-#: covers only the kernels: 9.68 / 16.63 / 31.07 ms on 5090 / 4090 / 3090
-#: where the cluster reports 14.8 / 24.6 / 43.1-47.1 ms.  The ratio is
-#: 1.53 / 1.48 / 1.45 -- one constant, three cards, which is why the missing
-#: third is modelled as a multiplier on the profiled step rather than an
-#: additive per-step term (an additive fit would need 6.0 / 9.7 / 14.0 ms,
-#: a 2.3x spread).  The excess is attention + sampling + scheduler + host,
-#: none of which the layer-wise eager profile times.
+#: ``decode_scale`` is the same idea on the Decode side, and it is *not* 1.0.
+#: All four bundles were re-collected on 2026-09-18 (vLLM 0.29.0, idle cards),
+#: and the profiled Decode step covers only the kernels:
 #:
-#: With the *old* 0.27.1 bundles the same ratios were 1.00 / 0.96 / 1.45, so
-#: no single constant fit them; that is the evidence that the re-measurement
-#: is the right one and the profile was the thing that was off.
+#:   card    profiled   cluster TPOT   ratio
+#:   5090     9.68 ms    15.0 ms        1.55
+#:   4090    16.63 ms    24.6 ms        1.48
+#:   3090    19.92 ms    43.1-47.1 ms   2.26
+#:
+#: The excess is attention + sampling + scheduler + host, none of which a
+#: layer-wise eager profile times -- but it is NOT one constant across cards,
+#: so it is calibrated per hardware against the deployment's own TPOT.  A
+#: single global factor cannot fit: the 3090 needs 2.26 where the other two
+#: need ~1.5, which is itself an open finding (the 3090's deployment runs at
+#: ~38% of its peak bandwidth where the 5090 and 4090 reach ~60-64%).
+#:
+#: It is a multiplier rather than an additive term because the *ratios* are
+#: what a single card's card-to-card comparison needs, and because an additive
+#: fit is worse within a card across token counts.  What is certain from the
+#: re-measurement: all three 09-10 bundles were inflated ~1.7x on their FFN
+#: terms relative to today (including the 3090, whose vLLM version never
+#: changed), so the old numbers were the anomaly, not the new ones.
 DECODE_STEP_SCALE = 1.5
 
-_timing_calibration = {"prefill_scale": 1.0, "decode_scale": DECODE_STEP_SCALE}
+#: Per-card Decode overhead, calibrated 2026-09-18 from the deployment's TPOT
+#: (``/mnt/home/casr/results/small3-*/metrics-*.jsonl``, 1250-token prompt,
+#: 16 output tokens) against the re-profiled kernel step.  Cards without an
+#: anchor fall back to ``DECODE_STEP_SCALE``.
+DECODE_STEP_SCALE_BY_HARDWARE = {
+    "RTX5090": 1.55,
+    "RTX4090": 1.48,
+    "RTX3090": 2.26,
+}
 
 
-def set_timing_calibration(prefill_scale=1.0, decode_scale=DECODE_STEP_SCALE):
+def decode_step_scale(hardware=None):
+    """Decode-side overhead factor for ``hardware`` (default if unknown)."""
+    return DECODE_STEP_SCALE_BY_HARDWARE.get(hardware, DECODE_STEP_SCALE)
+
+_timing_calibration = {"prefill_scale": 1.0, "decode_scale": None}
+
+
+def set_timing_calibration(prefill_scale=1.0, decode_scale=None):
     """Scale per-side compute node times (see ``_timing_calibration``).
 
-    ``decode_scale=1.0`` restores the raw profiled kernel time.
+    ``decode_scale`` overrides the per-hardware Decode factor for every card;
+    ``1.0`` restores the raw profiled kernel time.  ``None`` (the default)
+    keeps the calibrated per-hardware table.
     """
     value = float(prefill_scale)
     _timing_calibration["prefill_scale"] = value if value > 0 else 1.0
-    decode = float(decode_scale)
-    _timing_calibration["decode_scale"] = decode if decode > 0 else DECODE_STEP_SCALE
+    if decode_scale is None:
+        _timing_calibration["decode_scale"] = None
+    else:
+        decode = float(decode_scale)
+        _timing_calibration["decode_scale"] = decode if decode > 0 else None
     return dict(_timing_calibration)
 
 
@@ -1090,7 +1118,8 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
         # Pure Decode step: the profile times the kernels, the cluster's TPOT
         # also carries attention, sampling, scheduler and host (see the
         # ``DECODE_STEP_SCALE`` note above).
-        scale = _timing_calibration["decode_scale"]
+        override = _timing_calibration["decode_scale"]
+        scale = decode_step_scale(ctx.hardware) if override is None else override
     if scale != 1.0:
         latency_ns = int(latency_ns * scale)
 

@@ -5,21 +5,22 @@ The CASR policy's per-instance service times come from the *deployment's*
 output tokens at concurrency 8).  The simulator, however, executes from the
 profiler bundles, and the two disagree about how much slower a second card is:
 
-===========  ================  ==============  ==============  ==========
-Decode        profiled kernels  with the        cluster TPOT    overhead
-instance      (0.29.0 bundle)   Decode scale    (1250-token     ratio
-                                 1.5x            prompt, 16 out)
-===========  ================  ==============  ==============  ==========
-``d5090``     9.68 ms           14.5 ms         14.5-15.0 ms    1.53x
-``d4090``     16.63 ms          24.9 ms         24.6 ms         1.48x
-``d3090a``    31.07 ms          46.6 ms         43.1-47.1 ms    1.45x
-===========  ================  ==============  ==============  ==========
+===========  ================  ==============  ==============  ========
+Decode        profiled kernels  with the        cluster TPOT    Decode
+instance      (0.29.0 bundle)   per-card scale  (1250-token     scale
+                                                 prompt, 16 out)
+===========  ================  ==============  ==============  ========
+``d5090``     9.68 ms           14.9 ms         14.5-15.0 ms    1.55x
+``d4090``     16.63 ms          24.6 ms         24.6 ms         1.48x
+``d3090a``    19.92 ms          45.0 ms         43.1-47.1 ms    2.26x
+===========  ================  ==============  ==============  ========
 
-The third column is ``step_cost_ns(..., decode=True)``; the last is what the
-profiled kernel time would have to be multiplied by to reach the cluster --
-one constant for three cards, which is why the gap is modelled as a multiplier
-rather than an additive per-step term (an additive fit needs 6.0 / 9.7 /
-14.0 ms).  See ``trace_generator.DECODE_STEP_SCALE``.
+The third column is ``step_cost_ns(..., decode=True)``.  The gap the profile
+leaves is attention + sampling + scheduler + host, which a layer-wise eager
+profile does not time; it is calibrated **per card** because one constant does
+not fit (the 3090 needs 2.26x where the other two need ~1.5x -- itself an open
+finding, the 3090's deployment reaches only ~38% of its peak bandwidth where
+the 5090 and 4090 reach ~60-64%).  See ``trace_generator.DECODE_STEP_SCALE``.
 
 The deployment's spread is nearly flat (1.09x between the 5090 and the 4090)
 while both the profiler (1.74x) and the cluster's own measured TPOT (1.64x)
@@ -38,7 +39,8 @@ will actually behave.  Source of the TPOT column:
 """
 
 from .trace_generator import (_load_architecture, _load_perf_db, _lookup_1d,
-                              _tp_tables, plan_layer_sequences, resolve_variant,
+                              _tp_tables, decode_step_scale,
+                              plan_layer_sequences, resolve_variant,
                               timing_calibration)
 from .utils import get_config
 
@@ -99,7 +101,9 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None, decode=False):
     for layer in sequence.get("head") or ():
         total += sequence_time(layer, 1)
     if decode:
-        total = int(total * timing_calibration().get("decode_scale", 1.0))
+        override = timing_calibration().get("decode_scale")
+        scale = decode_step_scale(hardware) if override is None else override
+        total = int(total * scale)
     return total
 
 

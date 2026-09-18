@@ -23,7 +23,8 @@ sys.path.insert(0, str(REPO))
 
 from serving.core.hw_service import (rescale_capacities, rescale_service_times,
                                      step_cost_ns)  # noqa: E402
-from serving.core.trace_generator import DECODE_STEP_SCALE  # noqa: E402
+from serving.core.trace_generator import (DECODE_STEP_SCALE,  # noqa: E402
+                                          decode_step_scale)
 
 
 class _UnderAstraSim(unittest.TestCase):
@@ -68,8 +69,8 @@ class StepCostTests(_UnderAstraSim):
                  for hw in ("RTX5090", "RTX4090", "RTX3090")}
         self.assertLess(costs["RTX5090"], costs["RTX4090"])
         self.assertLess(costs["RTX4090"], costs["RTX3090"])
-        # The absolute level is the engine's, not a proxy: the 5090's 41-token
-        # Decode at 15 ms/step is what the cluster reports as TPOT.
+        # The absolute level is the engine's, not a proxy: each card's
+        # calibrated Decode step has to land on the cluster's own TPOT.
         self.assertAlmostEqual(costs["RTX5090"] / 1e6, 14.8, delta=1.0)
         self.assertAlmostEqual(costs["RTX4090"] / 1e6, 24.6, delta=2.0)
         self.assertAlmostEqual(costs["RTX3090"] / 1e6, 45.0, delta=3.0)
@@ -82,7 +83,10 @@ class StepCostTests(_UnderAstraSim):
         raw = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1)
         priced = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1,
                               decode=True)
-        self.assertAlmostEqual(priced / raw, DECODE_STEP_SCALE, delta=0.02)
+        self.assertAlmostEqual(priced / raw, decode_step_scale("RTX5090"),
+                               delta=0.02)
+        # Cards with no anchor still get a defined (default) factor.
+        self.assertEqual(decode_step_scale("H100"), DECODE_STEP_SCALE)
 
     def test_prefill_cost_scales_with_the_prompt(self):
         short = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1,
