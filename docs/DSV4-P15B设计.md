@@ -230,7 +230,12 @@ docker run --rm --gpus '"device=0"' --entrypoint python3 -v "$PWD":/work -w /wor
 >
 > 也就是说：用借来的 profile，100–400 MB/s 里存在真实的决策翻转；换成真实 MoE 算力比，
 > **整段区间都变成"别跨"**——结论会整个反过来。
-> 要修就得补 `profiler/models/deepseek_v4.yaml` 并按本设计收一次 profile。
+>
+> ✅ **这条已经修了（2026-09-22）**：路径 B 收完了 P-15B 自己的 profile——
+> `profiler/models/p15b.yaml` + 四类卡的 bundle（`profiler/perf/{RTX3090,RTX4090,RTX5090,A100}/casr/P15B/bf16`），
+> 上面的"借来的稠密 8B"数字**不再适用于 P-15B 的实验**；凡引用该警告的段落
+> 都要改成用真实 bundle 重算。过程见
+> [P15B-profile路径B实现计划.md](P15B-profile路径B实现计划.md)。
 
 ## 10. 未决
 

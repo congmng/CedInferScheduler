@@ -677,6 +677,36 @@ from the profile CSVs` 的 warning）。
 
 **判据**：换前/换后两次 bundle 都在，且 Triton 版的 attention.csv 更快；差异写进文档。
 
+### 步骤 1–5 的复验记录（2026-09-22 20:40，当前代码）
+
+模型改过（compressor norm 换类、`o_lora_a` 换成容器），所以三个闸门都在**改动之后**
+重跑了一遍：
+
+```text
+check_p15b_shapes.py            r0 497,383,616 / r4 503,365,824 / r128 500,415,680  全对
+                                parity(fp32, T=256) max|Δlogits| = 9.5e-07 ~ 1.1e-06
+check_p15b_catalog_binding.py   每个 canonical 名唯一绑定，无 AMBIGUOUS
+check_p15b_boot.py              四卡全过，KV 账目与设计闭式一致
+    4090 sm89   1152 / 1024 /  16 B per token
+    3090 sm86   1151 / 1023 /  16
+    5090 sm120  1152 / 1025 /  16
+    A100 sm80   1152 / 1024 /  16
+```
+
+### 明确留待下一步的三项（都不阻塞当前实验）
+
+1. **TP=2 的 bundle 没采**。`_linear()` 现在还是 `nn.Linear`（vLLM 并行层只留了
+   接口），TP>1 的 profile 会量到"没切分"的形状；而
+   `casr_p15b_three_domain.json` 与 Qwen3-8B 的对照拓扑用的都是 `tp_size=1`，
+   当前实验不需要它。要做就得先按 §4.1 把 qkv_down / o_lora / MoE / embedding
+   换成并行层，再补 tp2 的 dense / per_sequence / attention（attention 一类就是
+   一套 4 小时的 sweep）。
+2. **A100 的 dense 两次测量差 ~20%**：17:3x 那次与 19:5x 的重采（同一配置、同一
+   张卡、都与其他作业同机并发）在大 shot 上整体差两成。bundle 用的是重采那版，
+   域内一致性 2.7% 没问题，但**跨域比较在大 batch 档要留意这个量级的不确定度**；
+   要收紧就得在整机独占的条件下重采一次做基准。
+3. **步骤 6（Triton 稀疏注意力）** 仍是可选性能版，没做。
+
 ## 4. 四个关键技术决定
 
 ### 4.1 用 vLLM 的并行层，而不是自己写切分
