@@ -328,6 +328,31 @@ attention_r128.csv   ← HCA（窗口 128 + top-k）
 用合成三表验证过分派：`attention` 151.2 µs / `attention_r4` 60.5 µs /
 `attention_r128` 105.8 µs，`table=None` 时回落到 `attention` ✓。
 
+### 步骤 5：接进模拟器 ✅ **配置已就位（2026-09-22，等 bundle 落地即可跑）**
+
+`configs/cluster/casr_p15b_three_domain.json`：与
+`casr_real_qwen3_8b_three_domain.json` **同一拓扑**（同样的节点、链路、实例），
+只换两样——`model_name: casr/P15B`，以及
+`casr.kv_bytes_per_token = 16960`（设计闭式 16.56 KB/token；Qwen3-8B 是 147456）。
+
+服务时间与容量仍是 Qwen3-8B 的占位值：`rescale_service_times` /
+`rescale_capacities` 在加载时会用 `profiler/perf/<HW>/casr/P15B/bf16` 覆盖它们，
+所以那两个字段只是"锚点"，不是 P-15B 的数。
+
+链路已逐段验证（都在 `astra-sim` cwd 下跑）：
+
+```text
+get_config("casr/P15B")          -> 28 层、三种 block type
+_load_architecture("p15b")       -> r0 / r4 / r128 三条流水线
+plan_layer_sequences(cfg, arch)  -> 28 条逐层流水线，例如
+    layer  2 (r4)   : … compressor_csa, kvproj_csa, indexer_csa, rotary_emb, attention, …
+    layer  3 (r128) : … compressor_hca, kvproj_hca, indexer_hca, rotary_emb, attention, …
+    layer  0 (r0)   : … rotary_emb, attention, …
+```
+
+也就是说"每层走自己的压缩模块、查自己的 attention 表"这条链已经通了——
+剩下只等四个域的 bundle 落盘。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
