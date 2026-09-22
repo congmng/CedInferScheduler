@@ -153,13 +153,25 @@ attention 会真的去读一个由这些长度决定的 paged KV cache**。而�
 1.40× 容量收益从"应该能拿回"变成"实现里本来就对"。若时间紧，先 C2 出一版 bundle
 并把"attention 是稠密 MLA 代理"写进 meta，再回头做 C1。
 
-### 步骤 3：写 `profiler/models/p15b.yaml`
+### 步骤 3：写 `profiler/models/p15b.yaml` ✅ **已完成（2026-09-22）**
 
 catalog 的 `vllm:` 直接写我们的类名；`attention:` 只能有 **1 个** entry（schema 强制）；
 `layer_types:` 写 `r0 / r4 / r128` 三条流水线给模拟器用。
 
 **判据**：`python3 -m profiler profile --help` 不报 schema 错；写错的层名在 profile
 **之前**就报（`extra="forbid"` + `_check_catalog`）。
+
+**实测**：`profiler/models/p15b.yaml` 过 pydantic 校验（21 个 catalog 条目、
+3 条 `layer_types` 流水线），`profiler/core/config.py` 的 `_check_catalog` 全过。
+为满足"每个 canonical 名必须对应唯一的 `(类名, 父类名)`"：
+
+* 每个 RMSNorm 与每个 linear 都是**独立的类**（`P15BQNorm` vs `P15BKVNorm`、
+  `P15BQKVDown` vs `P15BQUp`），否则同一父模块下两个同类会歧义；
+* 压缩侧再按 ratio 拆成 `P15BCompressorCSA/HCA`、`P15BIndexerCSA/HCA`、
+  `P15BKVStateProjCSA/HCA`——**这样三份单类型 profile 的行键才不冲突**，
+  可以合并进同一个 bundle（步骤 4 的前提）；
+* 新增 `P15BRotary`：RoPE 原本是函数，而 catalog 只能绑**模块**，不包一层的话
+  这一项在逐层成本里会被无声漏掉（无参数，不影响参数量与 parity）。
 
 ### 步骤 4：三份 config × 四张卡 = 12 次 profile
 

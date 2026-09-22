@@ -1,0 +1,120 @@
+# P-15B -- the self-built DSV4-style block (docs/DSV4-P15B设计.md).
+#
+# Bound by *class name*: the catalog's `vllm:` field is matched against the
+# profiled module tree's class names (profiler/core/hooks/timings.py), so these
+# are our own classes, not vLLM's.  Every canonical name needs its own class
+# because two modules sharing (class, ancestor class) would be ambiguous --
+# which is also why the compressed pieces are split by ratio: CSA and HCA
+# differ in shape, and the three single-block-type profile runs have to land in
+# one bundle without colliding on a row key.
+#
+# `layer_types` is what the simulator walks: the flat `sequence` below cannot
+# describe a model whose layers differ per block type (the same reason
+# zamba2.yaml has them).
+
+sequence:
+  prologue:  [embedding]
+  pre_attn:  [input_norm, qkv_down, q_norm, kv_norm, q_up, rotary_emb, attention]
+  post_attn: [o_lora_a, o_lora_b, ffn_norm]
+  mlp_dense: []
+  mlp_moe:   [moe]
+  head:      [final_norm, lm_head, sampler]
+
+# Per-block-type pipelines, keyed by the model config's `layers_block_type`
+# entries (P15B.json ships one per layer; the P15B-r*.json files ship one each).
+layer_types:
+  r0:
+    prologue:  [embedding]
+    pre_attn:  [input_norm, qkv_down, q_norm, kv_norm, q_up, rotary_emb, attention]
+    post_attn: [o_lora_a, o_lora_b, ffn_norm]
+    mlp_dense: []
+    mlp_moe:   [moe]
+    head:      [final_norm, lm_head, sampler]
+  r4:
+    prologue:  [embedding]
+    pre_attn:  [input_norm, qkv_down, q_norm, kv_norm, q_up,
+                compressor_csa, kvproj_csa, indexer_csa, rotary_emb, attention]
+    post_attn: [o_lora_a, o_lora_b, ffn_norm]
+    mlp_dense: []
+    mlp_moe:   [moe]
+    head:      [final_norm, lm_head, sampler]
+  r128:
+    prologue:  [embedding]
+    pre_attn:  [input_norm, qkv_down, q_norm, kv_norm, q_up,
+                compressor_hca, kvproj_hca, indexer_hca, rotary_emb, attention]
+    post_attn: [o_lora_a, o_lora_b, ffn_norm]
+    mlp_dense: []
+    mlp_moe:   [moe]
+    head:      [final_norm, lm_head, sampler]
+
+catalog:
+  dense:
+    embedding:
+      vllm: Embedding
+    input_norm:
+      vllm: P15BInputNorm
+      within: P15BDecoderLayer
+      tp_stable: true
+    qkv_down:
+      vllm: P15BQKVDown
+      within: P15BAttention
+    q_norm:
+      vllm: P15BQNorm
+      within: P15BAttention
+      tp_stable: true
+    kv_norm:
+      vllm: P15BKVNorm
+      within: P15BAttention
+      tp_stable: true
+    q_up:
+      vllm: P15BQUp
+      within: P15BAttention
+    rotary_emb:
+      vllm: P15BRotary
+      within: P15BAttention
+      tp_stable: true
+    o_lora_a:
+      vllm: P15BOProjA
+      within: P15BAttention
+    o_lora_b:
+      vllm: P15BOProjB
+      within: P15BAttention
+    compressor_csa:
+      vllm: P15BCompressorCSA
+      within: P15BAttention
+    compressor_hca:
+      vllm: P15BCompressorHCA
+      within: P15BAttention
+    kvproj_csa:
+      vllm: P15BKVStateProjCSA
+      within: P15BAttention
+    kvproj_hca:
+      vllm: P15BKVStateProjHCA
+      within: P15BAttention
+    indexer_csa:
+      vllm: P15BIndexerCSA
+      within: P15BAttention
+    indexer_hca:
+      vllm: P15BIndexerHCA
+      within: P15BAttention
+    ffn_norm:
+      vllm: P15BFfnNorm
+      within: P15BDecoderLayer
+      tp_stable: true
+    final_norm:
+      vllm: P15BFinalNorm
+      within: P15BForCausalLM
+      tp_stable: true
+  per_sequence:
+    lm_head:
+      vllm: ParallelLMHead
+    sampler:
+      vllm: LogitsProcessor
+  attention:
+    attention:
+      vllm: P15BSparseAttention
+      within: P15BAttention
+  moe:
+    moe:
+      vllm: P15BMoE
+      within: P15BDecoderLayer

@@ -86,6 +86,23 @@ def rope(x, positions, rope_dim, theta=10000.0):
     return torch.cat([nope, rotated], dim=-1)
 
 
+class P15BRotary(nn.Module):
+    """Module wrapper around :func:`rope`.
+
+    RoPE here is a function, but the profiler can only bind *modules* to
+    canonical layer names -- without this, rotary would be charged nowhere and
+    the per-layer total would silently under-count.  It carries no parameters.
+    """
+
+    def __init__(self, rope_dim: int, theta: float = 10000.0):
+        super().__init__()
+        self.rope_dim = rope_dim
+        self.theta = theta
+
+    def forward(self, x, positions):
+        return rope(x, positions, self.rope_dim, self.theta)
+
+
 # ---------------------------------------------------------------------------
 # Attention pieces
 # ---------------------------------------------------------------------------
@@ -203,6 +220,35 @@ class P15BKVStateProj(nn.Module):
         return self.proj(x)
 
 
+# The profiler's catalog matches on (class name, ancestor class name) and
+# rejects two canonical names resolving to the same pair.  P-15B's compressed
+# pieces differ in *shape* between CSA (ratio 4) and HCA (ratio 128), so each
+# gets its own class; that is what lets one bundle carry both, which the
+# simulator's per-block-type pipelines need (docs/P15B-profile路径B实现计划.md §4).
+class P15BCompressorCSA(P15BCompressor):
+    """CSA compressor: state 2*2*head_dim, one state per 4 tokens."""
+
+
+class P15BCompressorHCA(P15BCompressor):
+    """HCA compressor: state 2*1*head_dim, one state per 128 tokens."""
+
+
+class P15BIndexerCSA(P15BIndexer):
+    """Indexer scoring CSA states (key width coff*head_dim = 2*head_dim)."""
+
+
+class P15BIndexerHCA(P15BIndexer):
+    """Indexer scoring HCA states (key width head_dim)."""
+
+
+class P15BKVStateProjCSA(P15BKVStateProj):
+    """CSA state -> head_dim."""
+
+
+class P15BKVStateProjHCA(P15BKVStateProj):
+    """HCA state -> head_dim."""
+
+
 class P15BSparseAttention(nn.Module):
     """The attention op: a banded window over raw latents plus the selected
     compressed states, in **one joint softmax** (normalising the two sets
@@ -294,15 +340,21 @@ class P15BAttention(nn.Module):
         self.q_norm = P15BQNorm(cfg.q_lora_rank, cfg.rms_norm_eps)
         self.kv_norm = P15BKVNorm(cfg.head_dim + cfg.qk_rope_head_dim, cfg.rms_norm_eps)
         self.q_up = P15BQUp(cfg)
+        self.rotary_emb = P15BRotary(cfg.qk_rope_head_dim, cfg.rope_theta)
         chunk = cfg.num_attention_heads * cfg.head_dim // cfg.o_groups
         self.o_lora_a = nn.ModuleList(
             P15BOProjA(chunk, cfg.o_lora_rank) for _ in range(cfg.o_groups))
         self.o_lora_b = P15BOProjB(cfg.o_groups, cfg.o_lora_rank, cfg.hidden_size)
         if ratio:
             coff = cfg.coff(ratio)
-            self.compressor = P15BCompressor(cfg, ratio)
-            self.indexer = P15BIndexer(cfg, coff * cfg.head_dim)
-            self.kv_state_proj = P15BKVStateProj(cfg, coff * cfg.head_dim)
+            # Per-ratio subclasses so the profiler's catalog can name them
+            # separately (see the note above the subclass definitions).
+            csa = ratio == 4
+            self.compressor = (P15BCompressorCSA if csa else P15BCompressorHCA)(cfg, ratio)
+            self.indexer = (P15BIndexerCSA if csa else P15BIndexerHCA)(
+                cfg, coff * cfg.head_dim)
+            self.kv_state_proj = (P15BKVStateProjCSA if csa
+                                  else P15BKVStateProjHCA)(cfg, coff * cfg.head_dim)
         else:
             self.compressor = None
             self.indexer = None
@@ -321,8 +373,8 @@ class P15BAttention(nn.Module):
         q_latent, kv = self.qkv_down(x)
         q = self.q_up(self.q_norm(q_latent))
         kv = self.kv_norm(kv).view(b, t, 1, self.head_dim + self.rope_dim)
-        q = rope(q, positions, self.rope_dim)
-        kv = rope(kv, positions, self.rope_dim)
+        q = self.rotary_emb(q, positions)
+        kv = self.rotary_emb(kv, positions)
         latents = kv[:, :, 0, :self.head_dim]
 
         state_values = state_pos = None

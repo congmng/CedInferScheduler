@@ -21,6 +21,7 @@ class P15BConfig:
         "index_head_dim", "index_topk", "n_routed_experts",
         "num_experts_per_tok", "moe_intermediate_size", "vocab_size",
         "rms_norm_eps", "max_position_embeddings", "compress_ratios",
+        "rope_theta",
     )
 
     def __init__(self, **values):
@@ -44,6 +45,8 @@ class P15BConfig:
             # vLLM hands back a config object that may not carry our extra key;
             # fall back to the alternating pattern the design specifies.
             values["compress_ratios"] = _default_ratios(int(values["num_hidden_layers"]))
+        if values.get("rope_theta") is None:
+            values["rope_theta"] = 10000.0
         for name in ("rms_norm_eps", "max_position_embeddings", "vocab_size"):
             if values.get(name) is None:
                 raise ValueError(f"HF config is missing {name}")
