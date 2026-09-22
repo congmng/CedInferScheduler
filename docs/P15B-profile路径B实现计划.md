@@ -529,6 +529,36 @@ CLUSTER_CONFIG=configs/cluster/casr_p15b_three_domain.json \
 只有 `lm_head`、没有 `sampler`：0.29 的 `Sampler` 不在被 profile 的执行路径里），
 所以它不影响跨模型对比的公平性，但要写进口径。
 
+#### 同负载下的模型对照：KV 小 8.9× 之后，CASR 的符号翻了
+
+两个模型跑**同一拓扑、同一份 80 请求负载**（`casr_hetero_hot_cold.jsonl`，
+`static` / `greedy` / `lp` 三臂），脚本 `tests/run_p15b_three_domain_comparison.sh`
+与 `tests/run_real_qwen3_8b_three_domain_comparison.sh` 一一对应：
+
+| 模型（KV/token） | 臂 | latency mean | latency p95 | TTFT mean | TPOT mean |
+|---|---|---:|---:|---:|---:|
+| Qwen3-8B（147,456 B） | static | 2,769 ms | 4,265 ms | 477 ms | 18.0 ms |
+| | greedy | 2,849 ms（**+2.9%**） | 4,220 ms | 462 ms | 18.8 ms |
+| | lp | 2,897 ms（**+4.6%**） | 4,324 ms | 596 ms | 18.1 ms |
+| **P-15B（16,960 B）** | static | 4,004 ms | 6,340 ms | 696 ms | 26.0 ms |
+| | greedy | 3,751 ms（**−6.3%**） | 4,950 ms | **76 ms** | 28.9 ms |
+| | lp | 3,797 ms（**−5.2%**） | 4,968 ms | **78 ms** | 29.3 ms |
+
+**怎么读**：
+
+* 同一条负载、同一套链路下，**Qwen3-8B 上 CASR 是负收益，P-15B 上转正**——
+  正是"KV 缩小一个量级 → 跨域搬运从不可行变成可行"这条主线想要的结果。
+  最刺眼的是 TTFT：P-15B 的 static 把 80 个请求全钉在一台 prefill 上（696 ms），
+  CASR 把热前缀请求挪到另一台后降到 **76 ms**；Qwen3-8B 因为 KV 太大，
+  同样的挪动不划算，TTFT 仍在 460–600 ms。
+* **但 P-15B 的静态 TPOT 反而更高**（26.0 vs 18.0 ms）。这不是 bug 而是 MoE 的
+  权重流量：每 token 激活只有 1.655B，但 batch 内不同 token 命中不同专家时，
+  一步要吃下接近 14.4B × 2 B = 28.75 GB 的权重；Qwen3-8B 稠密只有 16.4 GB。
+  也就是说压缩 KV 买到的是"搬运便宜"，代价是"每步权重大"——
+  这条必须写进论文的 trade-off，不能只说 KV 小。
+* 这一档仍是短 prompt（64 token）、0.4 s 内到齐的突发；**长 prompt + 高峰值
+  持续档**才是计划里"收益收敛多少"的正式曲线，上面这组是它的第一个点。
+
 `configs/cluster/casr_p15b_three_domain.json`：与
 `casr_real_qwen3_8b_three_domain.json` **同一拓扑**（同样的节点、链路、实例），
 只换两样——`model_name: casr/P15B`，以及
