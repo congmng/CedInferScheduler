@@ -34,9 +34,19 @@ MODEL = "casr/P15B"
 
 def _type_dir(root: pathlib.Path, block: str, hardware: str,
               variant: str = "bf16", tp: int = 1) -> pathlib.Path:
-    # Layout the profiler writes: <out-root>/<block>/<hardware>/<org>/<name>-<block>
-    return (root / block / hardware / MODEL.split("/")[0]
-            / f"P15B-{block}" / variant / f"tp{tp}")
+    """Where one block type's CSVs live under ``root``.
+
+    ``run_p15b_profile.sh`` passes a per-block out-root, so the tree gains a
+    block level (``<root>/<block>/<hardware>/...``); ``run_p15b_slice.sh``
+    passes one root for all three blocks (the model name already separates
+    them), so it does not.  Accept whichever exists, preferring the nested one.
+    """
+    tail = (hardware, MODEL.split("/")[0], f"P15B-{block}", variant, f"tp{tp}")
+    nested = root / block / pathlib.Path(*tail)
+    flat = root / pathlib.Path(*tail)
+    if nested.is_dir() or not flat.is_dir():
+        return nested
+    return flat
 
 
 def main() -> int:
