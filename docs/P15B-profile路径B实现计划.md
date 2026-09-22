@@ -827,15 +827,26 @@ profiler 的 TP 是**缩形状 + `tensor_parallel_size=1`** 的模拟（`profile
 `moe_intermediate_size` 改成 `intermediate_size`（§4.2 早就写了这一条，代码当时没跟上；
 两个字段在 config 里都是 1280，所以 tp=1 的数一个没动）。
 
-**tp2/tp1（同卡同网格，RTX4090 / RTX5090）**：
+**dense 逐层（tokens=2048，比值相对**已合并的** tp1 bundle）**：
 
-| 类别 | 行 | 比值 | 说明 |
-|---|---|---:|---|
-| dense `q_up` | 2048 token | **0.51** | 按 attention head 切 ✓ |
-| dense `o_lora_a` | 2048 token | **0.62** | 每组 chunk = heads×head_dim/groups，随头切 ✓ |
-| dense `qkv_down` | 2048 token | 1.00 | MLA latent（q_lora + head_dim + rope）不切 ✓ |
-| dense `o_lora_b` | 2048 token | 1.00 | ⚠️ 真接并行层后这一档应该也切，当前没切 |
-| attention（三类全网格） | 4111 shot | 0.949 / 0.962 / 0.948（4090） | 只快 3–5%：**latent 读是各头共享的**，砍一半头省不到计算 |
+| 层 | 4090 tp2 | 5090 tp2 | A100 tp2 | A100 tp4 | 说明 |
+|---|---:|---:|---:|---:|---|
+| `q_up` | **0.51** | 0.50 | 0.51 | **0.34** | 按 attention head 切 ✓ |
+| `o_lora_a` | **0.62** | 0.60 | 0.68 | **0.53** | 每组 chunk = heads×head_dim/groups，随头切 ✓ |
+| `qkv_down` | 1.00 | 1.00 | 1.00 | 1.00 | MLA latent（q_lora + head_dim + rope）不切 ✓ |
+| `o_lora_b` | 1.00 | 1.00 | 1.00 | 1.00 | ⚠️ 真接并行层后这一档也应该切，当前没切 |
+| `compressor_csa` | 0.98 | 0.95 | 1.00 | 1.01 | hidden→state 投影与头无关 ✓ |
+
+**attention（全网格 4111 shot，中位比值）**：
+
+| 硬件 | tp2 r0 | tp2 r4 | tp2 r128 | tp4 r0 | tp4 r4 | tp4 r128 |
+|---|---:|---:|---:|---:|---:|---:|
+| RTX4090 | 0.949 | 0.962 | 0.948 | — | — | — |
+| RTX5090 | 0.960 | 0.970 | 0.973 | — | — | — |
+| A100 | 0.944 | 0.968 | 0.970 | **0.912** | **0.946** | **0.944** |
+
+**只有 3–9%**：MLA 的 latent 读是各头共享的，砍头省不到计算——这条和"TP 对 KV 不友好"
+是同一个物理原因。
 
 **端到端（4090+5090 两域，同一份负载，`configs/cluster/casr_p15b_2domain_tp{1,2}.json`）**：
 
@@ -846,6 +857,10 @@ profiler 的 TP 是**缩形状 + `tensor_parallel_size=1`** 的模拟（`profile
 
 **TP=2 买到约 16% 的绝对延迟与 14% 的 TPOT，同时把调度能加的份额从 −7.5% 压到 −4.8%**
 ——和 KV 压缩那条是同一个方向的结论：硬件/切分越强，"调度增益"的绝对值越小。
+
+**采集进度**（2026-09-23 03:30）：tp2 三域已入库（RTX4090 / RTX5090 / A100），
+A100 另有 tp4；RTX3090 的 tp2 在跑 r128。triton 变体同一状态：RTX4090 / RTX5090
+三类齐，A100 缺 r128（跑到一半被外部杀掉，已重跑），RTX3090 在跑 r128。
 
 **一个配置坑（值得记住）**：tp=N 的实例占 N 张卡，一个域同时跑 P+D 就要 **2N** 张。
 第一版 tp2 config 沿用 tp1 的"每域 2 卡"，CASR 的资源模型就（正确地）把 Decode 判为
