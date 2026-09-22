@@ -34,7 +34,8 @@ class P15BVllmForCausalLM(nn.Module):
         super().__init__()
         hf = vllm_config.model_config.hf_config
         self.cfg = P15BConfig.from_hf(hf)
-        self.tree = P15BTree(self.cfg, with_lm_head=False)
+        self.tree = P15BTree(self.cfg, with_lm_head=False, with_kv_cache=True,
+                             prefix=prefix or "p15b")
         self.lm_head = ParallelLMHead(self.cfg.vocab_size, self.cfg.hidden_size)
         self.logits_processor = LogitsProcessor(self.cfg.vocab_size)
 

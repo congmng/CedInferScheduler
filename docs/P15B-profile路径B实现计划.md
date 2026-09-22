@@ -93,7 +93,27 @@ embedding 名（`embed` vs `embed_tokens`）漏扣了 167,772,160 个参数。
 | 3 | registry 里没有这个架构 | `sitecustomize` 里 `ModelRegistry.register_model` |
 | 4 | `VllmModel` 协议要求 `embed_input_ids` | 补上；同时去掉 `SupportsPP`（会要求 `intermediate_tensors`） |
 | 5 | runner 传**扁平**布局 `(num_tokens,)`，且带 `inputs_embeds` | 包装层 reshape 成 `(1,T)` 再摊平回来（见下） |
-| 6 | `HybridKVCacheCoordinator requires at least one cacheable group` | **未解决**，见 §4.3bis |
+| 6 | `HybridKVCacheCoordinator requires at least one cacheable group` | **已解决**：每层挂一个 `P15BCache`（`deploy/vllm_p15b/kv_cache.py`），声明 spec + `bind_kv_cache`，attention 自己不算 cache 的持有者 |
+
+**第六道关解决后的实测（本机 4090，2026-09-22）**：
+
+```text
+r0    BOOT OK   kv=6.30 GiB  cap=5,871,840 tok   -> 1153 B/token   （设计闭式 1152）
+r4    BOOT OK   kv=4.23 GiB  cap=4,436,832 tok   -> 1024 B/token   （设计闭式 1024）
+r128  BOOT OK   kv=6.27 GiB  cap=420,784,256 tok ->   16 B/token   （设计闭式   16）
+```
+
+三种层类型的 **KV 账目与设计闭式逐位吻合**——这正是官方实现算错的那笔账（它的
+compressor 少了 `tokens_per_state`，同样的层会记成 8,208 / 4,104 B/token）。
+另外整条链路也通了：`llm.generate(...)` 用 dummy 权重跑出 4 个 token
+（`GENERATE OK produced 4 tokens: [11196, 15, 11196, 15]`），
+`tests/check_p15b_shapes.py` 的参数量与 parity（1e-6）都仍然通过。
+
+**还差的一步（诚实标注）**：现在 attention 仍然是**在 batch 自带的 latent 上**做窗口
+与 top-k 的联合 softmax，**没有去读那个 paged cache**。所以引擎起得来、cache 也分配了，
+但 profiler 的 attention 扫描里 **kv 那一维不会让时间变化**——`P15BCacheMetadataBuilder`
+（block_table / slot_mapping）已经写好，但还没有被 attention 消费。这是 §4.3bis 里 C1
+的剩余部分；C2（用现成 MLA 层做代理）仍是时间紧时的退路。
 
 ### 4.3bis 新发现：attention 的 profile 与 KV cache 机制是耦合的
 

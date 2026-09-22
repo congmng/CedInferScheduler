@@ -26,7 +26,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 def _linear(in_features: int, out_features: int) -> nn.Module:
     """The one place linears are built -- vLLM parallel layers drop in here."""
     return nn.Linear(in_features, out_features, bias=False)
@@ -208,6 +207,12 @@ class P15BSparseAttention(nn.Module):
     """The attention op: a banded window over raw latents plus the selected
     compressed states, in **one joint softmax** (normalising the two sets
     separately and adding them silently gives each set weight 1).
+
+    Deliberately *not* the KV spec holder.  vLLM collects one cacheable module
+    per layer from ``static_forward_context``, and ``kv_cache.P15BCache`` owns
+    that (the same split the official compressor uses); this class only
+    computes.  Declaring a spec here as well would put two cacheable modules
+    on every layer.
     """
 
     def __init__(self, cfg, ratio: int):
@@ -217,30 +222,67 @@ class P15BSparseAttention(nn.Module):
         self.ratio = ratio
         self.window = cfg.coff(ratio) * ratio if ratio else cfg.max_position_embeddings
 
-    def forward(self, q, latents, state_values=None, state_pos=None, positions=None):
+    def forward(self, q, latents, state_values=None, state_pos=None, positions=None,
+                block: int = 128):
+        """Blocked sparse attention, in one joint softmax.
+
+        Written as a loop over query blocks rather than a dense ``(B,H,T,T)``
+        score matrix: at the profiler's kv lengths a dense tensor is tens of
+        gigabytes (it OOM'd at 18 GiB on the first attempt) and, more to the
+        point, it is not the op we are designing.  Each query attends to its
+        own window (or the whole prefix, for ratio 0) plus its own top-k
+        states, so peak memory is ``block x (window | context) x heads``.
+
+        Numerically this is the same computation as the dense form -- the
+        chunking only changes summation order, which is why the parity gate
+        allows a tolerance rather than bit-exactness.
+        """
         b, t, n_heads, head_dim = q.shape
-        logits = torch.einsum("bthd,bsd->bhts", q, latents) / math.sqrt(head_dim)
-        causal = torch.ones(t, t, dtype=torch.bool, device=q.device).tril()
-        if self.ratio and self.window < t:
-            causal &= torch.ones(t, t, dtype=torch.bool, device=q.device).triu(1 - self.window)
-        masked = logits.masked_fill(~causal[None, None], float("-inf"))
-        values = latents[:, None].expand(b, t, t, head_dim)
-        if state_values is not None and state_values.shape[1]:
-            # state_values already carries one gathered row per query: (B,T,K,D)
-            scores = torch.einsum("bthd,btkd->bhtk", q, state_values) / math.sqrt(head_dim)
-            # state_pos is already (B,T,K); no extra axis here, the mask is
-            # widened to heads only when it is applied to the (B,H,T,K) scores.
-            valid = state_pos <= positions.unsqueeze(-1)
-            masked = torch.cat([masked, scores.masked_fill(~valid[:, None], -1e30)], dim=-1)
-            values = torch.cat([values, state_values], dim=2)
-        weights = masked.softmax(-1)
-        return torch.einsum("bhts,btsd->bthd", weights, values)
+        if positions is None:
+            positions = torch.arange(t, device=q.device)[None].expand(b, t)
+        scale = 1.0 / math.sqrt(head_dim)
+        windowed = bool(self.ratio) and self.window < t
+        offsets = torch.arange(self.window, device=q.device) - (self.window - 1)
+        out = torch.empty_like(q)
+        for start in range(0, t, block):
+            end = min(start + block, t)
+            q_block = q[:, start:end]
+            pos_block = positions[:, start:end]
+            q_index = torch.arange(start, end, device=q.device)
+            if windowed:
+                # Window keys are the `window` rows ending at each query.  They
+                # are indexed by *sequence offset*, which equals vLLM's
+                # `positions` for the single-sequence shots we profile; a
+                # chunked-prefill run starting mid-sequence would need the
+                # positions tensor here instead.
+                raw = q_index[:, None] + offsets[None, :]            # (qb,w)
+                keep = raw >= 0
+                keys = latents[:, raw.clamp(min=0)]                  # (B,qb,w,D)
+            else:
+                raw = torch.arange(t, device=q.device)[None, :].expand(end - start, t)
+                keep = raw <= q_index[:, None]                       # (qb,t)
+                keys = latents[:, :t].unsqueeze(1).expand(b, end - start, t, head_dim)
+            scores = torch.einsum("bqhd,bqkd->bhqk", q_block, keys) * scale
+            scores = scores.masked_fill(~keep[None, None], float("-inf"))
+            values = keys
+            if state_values is not None and state_values.shape[1]:
+                sel = state_values[:, start:end]                     # (B,qb,K,D)
+                sel_pos = state_pos[:, start:end]                    # (B,qb,K)
+                sel_scores = torch.einsum("bqhd,bqkd->bhqk", q_block, sel) * scale
+                ok = sel_pos <= pos_block[:, :, None]
+                scores = torch.cat(
+                    [scores, sel_scores.masked_fill(~ok[:, None], -1e30)], dim=-1)
+                values = torch.cat([values, sel], dim=2)
+            out[:, start:end] = torch.einsum(
+                "bhqk,bqkd->bqhd", scores.softmax(-1), values)
+        return out
 
 
 class P15BAttention(nn.Module):
     """MLA latent + sliding window + compressed states (ratio 0 -> window only)."""
 
-    def __init__(self, cfg, ratio: int):
+    def __init__(self, cfg, ratio: int, prefix: str = "", with_kv_cache: bool = False,
+                 dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.cfg = cfg
         self.ratio = ratio
@@ -266,6 +308,13 @@ class P15BAttention(nn.Module):
             self.indexer = None
             self.kv_state_proj = None
         self.attn = P15BSparseAttention(cfg, ratio)
+        # Only under vLLM: declaring a spec needs a live vllm_config, and the
+        # standalone gates (parity, parameter counts) run without one.
+        self.cache = None
+        if with_kv_cache:
+            from .kv_cache import P15BCache
+
+            self.cache = P15BCache(cfg, ratio, f"{prefix}.kv_cache", dtype)
 
     def forward(self, x, positions):
         b, t, _ = x.shape
@@ -346,10 +395,12 @@ class P15BMoE(nn.Module):
 
 
 class P15BDecoderLayer(nn.Module):
-    def __init__(self, cfg, ratio: int):
+    def __init__(self, cfg, ratio: int, prefix: str = "", with_kv_cache: bool = False,
+                 dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.input_layernorm = P15BInputNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.self_attn = P15BAttention(cfg, ratio)
+        self.self_attn = P15BAttention(cfg, ratio, prefix=prefix,
+                                       with_kv_cache=with_kv_cache, dtype=dtype)
         self.post_attention_layernorm = P15BFfnNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.mlp = P15BMoE(cfg)
 
@@ -366,13 +417,16 @@ class P15BForCausalLM(nn.Module):
     ``ParallelLMHead`` (TP-sharded) plus ``LogitsProcessor``.
     """
 
-    def __init__(self, cfg, with_lm_head: bool = True):
+    def __init__(self, cfg, with_lm_head: bool = True, with_kv_cache: bool = False,
+                 prefix: str = "p15b", dtype: torch.dtype = torch.bfloat16):
         super().__init__()
         self.cfg = cfg
         self.with_lm_head = with_lm_head
         self.embed_tokens = _embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
-            P15BDecoderLayer(cfg, ratio) for ratio in cfg.compress_ratios)
+            P15BDecoderLayer(cfg, ratio, prefix=f"{prefix}.layers.{index}",
+                             with_kv_cache=with_kv_cache, dtype=dtype)
+            for index, ratio in enumerate(cfg.compress_ratios))
         self.norm = P15BFinalNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.lm_head = _linear(cfg.hidden_size, cfg.vocab_size) if with_lm_head else None
 
