@@ -390,6 +390,36 @@ input=22 tok  pd_kv_bytes=373,120   (16,960/token)
 
 ——严格按设计值成比例，不再是 57,344/token 的全注意力价。
 
+#### 步骤 5 的第三个缺口：模拟器把 28 层全当第 0 层定价（已修）
+
+配好之后做端到端验证时发现：**按 block type 分派的 attention 表根本没被查**。
+把表整体放大 10× 做 A/B：
+
+```text
+dense.csv 的 qkv_down ×10     -> Mean TPOT 11.40 → 17.53 ms   （被读了）
+attention.csv（r0）×10        -> 29.74 ms                      （被读了）
+attention_r4.csv ×10          -> 11.40 ms（纹丝不动）          （没被读）
+```
+
+加探针打出每一次 attention emission 的 `layer_num`，真相是**142 次全是 `layer_num=0`**：
+
+`_synthesize_trace` 的 block-copy 优化——**建一层、复制 `num_hidden_layers` 次**。
+`config_builder` 只在**集群配置声明了逐 block 放置覆盖**时才关掉它（注释写得很准：
+"if weights differ in blocks, we can not copy and paste the same trace for all
+layers"），但**模型自身的 `layers_block_type` 没有触发它**。于是 P-15B 的 28 层
+全按第 0 层（r0，全 MLA、无压缩模块）定价。
+
+修法：新增 `_can_copy_blocks(ctx, block_mode_on)`——yaml 里有 `layer_types` 就不允许复制，
+两条 synthesize 路径都用它。修完的效果：
+
+```text
+分派探针：layer 0 → r0，layer 10/12/14 → r4，layer 11/13/15 → r128  ✓
+Mean TPOT：11.40 → 13.05 ms   （旧路径低估约 14%）
+```
+
+**这条也意味着 Zamba2 那种 hybrid 的既有结果同样受影响**：38 层全按第 0 层（mamba）定价，
+6 个 attention 层等于没计费。那批数字需要重跑——`run_hetero_arena.py` 现在会走对路径。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
