@@ -73,6 +73,12 @@ def main() -> int:
                         help="scratch dir for the assembled tree")
     parser.add_argument("--blocks", default="r0,r4,r128")
     parser.add_argument("--variant", default="bf16")
+    parser.add_argument("--source-variant", default=None,
+                        help="Variant label of --profile-root's tree, when it "
+                             "differs from --variant. Step 6's Triton run only "
+                             "re-measured dense/per_sequence/attention, so its "
+                             "moe.csv still comes from the bf16 tree while the "
+                             "bundle itself is labelled bf16-triton.")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--note", action="append", default=[])
     parser.add_argument("--max-spread", type=float, default=None,
@@ -100,7 +106,8 @@ def main() -> int:
             return _type_dir(ps_root, block, args.hardware, args.variant, args.tp) / name
         if name == "attention.csv" and attn_root is not None:
             return _type_dir(attn_root, block, args.hardware, args.variant, args.tp) / name
-        return _type_dir(profile_root, block, args.hardware, args.variant, args.tp) / name
+        return (_type_dir(profile_root, block, args.hardware,
+                          args.source_variant or args.variant, args.tp) / name)
 
     problems: list[str] = []
     for block in blocks:
@@ -120,7 +127,8 @@ def main() -> int:
         return 1
 
     for block in blocks:
-        src = _type_dir(profile_root, block, args.hardware, args.variant, args.tp)
+        src = _type_dir(profile_root, block, args.hardware,
+                        args.source_variant or args.variant, args.tp)
         dest = _type_dir(work_root, block, args.hardware, args.variant, args.tp)
         dest.mkdir(parents=True, exist_ok=True)
         for name in FROM_PROFILE:

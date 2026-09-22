@@ -1,17 +1,16 @@
 {
-  "num_nodes": 3,
+  "num_nodes": 2,
   "link_bw": 0.93,
   "link_latency": 20000,
   "casr": {
     "solver": "lp",
     "lifecycle": {
       "min_active_prefill": 1,
-      "max_active_prefill": 3,
+      "max_active_prefill": 2,
       "warmup_ms": 250,
       "prefill_capacity": {
-        "0": 140,
-        "2": 180,
-        "4": 220
+        "0": 180,
+        "2": 220
       }
     },
     "structural": {
@@ -27,28 +26,15 @@
       "reclaim_ms": 50,
       "nodes": {
         "0": {
-          "gpu_count": 4,
+          "gpu_count": 2,
           "gpu_mem_gb": [
-            24,
-            24,
             24,
             24
           ]
         },
         "1": {
-          "gpu_count": 4,
+          "gpu_count": 2,
           "gpu_mem_gb": [
-            32,
-            32,
-            32,
-            32
-          ]
-        },
-        "2": {
-          "gpu_count": 4,
-          "gpu_mem_gb": [
-            32,
-            32,
             32,
             32
           ]
@@ -56,14 +42,12 @@
       }
     },
     "prefill_capacity": {
-      "0": 140,
-      "2": 180,
-      "4": 220
+      "0": 180,
+      "2": 220
     },
     "decode_capacity": {
-      "1": 110,
-      "3": 170,
-      "5": 230
+      "1": 170,
+      "3": 230
     },
     "overflow_penalty": 10,
     "shared_links": [
@@ -130,14 +114,12 @@
     "utilization_weight": 1.0,
     "utilization_segments": 8,
     "prefill_service_ms": {
-      "0": 457.143,
-      "2": 355.556,
-      "4": 290.909
+      "0": 355.556,
+      "2": 290.909
     },
     "decode_service_ms": {
-      "1": 581.818,
-      "3": 376.471,
-      "5": 278.261
+      "1": 376.471,
+      "3": 278.261
     },
     "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does.",
     "_service_comment": "prefill/decode service_ms and capacities are Qwen3-8B placeholders: rescale_service_times/rescale_capacities overwrite them from profiler/perf/<HW>/casr/P15B/bf16."
@@ -154,33 +136,32 @@
         {
           "instance_id": 0,
           "model_name": "casr/P15B",
-          "hardware": "RTX3090",
+          "hardware": "RTX4090",
           "npu_mem": {
             "mem_size": 24,
-            "mem_bw": 936,
+            "mem_bw": 1008,
             "mem_latency": 0,
             "mem_util": 0.9
           },
           "pd_type": "prefill",
-          "tp_size": 2,
+          "tp_size": 1,
           "enable_prefix_caching": true
         },
         {
           "instance_id": 1,
           "model_name": "casr/P15B",
-          "hardware": "RTX3090",
+          "hardware": "RTX4090",
           "npu_mem": {
             "mem_size": 24,
-            "mem_bw": 936,
+            "mem_bw": 1008,
             "mem_latency": 0,
             "mem_util": 0.9
           },
           "pd_type": "decode",
-          "tp_size": 2,
+          "tp_size": 1,
           "enable_prefix_caching": true
         }
-      ],
-      "gpu_count": 4
+      ]
     },
     {
       "num_instances": 2,
@@ -193,59 +174,20 @@
         {
           "instance_id": 2,
           "model_name": "casr/P15B",
-          "hardware": "RTX4090",
+          "hardware": "RTX5090",
           "npu_mem": {
-            "mem_size": 24,
-            "mem_bw": 1008,
+            "mem_size": 32,
+            "mem_bw": 1792,
             "mem_latency": 0,
             "mem_util": 0.9
           },
           "pd_type": "prefill",
-          "tp_size": 2,
+          "tp_size": 1,
           "enable_prefix_caching": true
         },
         {
           "instance_id": 3,
           "model_name": "casr/P15B",
-          "hardware": "RTX4090",
-          "npu_mem": {
-            "mem_size": 24,
-            "mem_bw": 1008,
-            "mem_latency": 0,
-            "mem_util": 0.9
-          },
-          "pd_type": "decode",
-          "tp_size": 2,
-          "enable_prefix_caching": true
-        }
-      ],
-      "gpu_count": 4
-    },
-    {
-      "num_instances": 2,
-      "cpu_mem": {
-        "mem_size": 128,
-        "mem_bw": 256,
-        "mem_latency": 0
-      },
-      "instances": [
-        {
-          "instance_id": 4,
-          "model_name": "casr/P15B",
-          "hardware": "RTX5090",
-          "npu_mem": {
-            "mem_size": 32,
-            "mem_bw": 1792,
-            "mem_latency": 0,
-            "mem_util": 0.9
-          },
-          "pd_type": "prefill",
-          "tp_size": 2,
-          "enable_prefix_caching": true
-        },
-        {
-          "instance_id": 5,
-          "model_name": "casr/P15B",
           "hardware": "RTX5090",
           "npu_mem": {
             "mem_size": 32,
@@ -254,12 +196,11 @@
             "mem_util": 0.9
           },
           "pd_type": "decode",
-          "tp_size": 2,
+          "tp_size": 1,
           "enable_prefix_caching": true
         }
-      ],
-      "gpu_count": 4
+      ]
     }
   ],
-  "_comment": "P-15B (casr/P15B) on the same three-domain topology as casr_real_qwen3_8b_three_domain.json, so the two are directly comparable: same nodes, same links, same instances -- only the model and its KV geometry differ. kv_bytes_per_token is the design's closed form (16960 B = 16.56 KB/token, docs/DSV4-P15B设计.md 5), against 147456 B for Qwen3-8B.  |  tp=2 twin of casr_p15b_three_domain.json: same topology and load, every instance sharded over two GPUs, so the run reads profiler/perf/<HW>/casr/P15B/bf16/tp2 instead of tp1.  |  Each instance is tp=2, so a domain running both a Prefill and a Decode needs 4 GPUs; the first cut left it at 2 and CASR duly switched a Decode off (see the tp section of the P15B plan)."
+  "_comment": "P-15B on RTX4090 + RTX5090 with tp_size=1: the same two domains twice, so a tp1/tp2 pair isolates what the TP bundle changes end to end. Cut down from casr_p15b_three_domain.json."
 }
