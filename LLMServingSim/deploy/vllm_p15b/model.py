@@ -91,36 +91,107 @@ _METADATA_REPORTED: set[str] = set()
 
 
 def _report_forward_metadata(prefix: str) -> None:
-    """Once per layer, report what vLLM handed the forward pass.
+    """Once per state, report what vLLM handed the forward pass.
 
     Whether the engine files attention metadata under our layer's name decides
     how the attention can read the paged cache (path B's remaining piece), and
     that is not visible from the outside: the metadata arrives through a
     context variable set by the runner.  Gated on ``P15B_DEBUG_META`` so it
     costs nothing in a real run.
+
+    The key is the *cache holder's* prefix, not this attention's: the runner
+    files metadata per KV cache group, and the group is named after the module
+    that declared the spec.  Probing only the first call showed ``NoneType``
+    because the first call is a warmup with no cache at all -- which is why
+    this reports each distinct state rather than once per layer.
     """
-    if not os.environ.get("P15B_DEBUG_META") or prefix in _METADATA_REPORTED:
+    if not os.environ.get("P15B_DEBUG_META"):
         return
-    _METADATA_REPORTED.add(prefix)
     try:
         from vllm.forward_context import get_forward_context
 
         context = get_forward_context()
     except Exception as exc:  # pragma: no cover - probe only
-        print(f"[p15b.meta] {prefix}: no forward context ({exc})", flush=True)
+        if ("noctx", prefix) not in _METADATA_REPORTED:
+            _METADATA_REPORTED.add(("noctx", prefix))
+            print(f"[p15b.meta] {prefix}: no forward context ({exc})", flush=True)
         return
     metadata = getattr(context, "attn_metadata", None)
+    key = f"{prefix.rsplit('.attn', 1)[0]}.kv_cache" if prefix else ""
+    # Report per *state*, not once per layer: the first call is a warmup run
+    # with no metadata, and only reporting the first would have hidden that
+    # later calls do carry it.
+    state = ("dict" if isinstance(metadata, dict) else str(type(metadata).__name__), key)
+    if state in _METADATA_REPORTED:
+        return
+    _METADATA_REPORTED.add(state)
     if isinstance(metadata, dict):
-        keys = list(metadata)
-        print(f"[p15b.meta] {prefix}: attn_metadata keys={keys[:4]} "
-              f"(ours present: {prefix in metadata})", flush=True)
-        entry = metadata.get(prefix)
+        print(f"[p15b.meta] {prefix}: attn_metadata keys={list(metadata)[:3]} "
+              f"(cache prefix {key!r} present: {key in metadata})", flush=True)
+        entry = metadata.get(key)
         if entry is not None:
-            fields = [f for f in ("block_table", "slot_mapping", "block_size")
-                      if hasattr(entry, f)]
-            print(f"[p15b.meta]   {type(entry).__name__} fields={fields}", flush=True)
+            described = []
+            for field in ("block_table", "slot_mapping", "block_size",
+                          "num_decode_tokens"):
+                if hasattr(entry, field):
+                    value = getattr(entry, field)
+                    shape = tuple(value.shape) if hasattr(value, "shape") else value
+                    described.append(f"{field}={shape}")
+            print(f"[p15b.meta]   {type(entry).__name__}: " + " ".join(described),
+                  flush=True)
     else:
-        print(f"[p15b.meta] {prefix}: attn_metadata={type(metadata).__name__}", flush=True)
+        print(f"[p15b.meta] {prefix}: attn_metadata={type(metadata).__name__}",
+              flush=True)
+
+
+def _cached_states(prefix: str, cache_module, batch_size: int, ratio: int = 0):
+    """Gather this layer's cached rows for the current batch.
+
+    Returns ``(rows, positions)`` with ``rows`` shaped ``(B, S, width)`` -- one
+    entry per stored state (a compressed layer stores one state per ``ratio``
+    tokens).  ``None`` when there is no cache (the standalone gates) or no
+    metadata yet (the warmup call, which runs with ``attn_metadata=None``).
+
+    Two details decide whether the result actually tracks kv:
+
+    * ``block_table`` is allocated per *request* (``max_num_reqs`` rows), while
+      this attention works on one sequence, so only the first ``batch_size``
+      rows are this batch's;
+    * the table is padded to ``max_blocks``, so its full width would be a
+      constant.  ``seq_lens`` says how many tokens are actually cached, and a
+      compressed layer stores one state per ``ratio`` of them.
+
+    The metadata is filed by the runner under the *cache holder's* prefix, not
+    this attention's; looking it up under our own name was why an earlier probe
+    concluded the engine never builds metadata for this layer.
+    """
+    if cache_module is None or not prefix:
+        return None
+    cache = getattr(cache_module, "kv_cache", None)
+    if cache is None or not hasattr(cache, "shape") or cache.numel() == 0:
+        return None
+    try:
+        from vllm.forward_context import get_forward_context
+
+        metadata = getattr(get_forward_context(), "attn_metadata", None)
+    except Exception:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    entry = metadata.get(prefix)
+    if entry is None or getattr(entry, "block_table", None) is None:
+        return None
+    blocks = entry.block_table[:batch_size]
+    rows = cache[blocks]                        # (B, max_blocks, block, width)
+    rows = rows.reshape(rows.shape[0], -1, rows.shape[-1])
+    block_size = int(entry.block_size)
+    seq_lens = getattr(entry, "seq_lens", None)
+    if seq_lens is not None:
+        states = int(seq_lens[:batch_size].max().item())
+        states = max(1, states // ratio if ratio else states)
+        rows = rows[:, :states]
+    positions = torch.arange(rows.shape[1], device=rows.device) * max(1, ratio)
+    return rows, positions
 
 
 class P15BRotary(nn.Module):
@@ -307,9 +378,13 @@ class P15BSparseAttention(nn.Module):
         #: Namespace of this layer's KV cache holder; the key its attention
         #: metadata is filed under (see ``kv_cache.P15BCache``).
         self.prefix = prefix
+        #: Set by the vLLM path: the module that owns this layer's paged cache
+        #: and the prefix its attention metadata is filed under.
+        self.cache_module = None
+        self.cache_prefix = f"{prefix.rsplit('.attn', 1)[0]}.kv_cache" if prefix else ""
 
     def forward(self, q, latents, state_values=None, state_pos=None, positions=None,
-                block: int = 128):
+                cached_keys=None, block: int = 128):
         """Blocked sparse attention, in one joint softmax.
 
         Written as a loop over query blocks rather than a dense ``(B,H,T,T)``
@@ -352,6 +427,20 @@ class P15BSparseAttention(nn.Module):
             scores = torch.einsum("bqhd,bqkd->bhqk", q_block, keys) * scale
             scores = scores.masked_fill(~keep[None, None], float("-inf"))
             values = keys
+            if cached_keys is not None and cached_keys.shape[1]:
+                # Everything already in the cache precedes this chunk, so it is
+                # visible without a mask.  This is what makes the op scale with
+                # kv -- without it the profiler's attention table is flat in
+                # that axis (measured: 79.9 us at kv=16 against 80.0 at 512).
+                cached_scores = torch.einsum(
+                    "bqhd,bkd->bhqk", q_block, cached_keys) * scale
+                scores = torch.cat([scores, cached_scores], dim=-1)
+                # The cache is shared by every query in the block, so it has to
+                # be widened from (B, S, D) to (B, qb, S, D) to concatenate
+                # along the key axis.
+                values = torch.cat(
+                    [values, cached_keys.unsqueeze(1).expand(
+                        -1, q_block.shape[1], -1, -1)], dim=2)
             if state_values is not None and state_values.shape[1]:
                 sel = state_values[:, start:end]                     # (B,qb,K,D)
                 sel_pos = state_pos[:, start:end]                    # (B,qb,K)
@@ -408,6 +497,9 @@ class P15BAttention(nn.Module):
             from .kv_cache import P15BCache
 
             self.cache = P15BCache(cfg, ratio, f"{prefix}.kv_cache", dtype)
+            # The attention reads the cache the holder owns; both need the key
+            # the runner files their metadata under.
+            self.attn.cache_module = self.cache
 
     def forward(self, x, positions):
         b, t, _ = x.shape
@@ -428,11 +520,24 @@ class P15BAttention(nn.Module):
                 idx.unsqueeze(-1).expand(-1, -1, -1, self.head_dim))
             state_pos = torch.gather(ends[:, None].expand(b, t, -1), 2, idx)
 
-        out = self.attn(q, latents, state_values, state_pos, positions)
+        out = self.attn(q, latents, state_values, state_pos, positions,
+                        cached_keys=self._cached_keys(b))
         out = out.reshape(b, t, self.n_heads * self.head_dim)
         chunks = torch.chunk(out, self.o_groups, dim=-1)
         out = torch.cat([proj(c) for proj, c in zip(self.o_lora_a, chunks)], dim=-1)
         return self.o_lora_b(out)
+
+    def _cached_keys(self, batch_size: int):
+        """Cached rows, projected into the same space the attention keys use."""
+        gathered = _cached_states(self.attn.cache_prefix, self.cache,
+                                  batch_size, self.ratio)
+        if gathered is None:
+            return None
+        rows, _ = gathered
+        if self.ratio:
+            half = self.compressor.state // 2       # coff * head_dim
+            return self.kv_state_proj(rows[..., :half])
+        return rows[..., :self.head_dim]
 
 
 # ---------------------------------------------------------------------------

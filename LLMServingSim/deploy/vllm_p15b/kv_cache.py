@@ -39,6 +39,10 @@ class P15BCacheMetadata(AttentionMetadata):
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     block_size: int
+    #: Cached tokens per request.  Without it the attention can only read the
+    #: whole padded block table, whose size does not move with kv -- and the
+    #: whole point of the profiler's attention sweep is that it does.
+    seq_lens: torch.Tensor
 
 
 class P15BCacheMetadataBuilder(AttentionMetadataBuilder):
@@ -58,6 +62,7 @@ class P15BCacheMetadataBuilder(AttentionMetadataBuilder):
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
             block_size=self.block_size,
+            seq_lens=common_attn_metadata.seq_lens,
         )
 
 

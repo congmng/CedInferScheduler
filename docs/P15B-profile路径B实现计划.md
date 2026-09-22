@@ -233,33 +233,37 @@ prefill_chunk=128, n_decode=1:
 block_table / slot_mapping 已就绪，缺的是在 attention 里消费它），或 **C2** 用现成
 MLA 层做 attention 代理并在 meta 里显式标注。
 
-#### C1 的实测边界（2026-09-22 探针）：不是"消费已有数据"，是"让层进入 attention group"
+#### C1 完成（2026-09-22）：attention 真的读 paged cache 了
 
-原本以为 C1 只是"在 attention 里读一下 metadata"。加了 env 门控的探针
-（`P15B_DEBUG_META=1`）在 forward 里打印 forward context，实测：
+（这一节前面曾写过一个**错误结论**——"C1 要动 runner"——原因是探针**只报第一次调用**，
+而第一次是 warmup，`attn_metadata` 本来就没有。探针改成按状态上报后真相是：）
 
 ```text
-[p15b.meta] p15b.layers.0.attn: attn_metadata=NoneType
+[p15b.meta] p15b.layers.0.attn: attn_metadata=NoneType                      ← warmup
+[p15b.meta] p15b.layers.0.attn: attn_metadata keys=['p15b.layers.0.kv_cache'] (present: True)
+[p15b.meta]   P15BCacheMetadata: block_table=(4, 64) slot_mapping=(8,) block_size=4
 ```
 
-**runner 完全没有给我们的层准备 metadata**——不是字段缺失，是整个 `attn_metadata`
-为 `None`。对照官方那个"cache-only backend"（`CompressorBackend`）后改了我们的两处
-（`get_supported_head_sizes` 从 `[]` 改成真实的 `[576, 1024, 2048]`、
-`get_supported_kernel_block_sizes` 改成 `[MultipleOf(1)]`），**结果仍是
-`NoneType`**。也就是说 vLLM 只会为"真正会跑 attention kernel 的 attention group"
-建 metadata，cache-only 的层拿不到。
+runner **确实**给我们的层建了 metadata，用的就是我们的 `P15BCacheMetadataBuilder`——
+只是**记在 cache 模块的 prefix（`...kv_cache`）下**，而 attention 一开始用自己的
+prefix 去查。修三处就通了：
 
-所以 C1 的实际工作量在 **runner 那一层**（把我们的层注册成 attention group、
-提供 `get_impl_cls` 与 metadata 装配路径），而不是在我们自己的模块里——比计划里
-"中高"的估计还要更偏"高"。两条路现在是这样：
+1. 按 `f"{prefix}.kv_cache"` 取 metadata（runner 是按 KV cache group 命名的）；
+2. `block_table` 是**按 request** 分配的（`max_num_reqs` 行），而 attention 是单序列
+   batch，只取前 `B` 行；
+3. 表被 pad 到 `max_blocks`，整张读下来大小恒定（kv 轴照样是平的）——
+   要用 `seq_lens` 截到真实缓存长度，压缩层再除以 `ratio` 才得到状态数。
 
-| 路 | 现在要做什么 | 代价 | 那张 attention 表代表什么 |
-|---|---|---|---|
-| **C1** | 让我们的层成为 runner 认的 attention group（`get_impl_cls` + metadata 装配），再在 forward 里按 block_table/slot_mapping 读 paged cache | 高，且有 vLLM 内部 API 版本风险 | 我们自己的 top-k 稀疏注意力，最真实 |
-| **C2** | 在 profile 路径上用 vLLM 现成的 MLA 层（同 head_dim=512）算 attention，并在 meta 里标注"attention 列为稠密 MLA 代理" | 低 | 缓存机制真实、但读法是稠密 MLA 而不是 top-k 稀疏 |
+**实测效果（同一网格，改前 vs 改后）**：
 
-**在选定之前不建议开跑 12 次正式 profile**：dense 与 moe 两列今天就能用，attention
-那一列按 C1/C2 会给出两种不同含义的数字，混着用会把模拟器的 attention 模型带偏。
+| `prefill_chunk` / `n_decode` | 改前 kv 16→512 | 改后 kv 16→512 |
+|---|---|---|
+| 128 / 1 | 79.9 → 80.0 µs（0.2%） | **106.4 → 162.9 µs（1.53×）** |
+| 256 / 1 | — | **190.2 → 305.5 µs（1.61×）** |
+| 128 / 4 | — | **124.4 → 186.5 µs（1.50×）** |
+
+attention 那一列**现在随 kv 变化**，模拟器的 attention 模型可以用它。
+（C2 那条"用 MLA 代理"的退路不再需要。）
 
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
