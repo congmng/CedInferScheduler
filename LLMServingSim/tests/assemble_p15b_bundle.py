@@ -29,6 +29,10 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 
 #: Files a full run produces, minus the ones a re-run may replace.
 FROM_PROFILE = ("dense.csv", "attention.csv", "per_sequence.csv", "moe.csv")
+#: MoE is profiled once, at tp=1 (the profiler skips the category for tp != 1
+#: and the simulator scales per-expert time by the expert-parallel size), so a
+#: tp>1 refresh legitimately has no moe.csv.
+OPTIONAL = ("moe.csv",)
 MODEL = "casr/P15B"
 
 
@@ -102,6 +106,9 @@ def main() -> int:
     for block in blocks:
         for name in FROM_PROFILE:
             path = _source(block, name)
+            if name in OPTIONAL and not path.is_file():
+                print(f"{block}: {name} absent (optional at tp>1) -- skipped")
+                continue
             if not path.is_file():
                 problems.append(f"{path} is missing -- that collection is not "
                                 f"finished (dense needs CATEGORIES=dense, "
@@ -117,7 +124,9 @@ def main() -> int:
         dest = _type_dir(work_root, block, args.hardware, args.variant, args.tp)
         dest.mkdir(parents=True, exist_ok=True)
         for name in FROM_PROFILE:
-            shutil.copy2(_source(block, name), dest / name)
+            path = _source(block, name)
+            if path.is_file():
+                shutil.copy2(path, dest / name)
         meta = src.parent / "meta.yaml"
         if meta.is_file():
             shutil.copy2(meta, dest.parent / "meta.yaml")
