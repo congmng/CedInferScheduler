@@ -353,6 +353,20 @@ plan_layer_sequences(cfg, arch)  -> 28 条逐层流水线，例如
 也就是说"每层走自己的压缩模块、查自己的 attention 表"这条链已经通了——
 剩下只等四个域的 bundle 落盘。
 
+**一处口径修正（2026-09-22）**：四个 `configs/model/casr/P15B*.json` 一开始**没有
+`kv_layout` 块**（只有 `DeepSeek/DSV4-P15B-draft.json` 有），于是 `pd_kv_bytes` 走了
+通用分支——按"28 层 × 每层 512 宽 K+V"计价：
+
+```text
+修前：2 × 512 × (28 × 10) × 2 = 573,440 B / 10 token   （= 57,344 B/token，全注意力价）
+修后：sum(values/token)=8,480 × 2 × 10 = 169,600 B / 10 token   （= 16,960 B/token ✓ 设计值）
+```
+
+补上 `kv_layout`（28 层 ratio 列表；三份单类型 config 各 1 层）之后，
+**`pd_kv_bytes`（执行侧）与 cluster config 的 `casr.kv_bytes_per_token = 16960`
+（计划侧）口径一致了**——这正是 `hw_service` 一直强调的"计划和执行定价同一个引擎"。
+如果没发现这条，handoff 代价会被高估 **3.4×**，而 handoff 恰恰是 CASR 决定搬不搬的依据。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和

@@ -34,5 +34,14 @@
     "r0"
   ],
   "num_experts": 48,
-  "_num_experts_comment": "HF alias for n_routed_experts; serving/core/memory_model.calculate_sizes reads it."
+  "_num_experts_comment": "HF alias for n_routed_experts; serving/core/memory_model.calculate_sizes reads it.",
+  "kv_layout": {
+    "kind": "per_layer_compress",
+    "head_dim": 512,
+    "rope_head_dim": 64,
+    "compress_ratios": [
+      0
+    ],
+    "_comment": "Per-layer compressed KV: one state every `ratio` tokens, 2*coff*head_dim values per state (coff=2 at ratio 4); ratio 0 stores head_dim+rope per token. This is what makes pd_kv_bytes / get_kv / full_cluster_kv_bytes_per_token price P-15B at 16,960 B/token instead of the dense 57,344. Cross-checked against design/dsv4_ref by tests/test_dsv4_kv_layout.py."
+  }
 }
