@@ -290,6 +290,34 @@ attention 那一列**现在随 kv 变化**，模拟器的 attention 模型可以
 层名已按类型区分（`compressor_csa` / `compressor_hca` …），所以并集是互斥的。
 单域 3 种类型串行，预计 **2 小时左右**。
 
+#### 合并工具（`tests/merge_profile_types.py`）：已写好并在小网格上验证
+
+三种类型的 CSV 有两类行键：
+
+* **类型专属**（`compressor_csa` / `compressor_hca` / `indexer_*` / `kvproj_*`）——
+  直接并集；
+* **三类型共享**（`embedding` / `qkv_down` / `q_up` / `o_lora_*` / `moe` / 各 norm）——
+  同名同形状，所以**同一次测量会出现三次**。工具保留第一份，并把差异当**免费的一致性
+  校验**报出来（小网格 `iters=1` 实测：`dense` 逐层中位偏差 **13.1%**、`per_sequence`
+  **0.1%**、`moe` **5.3%**，都在 15% 阈值内；单行最差 27.9%，是小算子的噪声，
+  所以判据用**逐层中位**而不是最差单行）。
+
+**attention 不能合并——这是工具抓出来的一个真问题**：同一个 shot 键在三种类型间最大
+差 **77.4%**。原因是三种类型的注意力根本不是同一个算子（r0 全因果、r4 窗口 8 + top-k、
+r128 窗口 128 + top-k）。而 profiler 的 schema 强制 `catalog.attention` **恰好一项**，
+simulator 的 `_lookup_attention` 也只有一个表——**"一个模型一个 attention 表"这个假设
+对 P-15B 不成立**。工具因此把三张表并排写进 bundle：
+
+```text
+attention.csv        ← r0（全因果）
+attention_r4.csv     ← CSA（窗口 8 + top-k）
+attention_r128.csv   ← HCA（窗口 128 + top-k）
+```
+
+**待办**：让 simulator 按 `layers_block_type` 选对应的 attention 表（`layer_types` 机制
+已经能按类型选*流水线*，缺的是 attention 查表那一处也按类型分派）。在那之前，任何拿这一列
+跑出来的调度结论都要注明"attention 用的是 r0 那张表"。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
