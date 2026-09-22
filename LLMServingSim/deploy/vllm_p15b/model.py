@@ -21,6 +21,7 @@ per rank) and registers the model in ``ModelRegistry``; keeping construction in
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import torch.nn as nn
@@ -84,6 +85,42 @@ def rope(x, positions, rope_dim, theta=10000.0):
     a, b = part[..., :half], part[..., half:]
     rotated = torch.cat([a * cos - b * sin, a * sin + b * cos], dim=-1)
     return torch.cat([nope, rotated], dim=-1)
+
+
+_METADATA_REPORTED: set[str] = set()
+
+
+def _report_forward_metadata(prefix: str) -> None:
+    """Once per layer, report what vLLM handed the forward pass.
+
+    Whether the engine files attention metadata under our layer's name decides
+    how the attention can read the paged cache (path B's remaining piece), and
+    that is not visible from the outside: the metadata arrives through a
+    context variable set by the runner.  Gated on ``P15B_DEBUG_META`` so it
+    costs nothing in a real run.
+    """
+    if not os.environ.get("P15B_DEBUG_META") or prefix in _METADATA_REPORTED:
+        return
+    _METADATA_REPORTED.add(prefix)
+    try:
+        from vllm.forward_context import get_forward_context
+
+        context = get_forward_context()
+    except Exception as exc:  # pragma: no cover - probe only
+        print(f"[p15b.meta] {prefix}: no forward context ({exc})", flush=True)
+        return
+    metadata = getattr(context, "attn_metadata", None)
+    if isinstance(metadata, dict):
+        keys = list(metadata)
+        print(f"[p15b.meta] {prefix}: attn_metadata keys={keys[:4]} "
+              f"(ours present: {prefix in metadata})", flush=True)
+        entry = metadata.get(prefix)
+        if entry is not None:
+            fields = [f for f in ("block_table", "slot_mapping", "block_size")
+                      if hasattr(entry, f)]
+            print(f"[p15b.meta]   {type(entry).__name__} fields={fields}", flush=True)
+    else:
+        print(f"[p15b.meta] {prefix}: attn_metadata={type(metadata).__name__}", flush=True)
 
 
 class P15BRotary(nn.Module):
@@ -261,12 +298,15 @@ class P15BSparseAttention(nn.Module):
     on every layer.
     """
 
-    def __init__(self, cfg, ratio: int):
+    def __init__(self, cfg, ratio: int, prefix: str = ""):
         super().__init__()
         self.head_dim = cfg.head_dim
         self.n_heads = cfg.num_attention_heads
         self.ratio = ratio
         self.window = cfg.coff(ratio) * ratio if ratio else cfg.max_position_embeddings
+        #: Namespace of this layer's KV cache holder; the key its attention
+        #: metadata is filed under (see ``kv_cache.P15BCache``).
+        self.prefix = prefix
 
     def forward(self, q, latents, state_values=None, state_pos=None, positions=None,
                 block: int = 128):
@@ -286,6 +326,7 @@ class P15BSparseAttention(nn.Module):
         b, t, n_heads, head_dim = q.shape
         if positions is None:
             positions = torch.arange(t, device=q.device)[None].expand(b, t)
+        _report_forward_metadata(self.prefix)
         scale = 1.0 / math.sqrt(head_dim)
         windowed = bool(self.ratio) and self.window < t
         offsets = torch.arange(self.window, device=q.device) - (self.window - 1)
@@ -359,7 +400,7 @@ class P15BAttention(nn.Module):
             self.compressor = None
             self.indexer = None
             self.kv_state_proj = None
-        self.attn = P15BSparseAttention(cfg, ratio)
+        self.attn = P15BSparseAttention(cfg, ratio, prefix=f"{prefix}.attn" if prefix else "")
         # Only under vLLM: declaring a spec needs a live vllm_config, and the
         # standalone gates (parity, parameter counts) run without one.
         self.cache = None

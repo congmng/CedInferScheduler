@@ -233,6 +233,34 @@ prefill_chunk=128, n_decode=1:
 block_table / slot_mapping 已就绪，缺的是在 attention 里消费它），或 **C2** 用现成
 MLA 层做 attention 代理并在 meta 里显式标注。
 
+#### C1 的实测边界（2026-09-22 探针）：不是"消费已有数据"，是"让层进入 attention group"
+
+原本以为 C1 只是"在 attention 里读一下 metadata"。加了 env 门控的探针
+（`P15B_DEBUG_META=1`）在 forward 里打印 forward context，实测：
+
+```text
+[p15b.meta] p15b.layers.0.attn: attn_metadata=NoneType
+```
+
+**runner 完全没有给我们的层准备 metadata**——不是字段缺失，是整个 `attn_metadata`
+为 `None`。对照官方那个"cache-only backend"（`CompressorBackend`）后改了我们的两处
+（`get_supported_head_sizes` 从 `[]` 改成真实的 `[576, 1024, 2048]`、
+`get_supported_kernel_block_sizes` 改成 `[MultipleOf(1)]`），**结果仍是
+`NoneType`**。也就是说 vLLM 只会为"真正会跑 attention kernel 的 attention group"
+建 metadata，cache-only 的层拿不到。
+
+所以 C1 的实际工作量在 **runner 那一层**（把我们的层注册成 attention group、
+提供 `get_impl_cls` 与 metadata 装配路径），而不是在我们自己的模块里——比计划里
+"中高"的估计还要更偏"高"。两条路现在是这样：
+
+| 路 | 现在要做什么 | 代价 | 那张 attention 表代表什么 |
+|---|---|---|---|
+| **C1** | 让我们的层成为 runner 认的 attention group（`get_impl_cls` + metadata 装配），再在 forward 里按 block_table/slot_mapping 读 paged cache | 高，且有 vLLM 内部 API 版本风险 | 我们自己的 top-k 稀疏注意力，最真实 |
+| **C2** | 在 profile 路径上用 vLLM 现成的 MLA 层（同 head_dim=512）算 attention，并在 meta 里标注"attention 列为稠密 MLA 代理" | 低 | 缓存机制真实、但读法是稠密 MLA 而不是 top-k 稀疏 |
+
+**在选定之前不建议开跑 12 次正式 profile**：dense 与 moe 两列今天就能用，attention
+那一列按 C1/C2 会给出两种不同含义的数字，混着用会把模拟器的 attention 模型带偏。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和

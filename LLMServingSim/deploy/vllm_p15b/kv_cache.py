@@ -28,7 +28,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (AttentionBackend, AttentionCGSupport,
                                        AttentionMetadata,
                                        AttentionMetadataBuilder,
-                                       CommonAttentionMetadata)
+                                       CommonAttentionMetadata, MultipleOf)
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 
@@ -75,11 +75,19 @@ class P15BCacheBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes():
-        return [1]
+        return [MultipleOf(1)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return []
+        """The widths our specs actually declare.
+
+        Returning ``[]`` -- which looked harmless, since nothing here runs a
+        vLLM attention kernel -- makes the runner drop the group, and the layer
+        then never receives attention metadata (measured: ``attn_metadata`` is
+        NoneType inside our forward).  The official compressor declares its
+        head sizes for the same reason.
+        """
+        return [576, 1024, 2048]
 
     @staticmethod
     def get_builder_cls() -> type[P15BCacheMetadataBuilder]:
