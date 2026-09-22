@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO))
 from serving.core.memory_model import (MemoryModel, calculate_sizes,   # noqa: E402
                                        get_config)
 from serving.core.trace_generator import (                            # noqa: E402
-    BatchCtx, TraceCtx, _block_type_for, _build_transformer_block,
+    BatchCtx, TraceCtx, _block_type_for, _build_transformer_block, _can_copy_blocks,
     _is_windowed_layer, _type_sequence)
 
 MODEL = "Zyphra/Zamba2-1.2B"
@@ -141,6 +141,27 @@ class BlockTypeTests(unittest.TestCase):
         self.assertEqual(names.count("mamba"), 32)
         self.assertEqual([i for i, n in enumerate(names) if n == "hybrid"],
                          [5, 11, 17, 23, 29, 35])
+
+    def test_one_block_may_not_stand_in_for_a_hybrids_layers(self):
+        """The trace may only copy block 0 when the layers are interchangeable.
+
+        ``_synthesize_trace`` builds one transformer block and repeats it
+        ``num_hidden_layers`` times, which is what makes trace generation
+        cheap.  For a model that declares ``layers_block_type`` that copy is
+        wrong -- layer 0's pipeline is not the others' -- and it silently
+        prices every layer as layer 0: the per-layer pipelines and the
+        per-block-type attention tables both go unused.  The placement half of
+        the same rule (``block_mode_on``) was already checked; this is the
+        shape half.
+        """
+        self.assertFalse(_can_copy_blocks(self.ctx, False))
+        self.assertFalse(_can_copy_blocks(self.ctx, True))
+
+    def test_a_uniform_model_may_still_copy(self):
+        """No ``layer_types`` in the yaml -> every layer is the same -> copy."""
+        ctx = _ctx(self.root)
+        ctx.perf_db["architecture"].pop("layer_types", None)
+        self.assertTrue(_can_copy_blocks(ctx, False))
 
     def test_each_type_selects_its_own_pipeline(self):
         self.assertEqual(_block_type_for(self.ctx, 0), "mamba")

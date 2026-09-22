@@ -1121,6 +1121,16 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
         # window 8 / window 128).  Falls back to the single ``attention`` table
         # for models whose layers are uniform.
         block = _block_type_for(ctx, layer_num)
+        if os.environ.get("P15B_DEBUG_DISPATCH"):
+            # Keyed on the decision, not on ``id(ctx)``: ids get recycled after
+            # a context is collected, which silently suppresses later layers.
+            key = (layer_num, block)
+            if key not in _DISPATCH_SEEN:
+                _DISPATCH_SEEN.add(key)
+                has = sorted(k for k in _tp_tables(ctx.perf_db, ctx.tp_size)
+                             if k.startswith("attention"))
+                print(f"[dispatch] layer={layer_num} block={block!r} tables={has}",
+                      flush=True)
         latency_ns = _lookup_attention_with_skew(
             ctx.perf_db, ctx.tp_size,
             bctx.prefill_chunk, kv_prefill,
@@ -1470,6 +1480,9 @@ def _layer_types(perf_db):
     return perf_db["architecture"].get("layer_types") or {}
 
 
+_DISPATCH_SEEN: set = set()
+
+
 def _block_type_for(ctx, layer_num):
     """Block-type name for layer ``layer_num``, or None when uniform."""
     types = _layer_types(ctx.perf_db)
@@ -1480,6 +1493,25 @@ def _block_type_for(ctx, layer_num):
         return None
     name = str(names[layer_num])
     return name if name in types else None
+
+
+def _can_copy_blocks(ctx, block_mode_on):
+    """Whether one transformer block's trace may stand in for every layer.
+
+    Copying is what makes trace generation cheap -- build block 0 once, repeat
+    it ``num_hidden_layers`` times -- and it is only valid when the layers
+    really are interchangeable.  ``block_mode_on`` covers the *placement* half
+    (per-block weight/kv overrides), but not the *shape* half: a model that
+    declares ``layers_block_type`` builds different pipelines per layer, so
+    layer 0 does not price the others and the copy would charge all 28 of
+    P-15B's layers as the first one -- including its attention op, which is why
+    the per-block-type attention tables were never consulted.
+    """
+    if block_mode_on:
+        return False
+    if _layer_types(ctx.perf_db):
+        return False
+    return not ctx.is_moe or ctx.gate.block_copy
 
 
 def _type_sequence(ctx, layer_num, section, fallback):
@@ -1759,7 +1791,8 @@ def _synthesize_trace(hardware, model, config, tp_size, pp_size, local_ep, ep_to
 
     # Transformer blocks
     num_layers = config['num_hidden_layers']
-    iter_count, copy_count = (num_layers, 1) if block_mode_on else (1, num_layers)
+    per_layer_blocks = block_mode_on or bool(_layer_types(ctx.perf_db))
+    iter_count, copy_count = (num_layers, 1) if per_layer_blocks else (1, num_layers)
 
     for layer_num in range(iter_count):
         block_lines, block_power = _build_transformer_block(ctx, bctx, layer_num, 'NONE', str(batch.batch_id))
@@ -1768,7 +1801,7 @@ def _synthesize_trace(hardware, model, config, tp_size, pp_size, local_ep, ep_to
         # opts into block copy (BALANCED is deterministic; others
         # carry tiny per-layer variance that block_copy swallows
         # for the sake of trace-generation speed).
-        can_copy = (not ctx.is_moe or ctx.gate.block_copy) and not block_mode_on
+        can_copy = _can_copy_blocks(ctx, block_mode_on)
         if can_copy:
             for _ in range(copy_count):
                 block_starts.append(written)
@@ -1840,7 +1873,8 @@ def _synthesize_interleaved_trace(hardware, model, config, tp_size, pp_size, loc
 
     # MIDDLE LAYERS: interleaved post_attn + pre_attn
     middle_layers = num_layers - 1
-    iter_count, copy_count = (middle_layers, 1) if block_mode_on else (1, middle_layers)
+    per_layer_blocks = block_mode_on or bool(_layer_types(ctx.perf_db))
+    iter_count, copy_count = (middle_layers, 1) if per_layer_blocks else (1, middle_layers)
 
     for layer_num in range(iter_count):
         block_lines = []
@@ -1858,7 +1892,7 @@ def _synthesize_interleaved_trace(hardware, model, config, tp_size, pp_size, loc
         # opts into block copy (BALANCED is deterministic; others
         # carry tiny per-layer variance that block_copy swallows
         # for the sake of trace-generation speed).
-        can_copy = (not ctx.is_moe or ctx.gate.block_copy) and not block_mode_on
+        can_copy = _can_copy_blocks(ctx, block_mode_on)
         if can_copy:
             for _ in range(copy_count):
                 rows.extend(block_lines)
