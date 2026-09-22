@@ -359,22 +359,34 @@ class P15BDecoderLayer(nn.Module):
 
 
 class P15BForCausalLM(nn.Module):
-    """Embedding + N decoder layers + norm + head.  No mHC anywhere."""
+    """Embedding + N decoder layers + norm (+ head).  No mHC anywhere.
 
-    def __init__(self, cfg):
+    ``with_lm_head=False`` drops the ``nn.Linear`` head and returns hidden
+    states: that is the shape vLLM wants, since it supplies its own
+    ``ParallelLMHead`` (TP-sharded) plus ``LogitsProcessor``.
+    """
+
+    def __init__(self, cfg, with_lm_head: bool = True):
         super().__init__()
         self.cfg = cfg
+        self.with_lm_head = with_lm_head
         self.embed_tokens = _embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
             P15BDecoderLayer(cfg, ratio) for ratio in cfg.compress_ratios)
         self.norm = P15BFinalNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.lm_head = _linear(cfg.hidden_size, cfg.vocab_size)
+        self.lm_head = _linear(cfg.hidden_size, cfg.vocab_size) if with_lm_head else None
 
-    def forward(self, input_ids, positions=None):
-        b, t = input_ids.shape
+    def forward(self, input_ids, positions=None, inputs_embeds=None):
+        """One code path for the parity gate and for vLLM: the latter passes
+        ``inputs_embeds`` alongside ``input_ids``, and takes precedence."""
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        else:
+            x = self.embed_tokens(input_ids)
+        b, t = x.shape[0], x.shape[1]
         if positions is None:
             positions = torch.arange(t, device=input_ids.device)[None].expand(b, t)
-        x = self.embed_tokens(input_ids)
         for layer in self.layers:
             x = layer(x, positions)
-        return self.lm_head(self.norm(x))
+        x = self.norm(x)
+        return self.lm_head(x) if self.lm_head is not None else x

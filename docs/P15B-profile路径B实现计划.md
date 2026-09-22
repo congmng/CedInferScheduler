@@ -78,11 +78,48 @@ logits**（fp32、T=256，三种层类型）——结果 **max|Δlogits| = 0.000
 `state_pos` 的 valid 掩码多套一层（广播成 `(b,b,t,K)`）、以及闸门自己把参考模型的
 embedding 名（`embed` vs `embed_tokens`）漏扣了 167,772,160 个参数。
 
-### 步骤 2：四卡跑通（这是 B 的意义所在）
+### 步骤 2：四卡跑通（进行中）
 
 在本机 4090、3090a、5090、A100-80G 上各起一次 dummy 模型 + forward。
 
 **判据**：四类卡都无异常退出；4090/3090/A100 上**不再出现 mHC 或 fp8 相关的报错**。
+
+**当前实测（2026-09-22，本机 4090）**：vLLM 装载已经过掉五道关卡，卡在第六道——
+
+| # | 关卡 | 处理 |
+|---|---|---|
+| 1 | `model_type: p15b` 不被 Transformers 认识 | `hf_config.py` 用 `AutoConfig.register` 注册（官方扩展点） |
+| 2 | 模型目录必须含 `config.json` | 与 profiler 一样，把 config 拷进临时目录 |
+| 3 | registry 里没有这个架构 | `sitecustomize` 里 `ModelRegistry.register_model` |
+| 4 | `VllmModel` 协议要求 `embed_input_ids` | 补上；同时去掉 `SupportsPP`（会要求 `intermediate_tensors`） |
+| 5 | runner 传**扁平**布局 `(num_tokens,)`，且带 `inputs_embeds` | 包装层 reshape 成 `(1,T)` 再摊平回来（见下） |
+| 6 | `HybridKVCacheCoordinator requires at least one cacheable group` | **未解决**，见 §4.3bis |
+
+### 4.3bis 新发现：attention 的 profile 与 KV cache 机制是耦合的
+
+第 6 道关卡不是"补一个 spec 就完"的问题。profiler 的 attention 类别是按
+`(prefill_chunk, kv_prefill, n_decode, kv_decode)` 打点的——**它假设模型的
+attention 会真的去读一个由这些长度决定的 paged KV cache**。而我们第一版的注意力是
+纯 torch、在**当前 batch 的 latent** 上做窗口+选中状态的软最大化，根本不碰 cache。
+两条后果：
+
+1. engine 侧直接报 `requires at least one cacheable group`（没有 cacheable 的层）；
+2. 即使补上一个 spec 让引擎起得来，测出来的 attention 曲线**不会随 kv 长度变化**，
+   而模拟器的 attention 模型恰恰是建立在"随 kv 变化"上的——那张表会变成常数，
+   等于白测。
+
+所以 attention 那一段必须**真的走 paged cache**。三条路：
+
+| 路 | 做法 | 代价 | 结果可信度 |
+|---|---|---|---|
+| **C1** | 写一个 vLLM `AttentionImpl` + 自定义 backend，按我们的窗口+top-k 稀疏模式从 paged cache 读 | 中高（要接 backend 注册与 cache 接口） | 最真实：形状、稀疏模式、cache 访问都是我们的 |
+| **C2** | 用 vLLM 现成的 **MLA attention 层**（如 DeepSeek-V2 的 `MLAAttention`）做 attention 的 profile 代理，我们自己的稀疏算子留在模型里 | 低 | 是**代理**：cache 机制真实、但读的是稠密 MLA 而不是 top-k 稀疏，需要显式标注 |
+| **C3** | 只给一个 spec 让引擎能起，attention 表按 C2 或单独的实验补 | 最低 | 表的 kv 维度不可信 |
+
+**建议 C1**，理由是它顺带把我们自己那条稀疏路径的 cache 语义（`tokens_per_state=ratio`
+那笔账）在引擎里跑通——这正好是官方实现出错的地方，自己写一遍就把 §3.1.2 的
+1.40× 容量收益从"应该能拿回"变成"实现里本来就对"。若时间紧，先 C2 出一版 bundle
+并把"attention 是稠密 MLA 代理"写进 meta，再回头做 C1。
 
 ### 步骤 3：写 `profiler/models/p15b.yaml`
 
