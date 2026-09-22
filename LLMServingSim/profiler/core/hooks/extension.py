@@ -24,6 +24,7 @@ jitter; averaging cuts that noise floor dramatically.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from profiler.core.hooks.batch import Shot, assemble_scheduler_output
@@ -123,5 +124,37 @@ class Extension:
         stats = hook.results.convert_stats_to_dict()
         summary = stats["summary_stats"]
 
+        _maybe_dump_tree(kind, shot_dict, summary)
         samples = extract_samples(summary, slice_)
         return [s.as_dict() for s in samples]
+
+
+def _maybe_dump_tree(kind: str, shot_dict: dict[str, Any], nodes: list) -> None:
+    """Print every profiled node with its raw time and call count.
+
+    Set ``PROFILER_DUMP_TREE=<path>`` when a category's numbers look wrong and
+    you need to see *what was actually measured* rather than what the catalog
+    mapped it to -- the raw count is what ``extract_samples`` divides by, so a
+    doubled invocation shows up here and nowhere else. Also useful to confirm
+    a module is (or is not) in the tree at all.
+
+    It writes to a file rather than stdout because the TP workers' stdout is
+    captured by vLLM's logging; a mounted path (e.g. ``/out/tree.log``) is the
+    only reliable channel.
+    """
+    path = os.environ.get("PROFILER_DUMP_TREE")
+    if not path:
+        return
+
+    def walk(entries, depth=0):
+        for node in entries or []:
+            entry = node.get("entry") or {}
+            lines.append(f"[tree] {'  ' * depth}{entry.get('name')} "
+                         f"cuda={entry.get('cuda_time_us')} "
+                         f"invocations={entry.get('invocations')}")
+            walk(node.get("children"), depth + 1)
+
+    lines = [f"--- layerwise tree for {kind} shot {shot_dict} ---"]
+    walk(nodes)
+    with open(path, "a", encoding="utf-8") as stream:
+        stream.write("\n".join(lines) + "\n")

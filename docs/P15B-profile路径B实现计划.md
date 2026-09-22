@@ -52,6 +52,7 @@ LLMServingSim/
 | `check_p15b_shapes.py` | 参数量三方对账 + 与 `design/dsv4_ref` 的 logits parity | 改模型后 |
 | `check_p15b_boot.py` | 四类卡装载 + KV 账目闭式 | 改 KV spec 后 |
 | `check_p15b_catalog_binding.py` | 每个 canonical 名必须**唯一**绑定一个模块（新增，见"第四道缺口"） | **每次采集前** |
+| `test_head_binding.py` | 所有 yaml 的 `lm_head` / `sampler` 必须绑到引擎真正调用的模块（torch-free） | 改 yaml 后 |
 | `run_p15b_profile.sh` | 三类 × 一卡；`BLOCKS` / `CATEGORIES` 选子集 | 采集 |
 | `merge_profile_types.py` | 三份单类型 bundle 合一 + 共享层一致性闸门 | 采集后 |
 | `assemble_p15b_bundle.py` | 把"正式采集 + dense 重采"拼成一个 type-root，再调合并与两个校验器 | 一个域收尾时（一条命令） |
@@ -426,6 +427,47 @@ python3 tests/assemble_p15b_bundle.py --hardware RTX5090 \
 ```
 
 ### 步骤 4 落地状态（2026-09-22 18:20）
+
+#### 步骤 4 的第五道缺口：head 绑到了一个"从不被调用"的类（2026-09-22，已修）
+
+**怎么发现的**：把新 bundle 喂给模拟器，整个跑通、逐层都查得到，**只有一条告警**：
+
+```text
+[TraceGenerator] WARNING  Layer 'lm_head' is in the architecture yaml sequence
+but missing from the profile CSVs for RTX4090/casr/P15B/bf16 — skipping.
+```
+
+head 是 `2560 × 65536 = 167.8M` 参数、约占每 token 激活算力的 **10%**，不能被静默跳过。
+
+**定位**（对照实验）：同一个镜像、同一个类别，给 Qwen3-8B 采一次 per_sequence——
+它是 **32 行 `lm_head`、没有 `sampler`**；而 P-15B 是 **32 行 `sampler`、没有 `lm_head`**。
+读 vLLM 源码后原因很清楚：`LogitsProcessor._apply_head` 走的是
+`lm_head.quant_method.apply(lm_head, hidden_states, ...)`，**从不调用 `ParallelLMHead`
+模块本身**，所以 profiler 的"模块调用树"里永远没有这个节点。
+而**所有其他架构 yaml 早就把 canonical 名 `lm_head` 绑到 `LogitsProcessor`**
+（真正做 head 投影的模块）、`sampler` 绑到 `Sampler`。我们绑成了
+`ParallelLMHead` / `LogitsProcessor`——正好错位一格。
+
+**旁证（数值）**：P-15B 那 32 行 `sampler`（其实是 head GEMM）与 Qwen3-8B 的
+`lm_head` 行，按 head 形状比 `(2560×65536)/(4096×151936) = 0.2696` 缩放后逐点吻合：
+
+| sequences | P-15B（记为 sampler） | Qwen3-8B lm_head × 0.2696 |
+|---:|---:|---:|
+| 1 | 360.7 µs | 350.2 µs |
+| 16 | 364.0 µs | 359.3 µs |
+| 128 | 426.4 µs | 411.0 µs |
+
+**后果**：模拟器查 `lm_head` 查不到（跳过），而 `sampler` 那一行装的其实是 head 的成本——
+名字与内容错位，任何"head 贵还是 sampler 贵"的判断都不可信。
+
+**修法**：yaml 两行改成 `lm_head: LogitsProcessor` / `sampler: Sampler`（带 `tp_stable`），
+并加 `tests/test_head_binding.py`：**torch-free**，直接读所有 yaml，钉住"head 必须绑到
+引擎真正调用的模块"这条不变量（一跑就覆盖全部 5 个 yaml）。重采只需 per_sequence 一个
+类别（约 1 分钟/类型）：
+
+```bash
+CATEGORIES=per_sequence tests/run_p15b_profile.sh RTX4090 /out
+```
 
 | 域 | 采集 | dense 重采 | bundle 落地 |
 |---|---|---|---|

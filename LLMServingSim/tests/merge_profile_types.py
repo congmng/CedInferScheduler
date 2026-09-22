@@ -119,8 +119,13 @@ def main() -> int:
             print(f"{name}: absent in every type (ok for moe/skew)")
             continue
         header = None
-        rows: list[dict] = []
-        seen: dict[tuple, tuple[dict, str]] = {}
+        # key -> every measurement of that shot, in the order the runs
+        # produced them.  Keeping them all (rather than the first) is what lets
+        # the write below pick a median: a shared layer is measured once per
+        # block type, and one of those runs can be the odd one out -- the
+        # 2048-token MoE shot read 960 / 1116 / 1206 us for r0 across three
+        # runs while r4/r128 sat at 1152, so "first" would ship a coin flip.
+        buckets: dict[tuple, list[dict]] = {}
         duplicates = 0
         worst = (0.0, None)
         # Per-row spreads are noisy for small ops (one 448-token RMSNorm can
@@ -135,12 +140,12 @@ def main() -> int:
                 raise SystemExit(f"{piece}: header differs from the first bundle")
             for row in piece_rows:
                 key = tuple(row[column] for column in key_columns)
-                if key not in seen:
-                    seen[key] = (row, piece.parent.parent.parent.name)
-                    rows.append(row)
+                bucket = buckets.setdefault(key, [])
+                if not bucket:
+                    bucket.append(row)
                     continue
                 duplicates += 1
-                first = seen[key][0]
+                first = bucket[0]
                 for column in header:
                     if column in key_columns:
                         continue
@@ -155,6 +160,19 @@ def main() -> int:
                     per_group.setdefault(group, []).append(spread)
                     if spread > worst[0]:
                         worst = (spread, f"{column}@{key}")
+                bucket.append(row)
+
+        def _median(entries: list[dict]) -> dict:
+            """The measurement whose time sits in the middle.
+
+            Rows differ only in ``time_us``, so ranking by that column and
+            taking the middle one is the median measurement -- robust to a
+            single unstable run (two runs agreeing beat one outlier).
+            """
+            ranked = sorted(entries, key=lambda entry: float(entry["time_us"]))
+            return ranked[len(ranked) // 2]
+
+        rows = [_median(entries) for entries in buckets.values()]
         target = dest / name
         with target.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=header)
@@ -164,7 +182,7 @@ def main() -> int:
                    for group, values in per_group.items()}
         offenders = {g: v for g, v in medians.items() if v > args.max_spread}
         print(f"{name}: {len(rows)} rows ({duplicates} duplicated keys kept once; "
-              f"worst row {worst[0]:.1%}, worst layer median "
+              f"median of the copies; worst row {worst[0]:.1%}, worst layer median "
               f"{max(medians.values(), default=0.0):.1%}) -> {target}")
         if offenders:
             raise SystemExit(

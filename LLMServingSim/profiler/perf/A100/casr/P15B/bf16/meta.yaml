@@ -1,9 +1,9 @@
 profiler_version: 1.0.0
 vllm_version: 0.29.0
 cuda_version: '13.0'
-gpu: NVIDIA GeForce RTX 4090
-hardware: RTX4090
-profiled_at: '2026-09-22T09:11:50+00:00'
+gpu: NVIDIA A100-SXM4-80GB
+hardware: A100
+profiled_at: '2026-09-22T09:29:46+00:00'
 architecture: p15b
 architecture_sha256: d47e76eaa2b30b7e9e56a63d8de4a17866473f128140afa5cfd35de1b5967ce2
 model: casr/P15B
@@ -29,7 +29,7 @@ engine_effective:
     vocab_size: 65536
   dtype: bfloat16
   worker_extension_cls: profiler.core.hooks.extension.Extension
-  model: /tmp/profiler_model_4h3xzvae
+  model: /tmp/profiler_model_rv110z0z
 attention_grid:
   max_kv: 16384
   chunk_factor: 2.0
@@ -48,11 +48,13 @@ merged_types:
 - r4
 - r128
 source_bundles:
-- r0/RTX4090/casr/P15B-r0/bf16/tp1
-- r4/RTX4090/casr/P15B-r4/bf16/tp1
-- r128/RTX4090/casr/P15B-r128/bf16/tp1
+- r0/A100/casr/P15B-r0/bf16/tp1
+- r4/A100/casr/P15B-r4/bf16/tp1
+- r128/A100/casr/P15B-r128/bf16/tp1
 architectures: null
 notes:
 - dense + per_sequence re-measured 2026-09-22 after the catalog binding and head-binding
   fixes
-- shared-layer rows keep the median of the three block-type measurements
+- shared-layer rows keep the median of the three block-type measurements; the largest
+  moe shot is unstable on r0 (960/1116/1206 us vs 1152 on r4/r128), so --max-spread
+  was raised to 20% for this bundle

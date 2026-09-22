@@ -110,9 +110,17 @@ catalog:
       tp_stable: true
   per_sequence:
     lm_head:
-      vllm: ParallelLMHead
-    sampler:
+      # vLLM computes the head projection *inside* LogitsProcessor
+      # (``_apply_head`` uses ``lm_head.quant_method.apply``, so a
+      # ParallelLMHead module is never called and never shows up in the
+      # profile tree).  Every other architecture yaml binds the canonical
+      # ``lm_head`` name to LogitsProcessor for this reason; binding
+      # ParallelLMHead produced no lm_head rows at all, so the simulator
+      # skipped the head -- ~10% of P-15B's per-token compute.
       vllm: LogitsProcessor
+    sampler:
+      vllm: Sampler
+      tp_stable: true
   attention:
     attention:
       vllm: P15BSparseAttention

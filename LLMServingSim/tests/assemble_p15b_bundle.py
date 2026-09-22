@@ -27,8 +27,8 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-#: Files a full run produces, minus the one the re-run replaces.
-FROM_PROFILE = ("attention.csv", "per_sequence.csv", "moe.csv")
+#: Files a full run produces, minus the ones a re-run may replace.
+FROM_PROFILE = ("dense.csv", "attention.csv", "per_sequence.csv", "moe.csv")
 MODEL = "casr/P15B"
 
 
@@ -45,31 +45,47 @@ def main() -> int:
                         help="the full run's out-root (one dir per block type)")
     parser.add_argument("--dense-root", required=True,
                         help="the --categories dense run's out-root")
+    parser.add_argument("--ps-root", default=None,
+                        help="optional --categories per_sequence out-root; use "
+                             "it when that category was re-measured too (the "
+                             "2026-09-22 head-binding fix changed per_sequence)")
     parser.add_argument("--work-root", required=True,
                         help="scratch dir for the assembled tree")
     parser.add_argument("--blocks", default="r0,r4,r128")
     parser.add_argument("--variant", default="bf16")
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--note", action="append", default=[])
+    parser.add_argument("--max-spread", type=float, default=None,
+                        help="Pass through to merge_profile_types.py's shared-"
+                             "layer agreement gate. Raise it only with a reason "
+                             "in --note: the gate is what catches a mis-bound "
+                             "layer, so a deliberate override belongs in the "
+                             "bundle's provenance too.")
     parser.add_argument("--skip-checks", action="store_true")
     args = parser.parse_args()
 
     blocks = [b for b in args.blocks.split(",") if b]
     profile_root = pathlib.Path(args.profile_root).expanduser()
     dense_root = pathlib.Path(args.dense_root).expanduser()
+    ps_root = pathlib.Path(args.ps_root).expanduser() if args.ps_root else None
     work_root = pathlib.Path(args.work_root)
+
+    def _source(block: str, name: str) -> pathlib.Path:
+        """Where this CSV comes from: a re-run if there was one, else the run."""
+        if name == "dense.csv":
+            return _type_dir(dense_root, block, args.hardware) / name
+        if name == "per_sequence.csv" and ps_root is not None:
+            return _type_dir(ps_root, block, args.hardware) / name
+        return _type_dir(profile_root, block, args.hardware) / name
 
     problems: list[str] = []
     for block in blocks:
-        src = _type_dir(profile_root, block, args.hardware)
-        dense = _type_dir(dense_root, block, args.hardware) / "dense.csv"
         for name in FROM_PROFILE:
-            if not (src / name).is_file():
-                problems.append(f"{src / name} is missing -- that block type's "
-                                f"collection is not finished")
-        if not dense.is_file():
-            problems.append(f"{dense} is missing -- run the dense re-measure "
-                            f"first (CATEGORIES=dense)")
+            path = _source(block, name)
+            if not path.is_file():
+                problems.append(f"{path} is missing -- that collection is not "
+                                f"finished (dense needs CATEGORIES=dense, "
+                                f"per_sequence needs CATEGORIES=per_sequence)")
     if problems:
         print("cannot assemble yet:")
         for item in problems:
@@ -78,17 +94,18 @@ def main() -> int:
 
     for block in blocks:
         src = _type_dir(profile_root, block, args.hardware)
-        dense = _type_dir(dense_root, block, args.hardware) / "dense.csv"
         dest = _type_dir(work_root, block, args.hardware)
         dest.mkdir(parents=True, exist_ok=True)
         for name in FROM_PROFILE:
-            shutil.copy2(src / name, dest / name)
-        shutil.copy2(dense, dest / "dense.csv")
+            shutil.copy2(_source(block, name), dest / name)
         meta = src.parent / "meta.yaml"
         if meta.is_file():
             shutil.copy2(meta, dest.parent / "meta.yaml")
-        print(f"{block}: {len(FROM_PROFILE)} files from the profile run + "
-              f"dense.csv from the re-run -> {dest}")
+        origin = "+".join(
+            root.name for root in
+            ([dense_root] + ([ps_root] if ps_root else [])) if root)
+        print(f"{block}: {len(FROM_PROFILE)} files, re-run overrides from "
+              f"{origin} -> {dest}")
 
     merge = [
         sys.executable, str(REPO / "tests" / "merge_profile_types.py"),
@@ -98,6 +115,8 @@ def main() -> int:
     ]
     for note in args.note:
         merge += ["--note", note]
+    if args.max_spread is not None:
+        merge += ["--max-spread", str(args.max_spread)]
     print("\n$ " + " ".join(merge[-6:]) + " ...")
     if subprocess.run(merge, cwd=REPO).returncode:
         return 1
