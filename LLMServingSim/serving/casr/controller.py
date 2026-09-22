@@ -311,8 +311,17 @@ class CASRController:
                 raise PolicyError("CASR policy must return FlowAssignment objects or dictionaries")
             if item.class_id not in classes or item.prefill_id not in p_ids or item.decode_id not in d_ids:
                 raise PolicyError(f"CASR policy returned an unknown class or inactive instance: {item}")
-            if item.flow <= 0:
-                raise PolicyError(f"CASR policy returned non-positive flow: {item}")
+            if item.flow < 0:
+                raise PolicyError(f"CASR policy returned negative flow: {item}")
+            if item.flow == 0:
+                # A placeholder, not a plan: the builtin solver emits one row
+                # per (class, prefill, decode) and a class whose EWMA arrival
+                # rate has decayed to 0 -- with ``class_demand_floor_rps`` at
+                # its default 0 -- gets exactly this.  Dropping it changes no
+                # routing (it carries no flow) and keeps the conservation check
+                # below meaningful; rejecting it made every builtin-solver run
+                # fail on the first zero-demand class.
+                continue
             normalized.append(item)
         # A prefix class can be observed on more than one Prefill worker.  The
         # solver receives one row per worker and therefore emits one flow per

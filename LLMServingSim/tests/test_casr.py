@@ -47,6 +47,31 @@ class _ResourceScheduler:
 
 
 class CasrTests(unittest.TestCase):
+    def test_zero_flow_assignments_are_placeholders_not_errors(self):
+        """A zero-flow row must not fail validation.
+
+        The builtin solver emits one row per (class, prefill, decode) and a
+        class whose EWMA arrival rate has decayed to zero gets flow 0 --
+        ``class_demand_floor_rps`` defaults to 0.0.  Rejecting that made every
+        builtin-solver run die on the first such class, which is what
+        ``tests/run_casr_comparison.sh`` hit before this was fixed.
+        """
+        from serving.casr.controller import CASRController
+        from serving.casr.flow_solver import FlowAssignment
+
+        controller = CASRController(100_000_000)
+        snapshot = {"prefix_states": [
+            {"class_id": "m|p16:aa", "arrival_rate_ewma": 4.0},
+            {"class_id": "m|p16:bb", "arrival_rate_ewma": 0.0},
+        ]}
+        prefill = [SimpleNamespace(instance_id=0)]
+        decode = [SimpleNamespace(instance_id=1)]
+        kept = controller._validate_flows(
+            [FlowAssignment("m|p16:aa", 0, 1, 4.0, 1.0),
+             FlowAssignment("m|p16:bb", 0, 1, 0.0, 0.0)],
+            snapshot, prefill, decode)
+        self.assertEqual([item.class_id for item in kept], ["m|p16:aa"])
+
     def test_arrival_rate_counts_requests_over_the_window(self):
         """The simulator must estimate demand the same way the real router does.
 
