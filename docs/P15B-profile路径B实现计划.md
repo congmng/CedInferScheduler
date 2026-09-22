@@ -367,6 +367,16 @@ plan_layer_sequences(cfg, arch)  -> 28 条逐层流水线，例如
 （计划侧）口径一致了**——这正是 `hw_service` 一直强调的"计划和执行定价同一个引擎"。
 如果没发现这条，handoff 代价会被高估 **3.4×**，而 handoff 恰恰是 CASR 决定搬不搬的依据。
 
+完整管线里复核过（同一份 smoke 跑，逐请求 CSV）：
+
+```text
+input=10 tok  pd_kv_bytes=169,600   (16,960/token)
+input=16 tok  pd_kv_bytes=271,360   (16,960/token)
+input=22 tok  pd_kv_bytes=373,120   (16,960/token)
+```
+
+——严格按设计值成比例，不再是 57,344/token 的全注意力价。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
