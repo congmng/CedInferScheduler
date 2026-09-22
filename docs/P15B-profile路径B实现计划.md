@@ -265,6 +265,31 @@ prefix 去查。修三处就通了：
 attention 那一列**现在随 kv 变化**，模拟器的 attention 模型可以用它。
 （C2 那条"用 MLA 代理"的退路不再需要。）
 
+**一条保真度警告（必须跟着 bundle 走）**：现在实现的是**读路径**——attention 按
+`block_table`/`slot_mapping` 从 paged cache 里取行并参与联合 softmax，所以**成本**方向
+是对的。但**写路径没有实现**：模型不会把自己算出来的状态（`compress → norm → store`）
+写进 cache，所以 attention 读到的数值不是这个模型自己的状态。对 profiler 的用途
+（量成本随 kv 的变化）没有影响，但**这份 bundle 的 attention 列只能当成本模型用，
+不能用来判断数值正确性**。要补写路径，参考官方 `Compressor` 的
+`compress_norm_rope_store`（Triton kernel）。
+
+### 步骤 4 的正式采集：已启动（2026-09-22）
+
+启动脚本 `tests/run_p15b_profile.sh <hardware> <out-root> [shard_i shard_n]`，
+对每种 block type 各跑一次，用与 09-18 重采相同口径
+（`tp 1`、`msq 128`、`mnbt 2048`、`max_kv 16384`、`iters 3`、`--skip-skew`）：
+
+| 域 | 主机 | 镜像 | 产出目录 |
+|---|---|---|---|
+| RTX4090 | 本机 GPU0 | `casr029` | `/tmp/p15b-formal/{r0,r4,r128}/` |
+| RTX3090 | `10.212.67.68` GPU0 | `casr029` | 同上（该机 `/tmp/p15b-formal`） |
+| RTX5090 | `10.212.70.196` GPU2 | `casr029` | 同上 |
+| A100 | `10.70.251.47:2222` GPU0 | `v0.29.0` | `~/p15b-out/{r0,r4,r128}/` |
+
+三种类型的产出**分三个目录**（因为各自是一次独立 run），合并时按 canonical 名取并集——
+层名已按类型区分（`compressor_csa` / `compressor_hca` …），所以并集是互斥的。
+单域 3 种类型串行，预计 **2 小时左右**。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
