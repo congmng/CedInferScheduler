@@ -47,7 +47,7 @@ LLMServingSim/
 
 ## 3. 实施步骤（每步一个判据）
 
-### 步骤 1：形状对齐（先做，最容易发现接错）
+### 步骤 1：形状对齐 ✅ **已完成（2026-09-22）**
 
 把 [P-15B 设计](DSV4-P15B设计.md) §2/§4 的字段写进三份 `P15B-r*.json`：`hidden_size=2560`、
 `num_attention_heads=20`、`head_dim=512`、`qk_rope_head_dim=64`、`q_lora_rank=640`、
@@ -60,6 +60,23 @@ LLMServingSim/
 `design/dsv4_ref` 用同一份单层配置建出来的值——全 MLA 层 **497,383,616**、
 CSA 层 **503,365,824**、HCA 层 **500,415,680**（这三个数已与 28 层总量对账过，
 见 [P-15B 设计](DSV4-P15B设计.md) §4）。**这条是防接错的主闸门。**
+
+**实测结果**（`tests/check_p15b_shapes.py`，三条互相独立的表述必须一致）：
+
+```text
+r0    ratio=0    ours=497,383,616 reference=497,383,616 expected=497,383,616 ok
+r4    ratio=4    ours=503,365,824 reference=503,365,824 expected=503,365,824 ok
+r128  ratio=128  ours=500,415,680 reference=500,415,680 expected=500,415,680 ok
+```
+
+另外补了一条比参数量更硬的检查：**把参考实现的权重按名字映射过来，比较两者
+logits**（fp32、T=256，三种层类型）——结果 **max|Δlogits| = 0.000e+00**，
+即这份 vLLM 形状的模块树与参考实现在数值上完全一致。前向本身也跑了
+（T=32/256，三种类型全部 finite）。
+
+过程中修掉三处：`state_values` 多套了一层 `[:, None]`（4D/5D 不匹配）、
+`state_pos` 的 valid 掩码多套一层（广播成 `(b,b,t,K)`）、以及闸门自己把参考模型的
+embedding 名（`embed` vs `embed_tokens`）漏扣了 167,772,160 个参数。
 
 ### 步骤 2：四卡跑通（这是 B 的意义所在）
 
