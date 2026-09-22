@@ -39,6 +39,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 ATTENTION_MAX_KV="${ATTENTION_MAX_KV:-16384}"
 MEASUREMENT_ITERATIONS="${MEASUREMENT_ITERATIONS:-3}"
 BLOCKS="${BLOCKS:-r0,r4,r128}"
+VARIANT="${VARIANT:-bf16}"
 # Empty = every category (the profiler's default).
 CATEGORIES="${CATEGORIES:-}"
 
@@ -53,7 +54,7 @@ for BLOCK in ${BLOCKS//,/ }; do
     echo "### P-15B ${BLOCK} on ${HARDWARE}${SHARD_INDEX:+ (shard $SHARD_INDEX/$SHARD_COUNT)}"
     python3 -m profiler profile "casr/P15B-${BLOCK}" \
         --hardware "$HARDWARE" --tp 1 --dtype bfloat16 \
-        --out-root "${OUT_ROOT}/${BLOCK}" --variant bf16 \
+        --out-root "${OUT_ROOT}/${BLOCK}" --variant "$VARIANT" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS" \
         --attention-max-kv "$ATTENTION_MAX_KV" \
@@ -61,4 +62,4 @@ for BLOCK in ${BLOCKS//,/ }; do
         --skip-skew --force "${SHARD_ARGS[@]}" "${CATEGORY_ARGS[@]}"
 done
 
-echo "### done: ${OUT_ROOT}/{r0,r4,r128}/${HARDWARE}/casr/P15B-*/bf16"
+echo "### done: ${OUT_ROOT}/{r0,r4,r128}/${HARDWARE}/casr/P15B-*/${VARIANT}"

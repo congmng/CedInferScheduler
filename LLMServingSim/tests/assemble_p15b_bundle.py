@@ -32,10 +32,11 @@ FROM_PROFILE = ("dense.csv", "attention.csv", "per_sequence.csv", "moe.csv")
 MODEL = "casr/P15B"
 
 
-def _type_dir(root: pathlib.Path, block: str, hardware: str) -> pathlib.Path:
+def _type_dir(root: pathlib.Path, block: str, hardware: str,
+              variant: str = "bf16", tp: int = 1) -> pathlib.Path:
     # Layout the profiler writes: <out-root>/<block>/<hardware>/<org>/<name>-<block>
     return (root / block / hardware / MODEL.split("/")[0]
-            / f"P15B-{block}" / "bf16" / "tp1")
+            / f"P15B-{block}" / variant / f"tp{tp}")
 
 
 def main() -> int:
@@ -49,6 +50,11 @@ def main() -> int:
                         help="optional --categories per_sequence out-root; use "
                              "it when that category was re-measured too (the "
                              "2026-09-22 head-binding fix changed per_sequence)")
+    parser.add_argument("--attention-root", default=None,
+                        help="optional attention-only out-root (e.g. a step-6 "
+                             "run with a different attention kernel); its "
+                             "attention.csv replaces the profile run's, and the "
+                             "other categories still come from --profile-root")
     parser.add_argument("--work-root", required=True,
                         help="scratch dir for the assembled tree")
     parser.add_argument("--blocks", default="r0,r4,r128")
@@ -68,15 +74,19 @@ def main() -> int:
     profile_root = pathlib.Path(args.profile_root).expanduser()
     dense_root = pathlib.Path(args.dense_root).expanduser()
     ps_root = pathlib.Path(args.ps_root).expanduser() if args.ps_root else None
+    attn_root = (pathlib.Path(args.attention_root).expanduser()
+                 if args.attention_root else None)
     work_root = pathlib.Path(args.work_root)
 
     def _source(block: str, name: str) -> pathlib.Path:
         """Where this CSV comes from: a re-run if there was one, else the run."""
         if name == "dense.csv":
-            return _type_dir(dense_root, block, args.hardware) / name
+            return _type_dir(dense_root, block, args.hardware, args.variant, args.tp) / name
         if name == "per_sequence.csv" and ps_root is not None:
-            return _type_dir(ps_root, block, args.hardware) / name
-        return _type_dir(profile_root, block, args.hardware) / name
+            return _type_dir(ps_root, block, args.hardware, args.variant, args.tp) / name
+        if name == "attention.csv" and attn_root is not None:
+            return _type_dir(attn_root, block, args.hardware, args.variant, args.tp) / name
+        return _type_dir(profile_root, block, args.hardware, args.variant, args.tp) / name
 
     problems: list[str] = []
     for block in blocks:
@@ -93,8 +103,8 @@ def main() -> int:
         return 1
 
     for block in blocks:
-        src = _type_dir(profile_root, block, args.hardware)
-        dest = _type_dir(work_root, block, args.hardware)
+        src = _type_dir(profile_root, block, args.hardware, args.variant, args.tp)
+        dest = _type_dir(work_root, block, args.hardware, args.variant, args.tp)
         dest.mkdir(parents=True, exist_ok=True)
         for name in FROM_PROFILE:
             shutil.copy2(_source(block, name), dest / name)

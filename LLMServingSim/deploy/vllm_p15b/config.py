@@ -35,12 +35,20 @@ class P15BConfig:
             raise ValueError(
                 f"compress_ratios has {len(self.compress_ratios)} entries for "
                 f"{self.num_hidden_layers} layers")
+        #: Expert width as the *engine's* TP sharding sees it.  The profiler
+        #: emulates TP by dividing ``intermediate_size`` (its SHARD_FIELDS) and
+        #: never touches ``moe_intermediate_size``, so the MoE has to read this
+        #: one or a tp=2 profile would measure unsharded experts.  The shipped
+        #: configs set both to 1280, so tp=1 numbers are unchanged.
+        self.intermediate_size = int(values.get("intermediate_size")
+                                     or self.moe_intermediate_size)
 
     @classmethod
     def from_hf(cls, hf) -> "P15BConfig":
         """From a HF config mapping (the dict vLLM reads from config.json)."""
         get = hf.get if hasattr(hf, "get") else (lambda k, d=None: getattr(hf, k, d))
         values = {name: get(name) for name in cls.FIELDS}
+        values["intermediate_size"] = get("intermediate_size")
         if values.get("compress_ratios") is None:
             # vLLM hands back a config object that may not carry our extra key;
             # fall back to the alternating pattern the design specifies.

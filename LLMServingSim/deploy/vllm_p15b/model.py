@@ -27,6 +27,43 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+#: Which implementation the sparse-state half of attention uses.
+#: ``torch`` (default) is the reference path the current bundles were measured
+#: with; ``triton`` routes the selected-state branch through
+#: ``design/dsv4_ref/triton_sparse_attn.py`` -- the one operator with no stock
+#: PyTorch equivalent, which the official stack does with FlashMLA /
+#: FlashInfer-sparse (Hopper-only).  Step 6 of the plan compares the two.
+STATE_KERNEL_ENV = "P15B_ATTN_STATE_KERNEL"
+
+
+def state_kernel() -> str:
+    """``"torch"`` or ``"triton"``; read per call so a profile run can pick."""
+    value = os.environ.get(STATE_KERNEL_ENV, "torch").strip().lower()
+    return "triton" if value == "triton" else "torch"
+
+
+def _triton_state_branch(q_block, state_table, state_idx, visible):
+    """Triton sibling of the ``torch.einsum`` state branch.
+
+    ``triton_forward`` gathers the top-k states itself, so it wants the table
+    ``(N, D)`` plus the indices rather than the gathered values.  It returns the
+    branch output together with its log-sum-exp, which is what lets the caller
+    merge it with the window/cache branch exactly instead of normalising the two
+    branches separately (the bug the design doc calls out in section 6).
+    """
+    from design.dsv4_ref.triton_sparse_attn import triton_forward
+
+    b, qb, h, d = q_block.shape
+    out_s, lse_s = triton_forward(
+        q_block[0].reshape(qb, h, d).contiguous(),
+        state_table[0].contiguous(),
+        state_idx[0].to(torch.int32).contiguous(),
+        visible[0].contiguous(),
+    )
+    return out_s.unsqueeze(0), lse_s.unsqueeze(0)
+
+
 def _linear(in_features: int, out_features: int) -> nn.Module:
     """The one place linears are built -- vLLM parallel layers drop in here."""
     return nn.Linear(in_features, out_features, bias=False)
@@ -416,7 +453,8 @@ class P15BSparseAttention(nn.Module):
         self.cache_prefix = f"{prefix.rsplit('.attn', 1)[0]}.kv_cache" if prefix else ""
 
     def forward(self, q, latents, state_values=None, state_pos=None, positions=None,
-                cached_keys=None, block: int = 128):
+                cached_keys=None, block: int = 128, state_table=None,
+                state_idx=None):
         """Blocked sparse attention, in one joint softmax.
 
         Written as a loop over query blocks rather than a dense ``(B,H,T,T)``
@@ -429,6 +467,10 @@ class P15BSparseAttention(nn.Module):
         Numerically this is the same computation as the dense form -- the
         chunking only changes summation order, which is why the parity gate
         allows a tolerance rather than bit-exactness.
+
+        ``state_table`` / ``state_idx`` (the un-gathered ``(B, N, D)`` states and
+        the top-k indices) exist for the Triton state branch, which gathers
+        internally; they are ignored by the default torch path.
         """
         b, t, n_heads, head_dim = q.shape
         if positions is None:
@@ -476,8 +518,22 @@ class P15BSparseAttention(nn.Module):
             if state_values is not None and state_values.shape[1]:
                 sel = state_values[:, start:end]                     # (B,qb,K,D)
                 sel_pos = state_pos[:, start:end]                    # (B,qb,K)
-                sel_scores = torch.einsum("bqhd,bqkd->bhqk", q_block, sel) * scale
                 ok = sel_pos <= pos_block[:, :, None]
+                if (state_kernel() == "triton" and q_block.is_cuda
+                        and state_table is not None and state_idx is not None):
+                    # Two branches, each normalised, merged in log space.  This
+                    # is the same joint softmax as the torch path below -- the
+                    # design doc's section 6 bug was normalising them
+                    # *separately and adding*, which this merge is not.
+                    out_w = torch.einsum("bhqk,bqkd->bqhd",
+                                         scores.softmax(-1), values)
+                    lse_w = torch.logsumexp(scores, dim=-1).transpose(1, 2)
+                    out_s, lse_s = _triton_state_branch(
+                        q_block, state_table, state_idx[:, start:end], ok)
+                    from design.dsv4_ref.triton_sparse_attn import merge
+                    out[:, start:end] = merge(out_w, lse_w, out_s, lse_s)
+                    continue
+                sel_scores = torch.einsum("bqhd,bqkd->bhqk", q_block, sel) * scale
                 scores = torch.cat(
                     [scores, sel_scores.masked_fill(~ok[:, None], -1e30)], dim=-1)
                 values = torch.cat([values, sel], dim=2)
@@ -542,7 +598,7 @@ class P15BAttention(nn.Module):
         kv = self.rotary_emb(kv, positions)
         latents = kv[:, :, 0, :self.head_dim]
 
-        state_values = state_pos = None
+        state_values = state_pos = state_table = state_idx = None
         if self.compressor is not None and t >= self.ratio:
             kv_state, score_state, ends = self.compressor(x)
             idx = self.indexer(q_latent, score_state)
@@ -551,9 +607,11 @@ class P15BAttention(nn.Module):
                 projected[:, None].expand(b, t, -1, -1), 2,
                 idx.unsqueeze(-1).expand(-1, -1, -1, self.head_dim))
             state_pos = torch.gather(ends[:, None].expand(b, t, -1), 2, idx)
+            state_table, state_idx = projected, idx
 
         out = self.attn(q, latents, state_values, state_pos, positions,
-                        cached_keys=self._cached_keys(b))
+                        cached_keys=self._cached_keys(b),
+                        state_table=state_table, state_idx=state_idx)
         out = out.reshape(b, t, self.n_heads * self.head_dim)
         out = self.o_lora_a(torch.chunk(out, self.o_groups, dim=-1))
         return self.o_lora_b(out)
@@ -606,7 +664,11 @@ class P15BMoE(nn.Module):
 
     def __init__(self, cfg, vllm_config=None, prefix: str = "p15b", quant_config=None):
         super().__init__()
-        h, e, mi = cfg.hidden_size, cfg.n_routed_experts, cfg.moe_intermediate_size
+        # ``intermediate_size`` rather than ``moe_intermediate_size``: the
+        # profiler emulates TP by dividing its SHARD_FIELDS, and only
+        # ``intermediate_size`` is in that list (see P15BConfig).  The shipped
+        # configs carry both, so this is the same 1280 at tp=1.
+        h, e, mi = cfg.hidden_size, cfg.n_routed_experts, cfg.intermediate_size
         self.h, self.e, self.mi = h, e, mi
         self.topk = cfg.num_experts_per_tok
         self.fused = None
