@@ -314,9 +314,14 @@ attention_r4.csv     ← CSA（窗口 8 + top-k）
 attention_r128.csv   ← HCA（窗口 128 + top-k）
 ```
 
-**待办**：让 simulator 按 `layers_block_type` 选对应的 attention 表（`layer_types` 机制
-已经能按类型选*流水线*，缺的是 attention 查表那一处也按类型分派）。在那之前，任何拿这一列
-跑出来的调度结论都要注明"attention 用的是 r0 那张表"。
+**已完成（2026-09-22）**：`trace_generator` 现在按 `layers_block_type` 选 attention 表——
+`_build_tp_tables` 会加载同目录下的 `attention_<block>.csv`，
+`_lookup_attention(..., table=...)` / `_lookup_attention_with_skew(..., table=...)`
+按类型查，`_emit_layer` 用 `_block_type_for(ctx, layer_num)` 决定用哪张；
+**没有这类文件的模型（Qwen3 / Zamba2 等）行为不变**（回落单表）。
+
+用合成三表验证过分派：`attention` 151.2 µs / `attention_r4` 60.5 µs /
+`attention_r128` 105.8 µs，`table=None` 时回落到 `attention` ✓。
 
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层

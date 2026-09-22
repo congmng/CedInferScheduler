@@ -1,4 +1,5 @@
 import os
+import glob
 from .request import *
 from .utils import *
 import pandas as pd
@@ -571,6 +572,14 @@ def _build_tp_tables(tp_dir):
     attn_df = _read_category_csv(os.path.join(tp_dir, "attention.csv"), None)
     if attn_df is not None:
         tables["attention"] = _build_attention_table(attn_df)
+    # A model whose layers run *different* attention ops (P-15B: full causal /
+    # window 8 + top-k / window 128 + top-k) cannot be described by one table.
+    # Its bundle carries one per block type; the lookup picks by layer.
+    for extra in sorted(glob.glob(os.path.join(tp_dir, "attention_*.csv"))):
+        block = os.path.basename(extra)[len("attention_"):-len(".csv")]
+        extra_df = _read_category_csv(extra, None)
+        if extra_df is not None:
+            tables[f"attention_{block}"] = _build_attention_table(extra_df)
 
     moe_df = _read_category_csv(os.path.join(tp_dir, "moe.csv"), None)
     if moe_df is not None:
@@ -862,6 +871,7 @@ def _skew_alpha(
 def _lookup_attention_with_skew(
     perf_db, tp, prefill_chunk, kv_prefill,
     n_decode, kv_decode_mean, kv_decode_max, kv_decode_min,
+    table=None,
 ):
     """Attention lookup with skew correction applied.
 
@@ -880,6 +890,7 @@ def _lookup_attention_with_skew(
     """
     t_mean = _lookup_attention(
         perf_db, tp, prefill_chunk, kv_prefill, n_decode, kv_decode_mean,
+        table=table,
     )
     # No skew → no correction (also saves a redundant lookup).
     if n_decode <= 1 or kv_decode_max == kv_decode_mean:
@@ -897,6 +908,7 @@ def _lookup_attention_with_skew(
         return max(1, int(round(t_mean)))
     t_max = _lookup_attention(
         perf_db, tp, prefill_chunk, kv_prefill, n_decode, kv_decode_max,
+        table=table,
     )
     # Guard against interpolation producing t_max < t_mean (can happen
     # at the axis boundary); in that case the formula would produce a
@@ -906,15 +918,20 @@ def _lookup_attention_with_skew(
     return max(1, int(round(t_mean + alpha * (t_max - t_mean))))
 
 
-def _lookup_attention(perf_db, tp, prefill_chunk, kv_prefill, n_decode, kv_decode):
+def _lookup_attention(perf_db, tp, prefill_chunk, kv_prefill, n_decode, kv_decode,
+                      table=None):
     """4D log-linear interpolation on (prefill_chunk, kv_prefill,
     n_decode, kv_decode). Every axis is doubled by the profiler, so we
     bracket each axis's two nearest profiled values and blend linearly
     in log-space.
+
+    ``table`` selects a per-block-type attention table when the bundle has one
+    (``attention_<block>.csv``); ``None`` uses the single ``attention`` table.
     """
-    tbl = _tp_tables(perf_db, tp).get("attention")
+    tables = _tp_tables(perf_db, tp)
+    tbl = tables.get(table or "attention") or tables.get("attention")
     if tbl is None or not tbl["pc_nd_pairs"]:
-        raise KeyError(f"Missing attention profile for tp={tp}.")
+        raise KeyError(f"Missing attention profile for tp={tp}, table={table}.")
 
     pcq, ndq = max(int(prefill_chunk), 0), max(int(n_decode), 0)
     pc_vals, nd_vals = tbl["pc_vals"], tbl["nd_vals"]
@@ -1099,11 +1116,17 @@ def _emit_layer(ctx, bctx, layer_name, lines, power_acc, batch_tag='NONE', layer
                 kv_mean = min(kv_mean, window)
                 kv_max = min(kv_max, window)
                 kv_min = min(kv_min, window)
+        # Layers of different block types run different attention ops, and the
+        # bundle carries one table per type when they do (P-15B: full causal /
+        # window 8 / window 128).  Falls back to the single ``attention`` table
+        # for models whose layers are uniform.
+        block = _block_type_for(ctx, layer_num)
         latency_ns = _lookup_attention_with_skew(
             ctx.perf_db, ctx.tp_size,
             bctx.prefill_chunk, kv_prefill,
             bctx.n_decode, kv_mean, kv_max,
             kv_min,
+            table=f"attention_{block}" if block else None,
         )
     else:  # dense
         latency_ns = _lookup_dense(ctx.perf_db, layer_name, ctx.tp_size, bctx.total_len)
