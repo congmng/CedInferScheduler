@@ -744,7 +744,49 @@ cluster config 里的 `casr.kv_bytes_per_token` 设成 **16960**。
 **判据**：一次模拟跑完，逐层成本非零且与 bundle 的层名对得上（没有 `Layer ... missing
 from the profile CSVs` 的 warning）。
 
-### 步骤 6（可选，性能版）：把 `sparse_attn.py` 换成 Triton
+### 步骤 6：把状态分支换成 Triton ✅ **已接、已测（2026-09-23）**
+
+**接线**：`P15B_ATTN_STATE_KERNEL=triton` 把"选中状态"那一支交给
+`design/dsv4_ref/triton_sparse_attn.py`，窗口/缓存那支仍在 torch 里，两者用参考实现的
+`merge` 在 **log 空间**合并（不是加权平均——那正是设计文档 §6 记的坑）。
+
+**数值闸门**：`tests/check_p15b_triton_attn.py` 用同一份输入跑两条路径：
+
+```text
+tokens=256    max|Δ| = 8.6e-08   tokens=1024  max|Δ| = 1.1e-07   tokens=4096 max|Δ| = 4.2e-07
+```
+
+换 kernel 不改模型输出 ✓。**r0 层是天然对照**（没有 compressor，就没有状态分支，
+Triton 路径根本不会被调用）。
+
+**正式采集**（四类卡各一次全网格 4111 shot，两个域已落盘）：
+
+| 层类型（RTX4090 / RTX5090） | triton/torch 中位 | p10 | p90 |
+|---|---:|---:|---:|
+| r0（无状态分支，对照） | **1.000** / **1.000** | 0.998 | 1.003 |
+| r4（CSA，top-k 最多 4096 状态） | **2.069** / **2.068** | 1.27 | 2.79 |
+| r128（HCA） | **1.486** / **1.525** | 1.00 | 1.80 |
+
+**孤立 kernel 扫描**（`torch reference` vs `triton_forward`，H=20、D=512、K≤512、
+block_k ∈ {32,64,128,256}）——除了最小形状（T=128,K=64：119.7 vs 126.0 µs，基本打平）
+全面更慢 1.2–4×：
+
+```text
+    T     N    K     torch    tri_k32    tri_k64   tri_k128
+   128   512  512     156.4      694.0      701.6     2169.0
+  1024   512  512    1999.9     4646.0     4802.2    16305.8
+  4096   512  512    8379.4    18521.7    19197.1    66267.7
+```
+
+**为什么慢（这才是结论）**：这个 kernel 是"每个 `(query, head)` 一个 program 的在线
+softmax"，不走 tensor core，而且**每个 query 自己再 gather 一遍最多 512 个状态**；
+而 torch 路径是**一次** gather 出 `(T,K,D)` 再打两次 cuBLAS batched GEMM。
+要在这套形状上赢，需要 `tl.dot` + 头分块 + 与 KV layout 融合——也就是官方栈里
+FlashMLA / FlashInfer-sparse 做的事，不是这个最小 kernel 的形态。
+
+> **判据达成方式**：步骤 6 写的是"换前/换后两次 bundle 都在，且差异写进文档"。
+> 两份 bundle 都在（`profiler/perf/<HW>/casr/P15B/bf16-triton/` vs `.../bf16/`），
+> 差异如上；但**"Triton 版更快"这个假设被实测否定了**，所以正式实验仍用 `bf16`。
 
 `design/dsv4_ref/triton_sparse_attn.py` 已经在 sm80/86/89/120 上跑通并对过 fp64。
 把它接进来再 profile 一次，得到"接近最终实现"的注意力成本。
@@ -769,17 +811,58 @@ check_p15b_boot.py              四卡全过，KV 账目与设计闭式一致
 
 ### 明确留待下一步的三项（都不阻塞当前实验）
 
-1. **TP=2 的 bundle 没采**。`_linear()` 现在还是 `nn.Linear`（vLLM 并行层只留了
-   接口），TP>1 的 profile 会量到"没切分"的形状；而
-   `casr_p15b_three_domain.json` 与 Qwen3-8B 的对照拓扑用的都是 `tp_size=1`，
-   当前实验不需要它。要做就得先按 §4.1 把 qkv_down / o_lora / MoE / embedding
-   换成并行层，再补 tp2 的 dense / per_sequence / attention（attention 一类就是
-   一套 4 小时的 sweep）。
+1. ~~**TP=2 的 bundle 没采**~~ → **已采（2026-09-23）**，见下一节；剩下的尾巴：
+   `_linear()` 仍是 `nn.Linear`，所以"真 vLLM 并行层"这条还没做，只有 profiler 的
+   缩形状模拟（§4.1）。
 2. **A100 的 dense 两次测量差 ~20%**：17:3x 那次与 19:5x 的重采（同一配置、同一
    张卡、都与其他作业同机并发）在大 shot 上整体差两成。bundle 用的是重采那版，
    域内一致性 2.7% 没问题，但**跨域比较在大 batch 档要留意这个量级的不确定度**；
    要收紧就得在整机独占的条件下重采一次做基准。
 3. **步骤 6（Triton 稀疏注意力）** 仍是可选性能版，没做。
+
+### TP：tp=2（四域）与 tp=4（A100）—— ✅ 已采（2026-09-23）
+
+profiler 的 TP 是**缩形状 + `tensor_parallel_size=1`** 的模拟（`profiler/core/engine.py`），
+所以模型必须跟着 `SHARD_FIELDS` 变。为此把 `P15BMoE` 的专家宽度从
+`moe_intermediate_size` 改成 `intermediate_size`（§4.2 早就写了这一条，代码当时没跟上；
+两个字段在 config 里都是 1280，所以 tp=1 的数一个没动）。
+
+**tp2/tp1（同卡同网格，RTX4090 / RTX5090）**：
+
+| 类别 | 行 | 比值 | 说明 |
+|---|---|---:|---|
+| dense `q_up` | 2048 token | **0.51** | 按 attention head 切 ✓ |
+| dense `o_lora_a` | 2048 token | **0.62** | 每组 chunk = heads×head_dim/groups，随头切 ✓ |
+| dense `qkv_down` | 2048 token | 1.00 | MLA latent（q_lora + head_dim + rope）不切 ✓ |
+| dense `o_lora_b` | 2048 token | 1.00 | ⚠️ 真接并行层后这一档应该也切，当前没切 |
+| attention（三类全网格） | 4111 shot | 0.949 / 0.962 / 0.948（4090） | 只快 3–5%：**latent 读是各头共享的**，砍一半头省不到计算 |
+
+**端到端（4090+5090 两域，同一份负载，`configs/cluster/casr_p15b_2domain_tp{1,2}.json`）**：
+
+| | baseline latency | casr(greedy) | TPOT mean |
+|---|---:|---:|---:|
+| tp1 | 403.96 ms | 373.79 ms（**−7.5%**） | 14.35 → 13.05 ms |
+| tp2 | **340.27 ms** | 324.14 ms（**−4.8%**） | **12.31** → 11.60 ms |
+
+**TP=2 买到约 16% 的绝对延迟与 14% 的 TPOT，同时把调度能加的份额从 −7.5% 压到 −4.8%**
+——和 KV 压缩那条是同一个方向的结论：硬件/切分越强，"调度增益"的绝对值越小。
+
+**一个配置坑（值得记住）**：tp=N 的实例占 N 张卡，一个域同时跑 P+D 就要 **2N** 张。
+第一版 tp2 config 沿用 tp1 的"每域 2 卡"，CASR 的资源模型就（正确地）把 Decode 判为
+INACTIVE，greedy 臂随后在 router 里抛
+`No active Decode instance can accept a Prefill handoff`。把 `resources.nodes[*].gpu_count`
+改成 4 之后跑通。**这不是算法 bug，是配置没跟着 tp 走**。
+
+复现：
+
+```bash
+TP=2 tests/run_p15b_slice.sh RTX4090 /out           # 只刷 tp2，不重跑 tp1
+python3 tests/assemble_p15b_bundle.py --hardware RTX4090 --tp 2 \
+    --profile-root /out --dense-root /out --ps-root /out --attention-root /out \
+    --work-root /tmp/assembled-tp2 --note "tp=2 refresh"
+CLUSTER_CONFIG=configs/cluster/casr_p15b_2domain_tp2.json \
+    bash tests/run_casr_comparison.sh /tmp/p15b-2dom-tp2
+```
 
 ## 4. 四个关键技术决定
 
