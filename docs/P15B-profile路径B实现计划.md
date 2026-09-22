@@ -435,6 +435,18 @@ serving/core/trace_generator.py` 跑）：
 所以端到端被掩盖了；**凡是拿 Zamba2 的 TPOT（或任何 per-token 指标）做的结论，
 都要按这条重跑**。
 
+**按文档原命令复核过（6 个 4090 域、`--peak-rps 8 --prompt-tokens 1250`、五臂）**：
+
+| arm | 修复前 E2E mean (ms) | 修复后 E2E mean (ms) | 变化 |
+|---|---:|---:|---:|
+| `load` / `cache_aware` | 418,912.9 | 418,958.1 | +0.01% |
+| `rr` | 163,767.9 | 163,814.8 | +0.03% |
+| `casr_lp` | 65,334.7 | 65,387.2 | +0.08% |
+| `casr_full` | 40,355.1 | 40,475.6 | +0.30% |
+
+**端到端结论不变**（`load` 仍把 735 个请求全钉在一台、TTFT 418 s；`casr_full` 仍压到 ~40 s），
+因为这一档由 TTFT/排队主导；**变的只有 per-token**：TPOT p50 各臂 **4.9 → 7.1 ms（+45%）**。
+
 #### 步骤 5 闭环：P-15B 的 bundle 能跑完 baseline / greedy / LP 三臂
 
 修完零流量与 block-copy 之后，用 P-15B 的 bundle 跑完整对照入口：
