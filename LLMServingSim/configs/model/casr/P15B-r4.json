@@ -1,5 +1,7 @@
 {
-  "architectures": ["P15BForCausalLM"],
+  "architectures": [
+    "P15BForCausalLM"
+  ],
   "model_type": "p15b",
   "_comment": "One CSA layer (compress_ratio 4): compressor state 2*coff*head_dim = 2048 wide, window coff*ratio = 8.",
   "hidden_size": 2560,
@@ -25,6 +27,12 @@
   "torch_dtype": "bfloat16",
   "tie_word_embeddings": false,
   "use_cache": true,
-  "compress_ratios": [4],
-  "layers_block_type": ["r4"]
+  "compress_ratios": [
+    4
+  ],
+  "layers_block_type": [
+    "r4"
+  ],
+  "num_experts": 48,
+  "_num_experts_comment": "HF alias for n_routed_experts; serving/core/memory_model.calculate_sizes reads it."
 }

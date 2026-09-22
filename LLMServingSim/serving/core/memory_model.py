@@ -644,6 +644,22 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
     mamba_d_state = int(config.get("mamba_d_state", 128))
     mamba_d_conv = int(config.get("mamba_d_conv", 4))
 
+    # P-15B (the self-built DSV4-style block).  Its layer names are its own --
+    # ``qkv_down`` / ``q_up`` / ``o_lora_a`` / ``compressor_csa`` ... -- so they
+    # need their own formulas rather than a mapping onto Qwen-style ones, and
+    # they need dimensions no other family carries (the MLA LoRA ranks, the
+    # grouped output, the indexer width).  Defaults keep every other model on
+    # exactly the values it had.
+    q_lora_rank = int(config.get("q_lora_rank", 0) or 0)
+    o_lora_rank = int(config.get("o_lora_rank", 0) or 0)
+    o_groups = max(int(config.get("o_groups", 1) or 1), 1)
+    rope_dim = int(config.get("qk_rope_head_dim", 0) or 0)
+    index_head_dim = int(config.get("index_head_dim", 0) or 0)
+    #: Compressor geometry per block type, from the design: a CSA layer pools a
+    #: window of ``coff*ratio`` and stores ``2*coff*head_dim`` every ``ratio``
+    #: tokens; HCA does the same with coff 1 and ratio 128.
+    _COMPRESS = {"csa": (4, 2), "hca": (128, 1)}
+
     p = max(int(parallel), 1)
 
     # NOTE (vLLM-style assumptions):
@@ -766,6 +782,76 @@ def calculate_sizes(model, layer_name, length, kv_len=None, pim=False, parallel=
         input_size = length * n_embd * fp
         weight_size = n_embd * (vocab_size // p) * fp
         output_size = length * (vocab_size // p) * fp
+
+    # ----------------- P-15B (MLA + CSA/HCA + grouped output LoRA) ---------
+    elif layer_name in ("input_norm", "ffn_norm", "final_norm"):
+        # RMSNorm: weight replicated, activations in place.
+        input_size = length * n_embd * fp
+        weight_size = n_embd * fp
+        output_size = length * n_embd * fp
+
+    elif layer_name == "q_norm":
+        input_size = length * q_lora_rank * fp
+        weight_size = q_lora_rank * fp
+        output_size = length * q_lora_rank * fp
+
+    elif layer_name == "kv_norm":
+        width = head_dim + rope_dim
+        input_size = length * width * fp
+        weight_size = width * fp
+        output_size = length * width * fp
+
+    elif layer_name == "qkv_down":
+        # hidden -> [q_lora | kv latent(head_dim + rope)]; replicated, because a
+        # single-head MLA latent is not split across ranks.
+        width = q_lora_rank + head_dim + rope_dim
+        input_size = length * n_embd * fp
+        weight_size = n_embd * width * fp
+        output_size = length * width * fp
+
+    elif layer_name == "q_up":
+        # q_lora -> n_heads x head_dim, column-parallel over heads.
+        input_size = length * q_lora_rank * fp
+        weight_size = q_lora_rank * (q_dim // p) * fp
+        output_size = length * (q_dim // p) * fp
+
+    elif layer_name == "o_lora_a":
+        # One of ``o_groups`` modules: heads/groups x head_dim -> o_lora_rank.
+        # Row-parallel, so the input is what splits.
+        chunk = (q_dim // p) // o_groups
+        input_size = length * chunk * fp
+        weight_size = chunk * o_lora_rank * fp
+        output_size = length * o_lora_rank * fp
+
+    elif layer_name == "o_lora_b":
+        grouped = o_groups * o_lora_rank
+        input_size = length * grouped * fp
+        weight_size = grouped * n_embd * fp
+        output_size = length * n_embd * fp
+
+    elif layer_name.startswith("compressor_"):
+        ratio, coff = _COMPRESS[layer_name.split("_", 1)[1]]
+        state = 2 * coff * head_dim
+        windows = max(1, length // ratio)
+        # Window mean-pool (free) then hidden -> state.
+        input_size = windows * n_embd * fp
+        weight_size = n_embd * state * fp
+        output_size = windows * state * fp
+
+    elif layer_name.startswith("kvproj_"):
+        ratio, coff = _COMPRESS[layer_name.split("_", 1)[1]]
+        windows = max(1, length // ratio)
+        input_size = windows * coff * head_dim * fp
+        weight_size = coff * head_dim * head_dim * fp
+        output_size = windows * head_dim * fp
+
+    elif layer_name.startswith("indexer_"):
+        ratio, coff = _COMPRESS[layer_name.split("_", 1)[1]]
+        windows = max(1, length // ratio)
+        input_size = (length * q_lora_rank + windows * coff * head_dim) * fp
+        weight_size = (q_lora_rank + coff * head_dim) * index_head_dim * fp
+        # one score per (query, state) pair
+        output_size = length * windows * fp
 
     else:
         raise ValueError(f"No matching layer name {layer_name} found for model {model}.")
