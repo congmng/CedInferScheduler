@@ -173,7 +173,35 @@ catalog 的 `vllm:` 直接写我们的类名；`attention:` 只能有 **1 个** 
 * 新增 `P15BRotary`：RoPE 原本是函数，而 catalog 只能绑**模块**，不包一层的话
   这一项在逐层成本里会被无声漏掉（无参数，不影响参数量与 parity）。
 
-### 步骤 4：三份 config × 四张卡 = 12 次 profile
+### 步骤 4：三份 config × 四张卡 = 12 次 profile（**已试跑，卡在两处**）
+
+**试跑实测（本机 4090，小网格：`msq 16 / mnbt 512 / max_kv 512 / iters 1`）**：
+模型能被 profiler 正常装载、dense 与 attention 两类都能采集，但在 **moe 类别**报错：
+
+```text
+Exception: Call to collective_rpc method failed:
+Expected exactly one FusedMoE layer in the test model, got 0
+```
+
+也就是说 profiler 的 moe 类别是**按 vLLM 的 `FusedMoE` 写的**——它要通过
+collective_rpc 去逐专家驱动一次。我们的 `P15BMoE` 是手写的 48 专家 python 循环，
+profiler 认不出来。**这正好也是我们本来就该改的**：MoE 占 91.9% 的参数，手写循环
+既不是真实 kernel，也会把 MoE 时间系统性抬高（正是 3090 那种"带宽只跑到 38%"
+的同类错误）。V-15B 的正确接法是照 `Qwen3MoeSparseMoeBlock`：
+`ReplicatedLinear` gate + `FusedMoEFactory(shared_experts=None, gate=..., top_k=3,
+intermediate_size=1280, prefix=...)`，forward 里
+`self.experts(hidden_states=..., router_logits=...)`。
+
+**注意权重布局不同**：参考实现用 `up (E, H, 2*I)` / `down (E, I, H)`，
+而 `FusedMoE` 存 `w13_weight (E, 2*I, H)` / `w2_weight (E, H, I)` —— **是转置过的**，
+所以 `tests/check_p15b_shapes.py` 的 parity 映射要跟着加转置（参数量不变）。
+
+**第二处**是 §4.3bis 的遗留：attention 还是读 batch 自带 latent、不读 paged cache，
+所以哪怕跑完，attention 表在 kv 那一维也是平的。
+
+**结论：步骤 4 不能现在开跑，先把这两件做完**——
+① MoE 换成 `FusedMoEFactory`（解锁 moe 类别 + 真实 kernel）；
+② attention 读 paged cache（C1 剩余），或退到 C2（用现成 MLA 层做代理并显式标注）。
 
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
