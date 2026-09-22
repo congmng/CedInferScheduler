@@ -10,6 +10,7 @@ model: casr/P15B
 variant: bf16
 tp_degrees:
 - 1
+- 2
 - 4
 engine_effective:
   load_format: dummy

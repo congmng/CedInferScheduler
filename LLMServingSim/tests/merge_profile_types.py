@@ -198,6 +198,18 @@ def main() -> int:
     meta["merged_types"] = blocks
     meta["source_bundles"] = [str(sources[b].relative_to(type_root)) for b in blocks]
     meta["architectures"] = None
+    # Each refresh writes the tp degrees of *its own* session, and a variant can
+    # be assembled more than once (tp=2, then tp=4).  Union with what the
+    # destination already advertises so the earlier refresh is not forgotten --
+    # check_profile_bundle reads this list to decide what is present.
+    existing_meta = dest.parent / "meta.yaml"
+    prior_tp: list[int] = []
+    if existing_meta.is_file():
+        prior_meta = yaml.safe_load(existing_meta.read_text(encoding="utf-8")) or {}
+        prior_tp = list(prior_meta.get("tp_degrees") or [])
+    meta["tp_degrees"] = sorted(set(prior_tp)
+                                | set(meta.get("tp_degrees") or [])
+                                | {args.tp})
     # Re-hash the catalog: a merge mixes measurements, and what a consumer needs
     # to know is which yaml a fresh run would use now.  On 2026-09-22 the
     # binding fix edited p15b.yaml *after* attention had been measured, but only
