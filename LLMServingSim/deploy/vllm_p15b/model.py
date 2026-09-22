@@ -404,20 +404,61 @@ class P15BMoE(nn.Module):
 
     The routing trick the official model uses on its first layers is omitted --
     it is a training device, not part of the KV design.
+
+    Two backends, one class name (so the profiler catalog can bind it either
+    way):
+
+    * **standalone** (``vllm_config is None``) -- plain torch, the form the
+      parameter/parity gates build and compare against ``design/dsv4_ref``;
+    * **vLLM** -- vLLM's ``FusedMoE`` behind a ``ReplicatedLinear`` gate, the
+      same arrangement ``Qwen3MoeSparseMoeBlock`` uses.
+
+    The second is not optional for profiling: the profiler's moe category
+    drives the experts through ``collective_rpc`` and finds the layer with
+    ``isinstance(m, FusedMoE)`` ("Expected exactly one FusedMoE layer in the
+    test model, got 0").  It is also the only way this cost is measured as a
+    kernel rather than as our own python loop.
+
+    Weight layout differs between the two: the reference stores ``up``
+    ``(E, H, 2I)`` / ``down`` ``(E, I, H)``, FusedMoE stores ``w13``
+    ``(E, 2I, H)`` / ``w2`` ``(E, H, I)`` -- transposed.  Parameter *counts*
+    are identical, so the shape gate is unaffected.
     """
 
     swiglu_limit = 10.0
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, vllm_config=None, prefix: str = "p15b", quant_config=None):
         super().__init__()
         h, e, mi = cfg.hidden_size, cfg.n_routed_experts, cfg.moe_intermediate_size
         self.h, self.e, self.mi = h, e, mi
         self.topk = cfg.num_experts_per_tok
-        self.gate = _linear(h, e)
-        self.up = nn.Parameter(torch.randn(e, h, 2 * mi) * 0.02)
-        self.down = nn.Parameter(torch.randn(e, mi, h) * 0.02)
+        self.fused = None
+        if vllm_config is None:
+            self.gate = _linear(h, e)
+            self.up = nn.Parameter(torch.randn(e, h, 2 * mi) * 0.02)
+            self.down = nn.Parameter(torch.randn(e, mi, h) * 0.02)
+        else:
+            from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+            from vllm.model_executor.layers.linear import ReplicatedLinear
+
+            self.gate = ReplicatedLinear(h, e, bias=False, quant_config=quant_config,
+                                         prefix=f"{prefix}.gate")
+            self.fused = FusedMoEFactory(
+                shared_experts=None, gate=self.gate, num_experts=e, top_k=self.topk,
+                hidden_size=h, intermediate_size=mi,
+                # The reference renormalises top-k weights after selection.
+                renormalize=True, quant_config=quant_config,
+                prefix=f"{prefix}.experts", enable_eplb=False,
+                num_redundant_experts=0, is_sequence_parallel=False,
+                is_fused_checkpoint_transposed=False)
 
     def forward(self, x):
+        if self.fused is not None:
+            # FusedMoE takes 2D (tokens, hidden); the tree works in (B, T, H).
+            shape = x.shape
+            flat = x.reshape(-1, shape[-1])
+            out = self.fused(hidden_states=flat, router_logits=flat)
+            return out.reshape(shape)
         b, t, h = x.shape
         probs = self.gate(x).softmax(-1)
         weights, idx = probs.topk(self.topk, dim=-1)
@@ -448,13 +489,16 @@ class P15BMoE(nn.Module):
 
 class P15BDecoderLayer(nn.Module):
     def __init__(self, cfg, ratio: int, prefix: str = "", with_kv_cache: bool = False,
-                 dtype: torch.dtype = torch.bfloat16):
+                 dtype: torch.dtype = torch.bfloat16, vllm_config=None,
+                 quant_config=None):
         super().__init__()
         self.input_layernorm = P15BInputNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.self_attn = P15BAttention(cfg, ratio, prefix=prefix,
                                        with_kv_cache=with_kv_cache, dtype=dtype)
         self.post_attention_layernorm = P15BFfnNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.mlp = P15BMoE(cfg)
+        self.mlp = P15BMoE(cfg, vllm_config=vllm_config,
+                           prefix=f"{prefix}.mlp" if prefix else "p15b.mlp",
+                           quant_config=quant_config)
 
     def forward(self, x, positions):
         x = x + self.self_attn(self.input_layernorm(x), positions)
@@ -470,14 +514,16 @@ class P15BForCausalLM(nn.Module):
     """
 
     def __init__(self, cfg, with_lm_head: bool = True, with_kv_cache: bool = False,
-                 prefix: str = "p15b", dtype: torch.dtype = torch.bfloat16):
+                 prefix: str = "p15b", dtype: torch.dtype = torch.bfloat16,
+                 vllm_config=None, quant_config=None):
         super().__init__()
         self.cfg = cfg
         self.with_lm_head = with_lm_head
         self.embed_tokens = _embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
             P15BDecoderLayer(cfg, ratio, prefix=f"{prefix}.layers.{index}",
-                             with_kv_cache=with_kv_cache, dtype=dtype)
+                             with_kv_cache=with_kv_cache, dtype=dtype,
+                             vllm_config=vllm_config, quant_config=quant_config)
             for index, ratio in enumerate(cfg.compress_ratios))
         self.norm = P15BFinalNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.lm_head = _linear(cfg.hidden_size, cfg.vocab_size) if with_lm_head else None

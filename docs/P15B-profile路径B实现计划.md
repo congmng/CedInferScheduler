@@ -173,7 +173,7 @@ catalog 的 `vllm:` 直接写我们的类名；`attention:` 只能有 **1 个** 
 * 新增 `P15BRotary`：RoPE 原本是函数，而 catalog 只能绑**模块**，不包一层的话
   这一项在逐层成本里会被无声漏掉（无参数，不影响参数量与 parity）。
 
-### 步骤 4：三份 config × 四张卡 = 12 次 profile（**已试跑，卡在两处**）
+### 步骤 4：三份 config × 四张卡 = 12 次 profile（**试跑已跑完，剩 attention 一处**）
 
 **试跑实测（本机 4090，小网格：`msq 16 / mnbt 512 / max_kv 512 / iters 1`）**：
 模型能被 profiler 正常装载、dense 与 attention 两类都能采集，但在 **moe 类别**报错：
@@ -199,9 +199,39 @@ intermediate_size=1280, prefix=...)`，forward 里
 **第二处**是 §4.3bis 的遗留：attention 还是读 batch 自带 latent、不读 paged cache，
 所以哪怕跑完，attention 表在 kv 那一维也是平的。
 
-**结论：步骤 4 不能现在开跑，先把这两件做完**——
-① MoE 换成 `FusedMoEFactory`（解锁 moe 类别 + 真实 kernel）；
-② attention 读 paged cache（C1 剩余），或退到 C2（用现成 MLA 层做代理并显式标注）。
+**① 已完成（2026-09-22）**：`P15BMoE` 现在有两条后端、共用一个类名——
+`vllm_config is None` 时走纯 torch（步骤 1 的参数量/parity 闸门用它），
+否则走 `ReplicatedLinear` gate + `FusedMoEFactory`（照 `Qwen3MoeSparseMoeBlock`）。
+换完之后**四类采集全部跑通**：
+
+```text
+TP=1 dense        56/56    ✓ dense.csv
+TP=1 per_sequence 16/16    ✓ per_sequence.csv
+TP=1 attention  1080/1080  ✓ attention.csv
+TP=1 moe          30/30    ✓ moe.csv
+Results written to: /out/P15BTEST/casr/P15B-r4/bf16
+```
+
+dense.csv 里 **14 个 canonical 层名全部出现**（`qkv_down` / `q_up` / `o_lora_a` /
+`o_lora_b` / `compressor_csa` / `kvproj_csa` / `indexer_csa` / `rotary_emb` /
+`input_norm` / `ffn_norm` / `final_norm` / `embedding` …），说明 catalog 绑定正确；
+`moe.csv` 30 行。旁证：参数量与 parity 闸门在换 MoE 后**仍然通过**（权重布局从
+`up (E,H,2I)` 变成 `w13 (E,2I,H)` 是转置关系，参数量不变，而纯 torch 那条路没动）。
+
+**② 还没做，而且现在有实测证据了**：attention 表在 kv 维度上**确实是平的**——
+
+```text
+prefill_chunk=128, n_decode=1:
+   kv_decode=16    time_us=79.9
+   kv_decode=64    time_us=79.8
+   kv_decode=512   time_us=80.0        # 32× 的 kv，差 0.2%
+```
+
+即"引擎起得来、cache 也分配了，但 attention 不读它"。模拟器的 attention 模型正是
+建立在"随 kv 变化"上的，所以这张表**目前不可用**（dense 与 moe 两类是真实可用的）。
+下一步二选一：**C1** 让 attention 真读 paged cache（`P15BCacheMetadataBuilder` 的
+block_table / slot_mapping 已就绪，缺的是在 attention 里消费它），或 **C2** 用现成
+MLA 层做 attention 代理并在 meta 里显式标注。
 
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
