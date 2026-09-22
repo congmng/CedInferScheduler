@@ -1,9 +1,9 @@
 profiler_version: 1.0.0
 vllm_version: 0.29.0
 cuda_version: '13.0'
-gpu: NVIDIA A100-SXM4-80GB
-hardware: A100
-profiled_at: '2026-09-22T09:29:46+00:00'
+gpu: NVIDIA GeForce RTX 3090
+hardware: RTX3090
+profiled_at: '2026-09-22T10:11:10+00:00'
 architecture: p15b
 architecture_sha256: d47e76eaa2b30b7e9e56a63d8de4a17866473f128140afa5cfd35de1b5967ce2
 model: casr/P15B
@@ -29,7 +29,7 @@ engine_effective:
     vocab_size: 65536
   dtype: bfloat16
   worker_extension_cls: profiler.core.hooks.extension.Extension
-  model: /tmp/profiler_model_rv110z0z
+  model: /tmp/profiler_model_96d27l6j
 attention_grid:
   max_kv: 16384
   chunk_factor: 2.0
@@ -48,9 +48,9 @@ merged_types:
 - r4
 - r128
 source_bundles:
-- r0/A100/casr/P15B-r0/bf16/tp1
-- r4/A100/casr/P15B-r4/bf16/tp1
-- r128/A100/casr/P15B-r128/bf16/tp1
+- r0/RTX3090/casr/P15B-r0/bf16/tp1
+- r4/RTX3090/casr/P15B-r4/bf16/tp1
+- r128/RTX3090/casr/P15B-r128/bf16/tp1
 architectures: null
 notes:
 - dense + per_sequence re-measured 2026-09-22 after the catalog binding and head-binding

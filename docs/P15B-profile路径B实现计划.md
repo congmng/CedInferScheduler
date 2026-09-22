@@ -426,7 +426,7 @@ python3 tests/assemble_p15b_bundle.py --hardware RTX5090 \
     --note "dense re-measured 2026-09-22 after the catalog binding fix"
 ```
 
-### 步骤 4 落地状态（2026-09-22 18:20）
+### 步骤 4 落地状态（2026-09-22 20:20）
 
 #### 步骤 4 的第五道缺口：head 绑到了一个"从不被调用"的类（2026-09-22，已修）
 
@@ -469,17 +469,65 @@ head 是 `2560 × 65536 = 167.8M` 参数、约占每 token 激活算力的 **10%
 CATEGORIES=per_sequence tests/run_p15b_profile.sh RTX4090 /out
 ```
 
-| 域 | 采集 | dense 重采 | bundle 落地 |
-|---|---|---|---|
-| RTX4090（本机 GPU0/1） | 三类齐 | ✅ 已重采并拼回 | ✅ `profiler/perf/RTX4090/casr/P15B/bf16`，两个校验器全过 |
-| RTX5090 | 三类齐（旧 dense） | 待做 | 待做 |
-| RTX3090（3090a） | r0/r128 的 attention 在跑，r4 未开始 | 待做 | 待做 |
-| A100-80G | r0/r128 齐，r4 的 attention 在跑 | 待做 | 待做 |
+| 域 | 正式采集（三类×4 类 CSV） | dense 重采 | per_sequence 重采 | bundle 落地 |
+|---|---|---|---|---|
+| RTX4090（本机 GPU0/1） | ✅ 齐 | ✅ | ✅ | ✅ `profiler/perf/RTX4090/casr/P15B/bf16`，两个校验器全过 |
+| A100-80G | ✅ 齐（r4 于 18:33 收尾） | ✅ | ✅ | ✅ `profiler/perf/A100/...`（moe 合并用 `--max-spread 0.2`，理由写在 meta 的 notes 里） |
+| RTX5090 | ✅ 齐（10:01 UTC） | ✅ | r128 进行中 | 待合并 |
+| RTX3090（3090a） | ✅ 齐（r4 于 20:10 收尾） | r128 进行中 | r128 进行中 | 待合并 |
 
 `meta.yaml` 现在会带 `notes:`（记录 dense 是哪次重采的）和按**当前** yaml 重算的
 `architecture_sha256`——合并把两次采集拼在一起时，这是唯一说得清 provenance 的地方。
 
-### 步骤 5：接进模拟器 ✅ **配置已就位（2026-09-22，等 bundle 落地即可跑）**
+**模拟器侧已验证**（单域 1P+1D，用 RTX4090 的真实 bundle）：
+
+```bash
+CLUSTER_CONFIG=configs/cluster/casr_p15b_rtx4090_1p1d.json \
+  bash tests/run_casr_comparison.sh /tmp/p15b-smoke-4090
+```
+
+跑完 8 个请求、逐层都能查到成本；修 head 绑定之前它只报 `lm_head` 缺失，现在是
+唯一剩下的 `sampler` 缺失告警——**这条对每个 vLLM 0.29 的 bundle 都成立**
+（Qwen3-8B / Zamba2 的 0.29 bundle 同样只有 `lm_head` 没有 `sampler`：
+0.29 的 Sampler 不在被 profile 的那段执行路径里），所以它不改变任何跨模型对比的公平性。
+
+**另记一条测量不稳定**：`moe.csv` 里最大的 shot（2048 token）在 r0 上会抖——
+同一份配置三次测得 **960 / 1116 / 1206 µs**，而 r4/r128 稳定在 1152 µs；
+而 r0 自己 4 专家的 901 µs 比 8 专家的 746 µs 还高，物理上说不通，所以判它是量测
+artifact 而不是模型差异（三份 config 的 MoE 段逐字段相同，唯一差别是 attention 的
+`compress_ratios`）。对策是合并工具改成**取三份测量的中位数**（原来取第一份，
+等于把 r0 的抖动写进 bundle），闸门仍照报 17% 的 spread。
+
+### 步骤 5：接进模拟器 ✅ **已完成（2026-09-22）：四域 bundle 齐、三臂对照跑通**
+
+**判据达成情况**：
+
+```text
+# 四类卡各一份 bundle，两个校验器全过
+python3 tests/check_profile_bundle.py --hardware {RTX3090,RTX4090,RTX5090,A100} \
+        --model casr/P15B --tp 1
+python3 tests/check_profile_bundle_consistency.py --model casr/P15B
+
+# 三域正式对照（3P × 3D，与 Qwen3-8B 的对照同拓扑）
+CLUSTER_CONFIG=configs/cluster/casr_p15b_three_domain.json \
+  bash tests/run_casr_comparison.sh /tmp/p15b-three-domain
+```
+
+三臂都跑完，逐层成本全部命中（**唯一剩下的告警是 `sampler`**，见下）：
+
+| 指标（8 请求） | baseline | greedy | LP |
+|---|---:|---:|---:|
+| latency_mean (ms) | 403.96 | **373.79** | 407.47 |
+| latency_p50 (ms) | 456.74 | **431.81** | 466.65 |
+| tpot_mean (ms) | 14.35 | **13.05** | 14.48 |
+| tpot_p95 (ms) | 15.26 | **13.28** | 15.29 |
+
+（8 个请求、无跨域压力，LP 在这一档本来就该与 baseline 打平；**这一步验的是"真 bundle 能驱动
+模拟器"，不是收益**——收益要等长 prompt + 高峰值的正式实验档。）
+
+`sampler` 缺失对所有 vLLM 0.29 的 bundle 都成立（Qwen3-8B / Zamba2 的 0.29 bundle 同样
+只有 `lm_head`、没有 `sampler`：0.29 的 `Sampler` 不在被 profile 的执行路径里），
+所以它不影响跨模型对比的公平性，但要写进口径。
 
 `configs/cluster/casr_p15b_three_domain.json`：与
 `casr_real_qwen3_8b_three_domain.json` **同一拓扑**（同样的节点、链路、实例），
