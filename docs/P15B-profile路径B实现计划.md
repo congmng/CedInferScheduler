@@ -288,7 +288,12 @@ attention 那一列**现在随 kv 变化**，模拟器的 attention 模型可以
 
 三种类型的产出**分三个目录**（因为各自是一次独立 run），合并时按 canonical 名取并集——
 层名已按类型区分（`compressor_csa` / `compressor_hca` …），所以并集是互斥的。
-单域 3 种类型串行，预计 **2 小时左右**。
+
+**耗时修正（实测）**：原本估"单域 2 小时"，实际 **attention 阶段是绝对瓶颈**——
+`max_kv 16384` 下每类 7000+ 个 shot，而 P-15B 的 attention 每次要做
+"gather 缓存 + 窗口 + top-k 联合 softmax"，比 Qwen3-8B 的注意力重得多：
+**r0 一类跑了 40+ 分钟还没完**。单域 3 类串行，实际更接近 **4–5 小时**
+（`dense` 与 `per_sequence` 各自只要 2 分钟上下）。
 
 #### 合并工具（`tests/merge_profile_types.py`）：已写好并在小网格上验证
 
