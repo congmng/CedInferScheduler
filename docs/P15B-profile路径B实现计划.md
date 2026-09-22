@@ -26,17 +26,19 @@
 
 ## 2. 交付物（文件级）
 
+> 下面是**开工时的草图**；实际落地把 `attention / compressor / indexer / sparse_attn /
+> moe` 都写在了一个 `model.py` 里（每个 canonical 名一个类，见 §4.1 为什么要这样），
+> KV spec 单独放 `kv_cache.py`。以仓库里的文件为准：
+
 ```text
 LLMServingSim/
-├── deploy/vllm_p15b/                 # 新增：vLLM 原生模型包
-│   ├── __init__.py                   # 暴露 P15BForCausalLM + register()
-│   ├── model.py                      # 主干：embedding/28 层/head
-│   ├── attention.py                  # MLA + 滑窗 + 压缩状态（调用 compressor/indexer）
-│   ├── compressor.py                 # 窗口池化 + hidden→state 投影 + RMSNorm
-│   ├── indexer.py                    # 打分 + top-k
-│   ├── sparse_attn.py                # 稀疏注意力（torch 版 + Triton 版双实现）
-│   ├── moe.py                        # gate + 48 专家 top-3 + SwiGLU clamp
-│   ├── kv_spec.py                    # get_kv_cache_spec（见 §4.3）
+├── deploy/vllm_p15b/                 # 新增：vLLM 原生模型包（实际 6 个文件）
+│   ├── __init__.py                   # 暴露 P15BForCausalLM
+│   ├── model.py                      # 全部模块类：norms / MLA / compressor / indexer /
+│   │                                 #   sparse attention / MoE / 28 层主干
+│   ├── vllm_model.py                 # vLLM 入口：ParallelLMHead + LogitsProcessor + 注册
+│   ├── config.py / hf_config.py      # 超参视图 + AutoConfig 注册（`model_type: p15b`）
+│   ├── kv_cache.py                   # P15BCache：每层一个 cacheable group（§4.3）
 │   └── sitecustomize.py              # 解释器启动时注册模型（挂 PYTHONPATH 即可）
 ├── configs/model/casr/
 │   ├── P15B-r0.json                  # 1 层，layers_block_type=[0]     （全 MLA）
@@ -745,6 +747,11 @@ check_p15b_boot.py              四卡全过，KV 账目与设计闭式一致
 `VocabParallelEmbedding` / `LogitsProcessor` / `RotaryEmbedding` 直接复用。好处：
 ① profiler 的 canonical 名字大多现成可用；② TP 切分由 vLLM 负责，
 profiler 的 `--tp 2` 模拟（拿 `HF_OVERRIDES` 缩小形状）自动成立。
+
+> ⚠️ **当前状态**：`_linear()` 还是 `nn.Linear`——接口留好了，**并行层没接**，
+> 所以 TP>1 的 profile 会量到"没切分"的形状。已经收集的四份 bundle 都是 **tp=1**，
+> 而 `casr_p15b_three_domain.json` 与 Qwen3-8B 对照拓扑用的也都是 `tp_size=1`，
+> 因此当前实验不受影响；要支持 TP=2 见文末"留待下一步"第 1 条。
 
 ### 4.2 `intermediate_size` 必须设成专家宽度
 
