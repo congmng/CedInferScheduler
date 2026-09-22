@@ -46,6 +46,7 @@ import sys
 from pathlib import Path
 
 from profiler.core import logger as log
+from profiler.core.categories import CATEGORY_BY_NAME
 from profiler.core.config import (
     ProfileArgs,
     detect_model_type,
@@ -74,6 +75,20 @@ MODEL_CONFIG_DIR = _REPO_ROOT / "configs" / "model" # LLMServingSim's shared con
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+
+def _parse_categories(raw: str) -> tuple[str, ...]:
+    """``--categories dense,moe`` -> ``("dense", "moe")``, validated."""
+    names = tuple(part for part in raw.replace(",", " ").split() if part)
+    unknown = [name for name in names if name not in CATEGORY_BY_NAME]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown category {unknown}; choose from "
+            f"{sorted(CATEGORY_BY_NAME)}")
+    if not names:
+        raise argparse.ArgumentTypeError("no category names given")
+    return names
+
 
 def _add_common_flags(p: argparse.ArgumentParser) -> None:
     """Flags shared between profile and slice subcommands."""
@@ -165,6 +180,14 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
                         "Default is resume mode: existing rows are preserved "
                         "and only shots whose keys aren't already in the CSV "
                         "get fired. Applies to every category plus skew.")
+    p.add_argument("--categories", default=None, metavar="A,B",
+                   dest="categories", type=_parse_categories,
+                   help="Run only these categories. Names match the CSV they "
+                        "write: dense, per_sequence, attention, moe. Combine "
+                        "with --force to re-measure one CSV inside an "
+                        "existing bundle (the other CSVs are left alone) -- "
+                        "e.g. --categories dense --force after a model change "
+                        "that only affects dense rows.")
     p.add_argument("--shard", default=None, metavar="I/N",
                    help="Fire only the shots whose position in the composed "
                         "grid is ≡ I (mod N). Run N processes with "
@@ -340,6 +363,7 @@ def _build_profile_args(
         skew_kp_factor=getattr(ns, "skew_kp_factor", 2.0),
         skew_kvs_factor=getattr(ns, "skew_kvs_factor", 2.0),
         only_skew=getattr(ns, "only_skew", False),
+        categories=getattr(ns, "categories", None),
         force=getattr(ns, "force", False),
         shard=parse_shard(getattr(ns, "shard", None)),
         hf_overrides=None,

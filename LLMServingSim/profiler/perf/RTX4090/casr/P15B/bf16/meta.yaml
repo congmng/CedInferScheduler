@@ -1,0 +1,56 @@
+profiler_version: 1.0.0
+vllm_version: 0.29.0
+cuda_version: '13.0'
+gpu: NVIDIA GeForce RTX 4090
+hardware: RTX4090
+profiled_at: '2026-09-22T09:11:50+00:00'
+architecture: p15b
+architecture_sha256: 629cbd01660e19092fa269a610ee14b11d19ddf8c75e6ae653ac419d4e80ab8c
+model: casr/P15B
+variant: bf16
+tp_degrees:
+- 1
+engine_effective:
+  load_format: dummy
+  enforce_eager: true
+  skip_tokenizer_init: true
+  enable_prefix_caching: false
+  generation_config: vllm
+  tensor_parallel_size: 1
+  block_size: 16
+  gpu_memory_utilization: 0.9
+  max_num_batched_tokens: 2048
+  max_num_seqs: 128
+  hf_overrides:
+    num_hidden_layers: 1
+    intermediate_size: 1280
+    num_attention_heads: 20
+    num_key_value_heads: 1
+    vocab_size: 65536
+  dtype: bfloat16
+  worker_extension_cls: profiler.core.hooks.extension.Extension
+  model: /tmp/profiler_model_4h3xzvae
+attention_grid:
+  max_kv: 16384
+  chunk_factor: 2.0
+  kv_factor: 2.0
+  chunks: 0, 16-2048 x2
+  n_decode: 0, 1-128 x2
+  kv: 0, 16-16384 x2
+measurement_iterations: 3
+shard: null
+skew_profile:
+  enabled: false
+skew_fit:
+  enabled: false
+merged_types:
+- r0
+- r4
+- r128
+source_bundles:
+- r0/RTX4090/casr/P15B-r0/bf16/tp1
+- r4/RTX4090/casr/P15B-r4/bf16/tp1
+- r128/RTX4090/casr/P15B-r128/bf16/tp1
+architectures: null
+notes:
+- dense re-measured 2026-09-22 after the catalog binding fix (kv_norm / o_lora_a)

@@ -530,8 +530,15 @@ class ExpertCategory(Category):
 # Category registry
 # ---------------------------------------------------------------------------
 
-def categories_for(arch: Architecture, tp: int) -> list[Category]:
+def categories_for(arch: Architecture, tp: int,
+                   only: tuple[str, ...] | None = None) -> list[Category]:
     """Return the list of categories that should run for this (arch, tp).
+
+    ``only`` (the CLI's ``--categories``) keeps just those categories by name.
+    It exists so a single category can be re-measured into an existing bundle:
+    ``--force`` only rewrites the CSVs the running categories own, so
+    ``--categories dense --force`` fixes ``dense.csv`` in place and leaves a
+    four-hour ``attention.csv`` alone.
 
     Excludes:
       * Any category whose catalog slice is empty (e.g., ExpertCategory
@@ -549,6 +556,8 @@ def categories_for(arch: Architecture, tp: int) -> list[Category]:
         (ExpertCategory(), arch.catalog.moe),
     ]
     for cat, entries in registry:
+        if only is not None and cat.name not in only:
+            continue
         if not entries:
             continue
         if isinstance(cat, ExpertCategory) and tp != 1:

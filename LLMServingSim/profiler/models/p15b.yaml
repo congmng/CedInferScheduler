@@ -74,7 +74,10 @@ catalog:
       within: P15BAttention
       tp_stable: true
     o_lora_a:
-      vllm: P15BOProjA
+      # The container, not the per-group piece: binding P15BOProjA would make
+      # the profiler average the o_groups matches into one group's cost while
+      # the simulator prices this name once per layer.
+      vllm: P15BOLoRAGroups
       within: P15BAttention
     o_lora_b:
       vllm: P15BOProjB

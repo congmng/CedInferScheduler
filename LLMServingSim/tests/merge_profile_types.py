@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import pathlib
 import sys
 
@@ -78,7 +79,12 @@ def main() -> int:
     parser.add_argument("--blocks", default="r0,r4,r128")
     parser.add_argument("--max-spread", type=float, default=0.15,
                         help="fail if a shared layer's *median* relative "
-                             "difference across its rows exceeds this")
+                        "difference across its rows exceeds this")
+    parser.add_argument("--note", action="append", default=[],
+                        help="Provenance line for meta.yaml. Repeatable. Use it "
+                             "when a category was re-measured after the first "
+                             "collection, e.g. --note 'dense re-measured "
+                             "2026-09-22 after the catalog binding fix'.")
     args = parser.parse_args()
 
     blocks = [b for b in args.blocks.split(",") if b]
@@ -174,6 +180,17 @@ def main() -> int:
     meta["merged_types"] = blocks
     meta["source_bundles"] = [str(sources[b].relative_to(type_root)) for b in blocks]
     meta["architectures"] = None
+    # Re-hash the catalog: a merge mixes measurements, and what a consumer needs
+    # to know is which yaml a fresh run would use now.  On 2026-09-22 the
+    # binding fix edited p15b.yaml *after* attention had been measured, but only
+    # the dense rows were affected -- and those were re-measured, which is what
+    # --note records.
+    arch_path = REPO / "profiler" / "models" / f"{meta.get('architecture')}.yaml"
+    if arch_path.is_file():
+        meta["architecture_sha256"] = hashlib.sha256(
+            arch_path.read_bytes()).hexdigest()
+    if args.note:
+        meta["notes"] = list(meta.get("notes") or []) + args.note
     (dest.parent / "meta.yaml").write_text(
         yaml.dump(meta, sort_keys=False, default_flow_style=False), encoding="utf-8")
     print(f"meta.yaml written for {args.model} from {blocks}")

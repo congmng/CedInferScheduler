@@ -67,6 +67,21 @@ class P15BKVNorm(P15BRMSNorm):
     """Norm on the kv latent, inside the attention block."""
 
 
+class P15BCompressorNorm(P15BRMSNorm):
+    """Norm on a compressor's projected state.
+
+    Deliberately a *different* class from ``P15BKVNorm`` even though both are
+    RMSNorms: the profiler binds a canonical layer name by
+    ``(class name, ancestor class name)`` and averages every module that
+    matches (``profiler/core/writer.py``).  The compressor lives *inside*
+    ``P15BAttention``, so reusing ``P15BKVNorm`` there made the ``kv_norm`` row
+    the mean of the attention's 576-wide norm and the compressor's
+    2048/1024-wide one -- a 17% disagreement between r4/r128 and r0 that the
+    merge tool caught.  Not being in the catalog is the point: the compressor's
+    cost is already counted in its own (inclusive) entry.
+    """
+
+
 class P15BFinalNorm(P15BRMSNorm):
     """Model-level final norm."""
 
@@ -264,6 +279,23 @@ class P15BOProjB(nn.Module):
         return self.proj(x)
 
 
+class P15BOLoRAGroups(nn.ModuleList):
+    """The ``o_groups`` per-group projections, as one catalog-able module.
+
+    Profile correctness, not elegance: the profiler averages every module that
+    matches a canonical name (``profiler/core/writer.py``), so binding
+    ``o_lora_a`` to the individual ``P15BOProjA`` pieces recorded *one group's*
+    cost while the simulator prices the name once per layer -- an 8x
+    undercount, and the eight groups are what the design's parameter table
+    counts.  Calling the container makes its (inclusive) node cover all of
+    them, so the row is the stage's real cost.
+    """
+
+    def forward(self, chunks):
+        return torch.cat([proj(chunk) for proj, chunk in zip(self, chunks)],
+                         dim=-1)
+
+
 class P15BCompressor(nn.Module):
     """Window-pool then project: ``hidden -> 2*coff*head_dim`` per `ratio` tokens.
 
@@ -278,7 +310,7 @@ class P15BCompressor(nn.Module):
         self.coff = cfg.coff(ratio)
         self.state = 2 * self.coff * cfg.head_dim
         self.window = self.coff * ratio
-        self.norm = P15BKVNorm(self.state, cfg.rms_norm_eps)
+        self.norm = P15BCompressorNorm(self.state, cfg.rms_norm_eps)
         self.proj = _linear(cfg.hidden_size, self.state)
 
     def forward(self, x):
@@ -472,7 +504,7 @@ class P15BAttention(nn.Module):
         self.q_up = P15BQUp(cfg)
         self.rotary_emb = P15BRotary(cfg.qk_rope_head_dim, cfg.rope_theta)
         chunk = cfg.num_attention_heads * cfg.head_dim // cfg.o_groups
-        self.o_lora_a = nn.ModuleList(
+        self.o_lora_a = P15BOLoRAGroups(
             P15BOProjA(chunk, cfg.o_lora_rank) for _ in range(cfg.o_groups))
         self.o_lora_b = P15BOProjB(cfg.o_groups, cfg.o_lora_rank, cfg.hidden_size)
         if ratio:
@@ -523,8 +555,7 @@ class P15BAttention(nn.Module):
         out = self.attn(q, latents, state_values, state_pos, positions,
                         cached_keys=self._cached_keys(b))
         out = out.reshape(b, t, self.n_heads * self.head_dim)
-        chunks = torch.chunk(out, self.o_groups, dim=-1)
-        out = torch.cat([proj(c) for proj, c in zip(self.o_lora_a, chunks)], dim=-1)
+        out = self.o_lora_a(torch.chunk(out, self.o_groups, dim=-1))
         return self.o_lora_b(out)
 
     def _cached_keys(self, batch_size: int):

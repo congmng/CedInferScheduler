@@ -45,6 +45,16 @@ LLMServingSim/
 └── profiler/models/p15b.yaml         # catalog + sequence + layer_types
 ```
 
+配套的闸门与工具（`tests/`）：
+
+| 文件 | 作用 | 何时跑 |
+|---|---|---|
+| `check_p15b_shapes.py` | 参数量三方对账 + 与 `design/dsv4_ref` 的 logits parity | 改模型后 |
+| `check_p15b_boot.py` | 四类卡装载 + KV 账目闭式 | 改 KV spec 后 |
+| `check_p15b_catalog_binding.py` | 每个 canonical 名必须**唯一**绑定一个模块（新增，见"第四道缺口"） | **每次采集前** |
+| `run_p15b_profile.sh` | 三类 × 一卡；`BLOCKS` / `CATEGORIES` 选子集 | 采集 |
+| `merge_profile_types.py` | 三份单类型 bundle 合一 + 共享层一致性闸门 | 采集后 |
+
 ## 3. 实施步骤（每步一个判据）
 
 ### 步骤 1：形状对齐 ✅ **已完成（2026-09-22）**
@@ -341,6 +351,85 @@ attention_r128.csv   ← HCA（窗口 128 + top-k）
 用合成三表验证过分派：`attention` 151.2 µs / `attention_r4` 60.5 µs /
 `attention_r128` 105.8 µs，`table=None` 时回落到 `attention` ✓。
 
+#### 步骤 4 的第四道缺口：一个类名被两处绑定（2026-09-22，已修）
+
+**怎么发现的**：合并工具的一致性闸门（三份单类型采集里的**共享层**互为重复测量）
+在 5090 的三次采集上报了一处异常——11 个共享层里 10 个逐层中位偏差 ≤ 2%，只有
+`kv_norm` **17.3%**，超过 15% 阈值，工具**拒绝合并**：
+
+```text
+dense.csv: 2516 rows ... worst layer median 17.3%
+these shared layers disagree systematically across block types (median > 15%): kv_norm
+```
+
+**直接定位**：新增 `tests/check_p15b_catalog_binding.py`——照 profiler 自己的匹配
+规则（类名相等 + `within` 出现在祖先类名链里，`profiler/core/hooks/timings.py`）
+在模块树上复现一遍，报出每个 canonical 名**命中了几个模块**。跑的第一次就点出来两处：
+
+```text
+r4   dense  kv_norm  AMBIGUOUS   layers.0.self_attn.kv_norm            576
+                                 layers.0.self_attn.compressor.norm   2048   ^ also
+r128 dense  kv_norm  AMBIGUOUS   layers.0.self_attn.kv_norm            576
+                                 layers.0.self_attn.compressor.norm   1024   ^ also
+r0/r4/r128  dense  o_lora_a AMBIGUOUS   o_lora_a.0 … o_lora_a.7   （8 个）
+```
+
+**为什么必须修**（不是"数字难看"，是记账口径错了）：profiler 的 `DedupSink`
+对同一个 `(layer, tokens)` 键的多个采样取**平均**（`profiler/core/writer.py`），
+而模拟器按名字逐层计价**一次**。于是：
+
+| 行 | 修前的实际含义 | 后果 |
+|---|---|---|
+| `kv_norm`（r4/r128） | 注意力 576 宽 norm 与 compressor 2048/1024 宽 norm 的**均值** | 与 r0 系统性差 15–40% |
+| `o_lora_a`（三类） | **单组**投影的成本（8 组被平均成 1 组） | 模拟器只计一次 → **8 倍低估** |
+
+**修法**（两处，都不动数值语义）：
+
+1. compressor 内部的 norm 换成新类 `P15BCompressorNorm`（**不**进 catalog）。
+   compressor 自己的条目是 inclusive 的，本来就把这层 norm 的钱算进去了，所以
+   这是"去掉重复计费"而不是"少算一层"。
+2. `o_lora_a` 从 `nn.ModuleList` 换成 `P15BOLoRAGroups`（`ModuleList` 子类，
+   `forward` 里把 8 组一次算完并 `cat`），catalog 绑**容器**而不是单组——
+   容器的节点时间是包含 8 个子模块的（同 `qkv_down`/`o_lora_b` 这些 wrapper
+   的行为）。
+
+**实证**（本机 4090，只重采 dense 类，每个类型约 3 分钟）：
+
+```text
+o_lora_a   tokens=1     3.57 ->  30.06 µs  (8.42x)
+           tokens=512  10.14 ->  85.06 µs  (8.39x)
+           tokens=2048 18.64 -> 158.42 µs  (8.50x)
+q_up / o_lora_b / kv_norm / 其余每一层      0.99 - 1.01x   （没被动过）
+
+kv_norm 跨类型离散度 (max-min)/max：修复前 中位 15.2% / 最大 40.2%
+                                    修复后 中位  2.0% / 最大 13.5%（tokens=1 的 2 µs 小算子）
+合并闸门：dense 最差逐层中位偏差 17.3% -> 2.3%   （通过）
+```
+
+> **这条不只影响两行数字**：修正后 2048 token 的 `o_lora_a` 是 **158 µs**，与
+> `q_up`（165 µs）、`o_lora_b`（249 µs）同量级；修前它看起来是最便宜的注意力行
+> （18.6 µs）。逐层成本分布因此变了，凡是拿"哪个阶段便宜"做的判断都要重看。
+
+**增量重采（不必重跑 4 小时的 attention）**：profiler 新增 `--categories`
+（`--force` 只重写**运行类别**自己的 CSV，其它文件不碰），启动脚本透传 `CATEGORIES=`：
+
+```bash
+# 只修 dense.csv，attention.csv / moe.csv / per_sequence.csv 原样保留
+CATEGORIES=dense tests/run_p15b_profile.sh RTX4090 /out
+```
+
+### 步骤 4 落地状态（2026-09-22 18:20）
+
+| 域 | 采集 | dense 重采 | bundle 落地 |
+|---|---|---|---|
+| RTX4090（本机 GPU0/1） | 三类齐 | ✅ 已重采并拼回 | ✅ `profiler/perf/RTX4090/casr/P15B/bf16`，两个校验器全过 |
+| RTX5090 | 三类齐（旧 dense） | 待做 | 待做 |
+| RTX3090（3090a） | r0/r128 的 attention 在跑，r4 未开始 | 待做 | 待做 |
+| A100-80G | r0/r128 齐，r4 的 attention 在跑 | 待做 | 待做 |
+
+`meta.yaml` 现在会带 `notes:`（记录 dense 是哪次重采的）和按**当前** yaml 重算的
+`architecture_sha256`——合并把两次采集拼在一起时，这是唯一说得清 provenance 的地方。
+
 ### 步骤 5：接进模拟器 ✅ **配置已就位（2026-09-22，等 bundle 落地即可跑）**
 
 `configs/cluster/casr_p15b_three_domain.json`：与
@@ -538,13 +627,18 @@ MLAAttentionSpec(tokens_per_state=1, ...)                             # 全 MLA 
 | TP=2 时 MLA 单头 latent 的切分 | KV 不切；Step 2 里 `--tp 1,2` 都跑一遍 |
 | `Sitecustomize` 注册模型在 worker 进程不生效 | 走 `PYTHONPATH` 的 `sitecustomize`（每个新解释器都会加载），先在一个卡上验证 |
 | 我们的 MoE 与 vLLM fused MoE 的类名/形状不一致 | MoE 直接用 vLLM 的 `FusedMoE`，catalog 绑定它的类名 |
+| **一个类名被 catalog 两处匹配**：DedupSink 取平均 → 要么重复计费、要么把 N 个模块平均成 1 个（`o_lora_a` 实测 8 倍低估） | 采集**前**跑 `tests/check_p15b_catalog_binding.py`；合并工具的一致性闸门做二次兜底（这次就是它先报的 17.3%） |
 | 12 次 profile 的时间 | 单次与 Qwen3-8B 同量级（`num_hidden_layers=1`，MoE 稍大）；按卡分片并发 |
 
 ## 6. 资源与时间估算
 
 - **卡**：现在就有 4090×2（本机）、3090×2（3090a）、5090×2、A100-80G×4（0–3 空）。
 - **单次 profile**：与 09-18 那次同量级（30–40 min，`iters 3`、`attention_max_kv 16384`）。
-- **总量**：3 类型 × 4 卡 = 12 次；按卡并发、类型串行 → 每卡 3 次 ≈ **2 小时**（A100 四卡可再分片压缩）。
+- **总量**：3 类型 × 4 卡 = 12 次；按卡并发、类型串行 → 每卡 3 次。
+  ⚠️ **这条估算后来被实测推翻**：attention 阶段是绝对瓶颈（每类 7000+ shot，每次要做
+  "gather 缓存 + 窗口 + top-k 联合 softmax"），单域实际 **4–5 小时**，见
+  [步骤 4 的正式采集](#步骤-4-的正式采集已启动2026-09-22)。dense / per_sequence 各自
+  只要 2–3 分钟，所以后来能用 `--categories dense` 单独重采修正过的行。
 - **不需要**：checkpoint、训练、官方镜像里的 DSV4 代码路径。
 
 ## 7. 与现有资产的复用

@@ -431,6 +431,12 @@ class ProfileArgs:
     attention sweep has already been done and you want to add skew
     data without reprofiling from scratch."""
 
+    categories: tuple[str, ...] | None = None
+    """If set, run only these categories (``dense``, ``per_sequence``,
+    ``attention``, ``moe``). Use with ``--force`` to re-measure one
+    category's CSV inside an existing bundle: ``--force`` only rewrites
+    the files the running categories own."""
+
     force: bool = False
     """If True, wipe existing CSVs before profiling rather than
     resuming. Default (False) preloads existing rows and skips shots

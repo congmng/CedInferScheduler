@@ -202,7 +202,7 @@ def run_full(
 
         try:
             if not args.only_skew:
-                for category in categories_for(arch, tp):
+                for category in categories_for(arch, tp, only=args.categories):
                     _fire_one_category(
                         llm, category, arch, args, limits, tp, tp_root,
                     )
