@@ -54,6 +54,7 @@ LLMServingSim/
 | `check_p15b_catalog_binding.py` | 每个 canonical 名必须**唯一**绑定一个模块（新增，见"第四道缺口"） | **每次采集前** |
 | `run_p15b_profile.sh` | 三类 × 一卡；`BLOCKS` / `CATEGORIES` 选子集 | 采集 |
 | `merge_profile_types.py` | 三份单类型 bundle 合一 + 共享层一致性闸门 | 采集后 |
+| `assemble_p15b_bundle.py` | 把"正式采集 + dense 重采"拼成一个 type-root，再调合并与两个校验器 | 一个域收尾时（一条命令） |
 
 ## 3. 实施步骤（每步一个判据）
 
@@ -416,6 +417,12 @@ kv_norm 跨类型离散度 (max-min)/max：修复前 中位 15.2% / 最大 40.2%
 ```bash
 # 只修 dense.csv，attention.csv / moe.csv / per_sequence.csv 原样保留
 CATEGORIES=dense tests/run_p15b_profile.sh RTX4090 /out
+
+# 一个域收尾：拼接 → 合并 → 校验（校验不过就非零退出）
+python3 tests/assemble_p15b_bundle.py --hardware RTX5090 \
+    --profile-root /tmp/p15b-formal --dense-root /tmp/p15b-dense \
+    --work-root /tmp/p15b-assembled-5090 \
+    --note "dense re-measured 2026-09-22 after the catalog binding fix"
 ```
 
 ### 步骤 4 落地状态（2026-09-22 18:20）
