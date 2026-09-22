@@ -435,6 +435,19 @@ serving/core/trace_generator.py` 跑）：
 所以端到端被掩盖了；**凡是拿 Zamba2 的 TPOT（或任何 per-token 指标）做的结论，
 都要按这条重跑**。
 
+#### 步骤 5 闭环：P-15B 的 bundle 能跑完 baseline / greedy / LP 三臂
+
+修完零流量与 block-copy 之后，用 P-15B 的 bundle 跑完整对照入口：
+
+```text
+CLUSTER_CONFIG=/tmp/p15b_smoke_cluster.json bash tests/run_casr_comparison.sh <outdir>
+  → baseline vs greedy  ✓
+  → baseline vs LP      ✓
+```
+
+（那次是 1P×1D 的冒烟拓扑，没有可路由的余地，所以三臂数字相同——**能跑完**才是这一步的判据。
+正式实验用三域的 `casr_p15b_three_domain.json`，那里 3P×3D 才有路由空间。）
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
