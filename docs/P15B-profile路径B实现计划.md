@@ -561,6 +561,48 @@ CLUSTER_CONFIG=configs/cluster/casr_p15b_three_domain.json \
 * 这一档仍是短 prompt（64 token）、0.4 s 内到齐的突发；**长 prompt + 高峰值
   持续档**才是计划里"收益收敛多少"的正式曲线，上面这组是它的第一个点。
 
+#### 正式实验档：长 prompt + 高分位峰值（三档一起看）
+
+arena 的口径：1250-token prompt（`cnndm-long-pool`）、15 s 升温 + 90 s 峰值 + 15 s 降温、
+每域 1 Prefill + 1 Decode，成本全部来自 bundle。三档放在一起才说明问题：
+
+| 档 | 拓扑 / 峰值 | load（SOTA） | rr | casr_lp | casr_full | 弹性增量 |
+|---|---|---:|---:|---:|---:|---:|
+| A | 3090+4090+5090 / 8 rps，**Qwen3-8B** | 205,062 ms | 200,555 | 84,839 | 83,222 | −2.0% |
+| A' | 同上，**P-15B** | **486 ms** | 566 | **354** | 355 | ≈0 |
+| B | 5 域（5090×2/4090/3090×2）/ 8 rps，P-15B | 519 ms | 568 | **313** | 326 | **+4%**（变差） |
+| C | 同上 / **32 rps**，P-15B | 90,060 ms | 83,059 | 64,106 | **58,199** | **−9.2%**（变好） |
+
+**三条结论**：
+
+1. **KV 小 8.9× ⇒ 调度收益"收敛"，但系统绝对性能差两个数量级**。同一拓扑同一负载，
+   Qwen3-8B 的 load 臂 TTFT p50 是 **200 s**（KV 把跨域链路压死，CASR 也只能减到 84.8 s，
+   相对收益 −59%）；P-15B 是 **0.41 s / 0.35 s**（相对收益只有 −27%）。
+   也就是说：**KV 越肥，调度可捡的份额越大，但整体越不可用**——这正是"压缩 KV 让跨域
+   PD 分离真正可用"的量化版本，也解释了为什么相对收益会随压缩而收敛。
+2. **结构弹性只在峰值超过静态池容量时才有意义**。B 档（8 rps，静态池远未饱和）唤醒第三台
+   Prefill 只搬了 84 个请求、还多了 45 s 冷启动，E2E 反而 +4%；C 档（32 rps，静态池过载）
+   同样唤醒第三台，被分流 132 个请求，E2E 从 64,106 → **58,199 ms（−9.2%）**，
+   p95 也从 122,306 → 121,401。**"+P 要正收益"的三个条件是计划里写的那三条，一条都不能少。**
+3. 三域拓扑（A/A'）里弹性几乎不动：`make_hetero_cluster` 的静态池已经把该拓扑的
+   Prefill 全占了，没有可加的候选。要演示弹性必须让**域数 > 静态池大小**（B/C 用 5 域）。
+
+复现（9k prompt 池是离线生成物，放在 `/tmp`，不进仓库）：
+
+```bash
+# 池子：CNN/DailyMail validation，pack 到每条 1250 token（2375 条天然够长 + 拼接补足）
+python3 -m workloads.generators cnndm --model ../data/Qwen3-8B-tokenizer \
+  --source ../data/cnn_dailymail/validation.parquet --num-reqs 9000 --sps 8 --seed 42 \
+  --pack-toks 1250 --min-input-toks 1250 --max-input-toks 1250 --max-output-toks 300 \
+  --slo-ttft-ms 500 --slo-tpot-ms 50 --output /tmp/cnndm-long-pool-9k.jsonl
+python3 tests/make_phased_trace.py --input /tmp/cnndm-long-pool-9k.jsonl \
+  --rates 0.5,32,0.5 --durations 15,90,15 --pack 1 --names warmup,peak,cool \
+  --output /tmp/cnndm-long-arena-32rps.jsonl
+python3 tests/run_hetero_arena.py --out /tmp/p15b-arena-5dom-32rps \
+  --domains 5090,5090,4090,3090,3090 --model casr/P15B \
+  --trace /tmp/cnndm-long-arena-32rps.jsonl --arms load,rr,casr_lp,casr_full
+```
+
 `configs/cluster/casr_p15b_three_domain.json`：与
 `casr_real_qwen3_8b_three_domain.json` **同一拓扑**（同样的节点、链路、实例），
 只换两样——`model_name: casr/P15B`，以及
