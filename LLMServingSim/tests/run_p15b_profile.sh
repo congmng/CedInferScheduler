@@ -13,6 +13,8 @@
 #     PYTHONPATH=/work/deploy/vllm_p15b tests/run_p15b_profile.sh RTX4090 /out 0 2
 #
 # Arguments: <hardware> <out-root> [shard_index shard_count]
+# Set BLOCKS to run a subset (default: r0,r4,r128) -- that is how the three
+# types get spread over a host's two cards instead of run back to back.
 set -euo pipefail
 
 HARDWARE="${1:?usage: run_p15b_profile.sh <hardware> <out-root> [i n]}"
@@ -26,13 +28,14 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 ATTENTION_MAX_KV="${ATTENTION_MAX_KV:-16384}"
 MEASUREMENT_ITERATIONS="${MEASUREMENT_ITERATIONS:-3}"
+BLOCKS="${BLOCKS:-r0,r4,r128}"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 SHARD_ARGS=()
 [[ -n "$SHARD_INDEX" ]] && SHARD_ARGS+=(--shard "$SHARD_INDEX/$SHARD_COUNT")
 
-for BLOCK in r0 r4 r128; do
+for BLOCK in ${BLOCKS//,/ }; do
     echo "### P-15B ${BLOCK} on ${HARDWARE}${SHARD_INDEX:+ (shard $SHARD_INDEX/$SHARD_COUNT)}"
     python3 -m profiler profile "casr/P15B-${BLOCK}" \
         --hardware "$HARDWARE" --tp 1 --dtype bfloat16 \
