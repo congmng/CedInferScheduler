@@ -420,6 +420,21 @@ Mean TPOT：11.40 → 13.05 ms   （旧路径低估约 14%）
 **这条也意味着 Zamba2 那种 hybrid 的既有结果同样受影响**：38 层全按第 0 层（mamba）定价，
 6 个 attention 层等于没计费。那批数字需要重跑——`run_hetero_arena.py` 现在会走对路径。
 
+**影响已量化**（同一套条件：Zamba2-1.2B，2 域 `5090,4090`，`--peak-rps 8
+--peak-seconds 30`，`rr`/`casr_lp` 两臂；修复前用 `git checkout 4b796f9~1 --
+serving/core/trace_generator.py` 跑）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---:|---:|
+| `rr` TPOT p50 | 3.4 ms | **4.8 ms（+41%）** |
+| `casr_lp` TPOT p50 | 3.4 ms | **4.8 ms（+41%）** |
+| `rr` E2E mean | 21,943.7 | 21,982.5 |
+| `casr_lp` E2E mean | 22,070.0 | 22,107.5 |
+
+**TPOT 抬高 41%，E2E 几乎不动**——这一档的 TTFT（21.9 s）完全由排队主导，
+所以端到端被掩盖了；**凡是拿 Zamba2 的 TPOT（或任何 per-token 指标）做的结论，
+都要按这条重跑**。
+
 **为什么是 3 份而不是 1 份**（读代码才发现的坑）：profiler 固定用
 `hf_overrides: {num_hidden_layers: 1}` profile **一层**，而 P-15B 的三种层
 **形状不同**（compressor 2048 / 1024 / 无）。Zamba2 那种"一层里同时有 mamba 和
