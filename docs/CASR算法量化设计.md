@@ -312,26 +312,17 @@ Qwen3-8B 184 MB → **10.9 req/s**。**KV 压缩 8.9× 把「每台生产者能�
 ```bash
 cd LLMServingSim
 
-# 1) 从 bundle 现算服务时间与容量（必须在 astra-sim 目录下跑，bundle 路径是相对的）
-cd astra-sim && python3 - <<'PY'
-import json, pathlib, sys
-sys.path.insert(0, ".."); sys.path.insert(0, ".")
-from serving.core.hw_service import rescale_service_times, rescale_capacities
-cfg = json.loads(pathlib.Path("../configs/cluster/casr_p15b_three_domain.json").read_text())
-instances = [i for n in cfg["nodes"] for i in n["instances"]]
-casr = dict(cfg["casr"])
-rescale_service_times(casr, instances, key="prefill_service_ms", tokens=1250, verbose=False)
-rescale_service_times(casr, instances, key="decode_service_ms", tokens=1, verbose=False)
-rescale_capacities(casr, instances, verbose=False)
-for k in ("prefill_service_ms", "decode_service_ms", "prefill_capacity", "decode_capacity"):
-    print(f"{k:20}", casr[k])
-PY
-cd ..
+# 1) 集群配置 -> probe 配置（内部会 chdir 到 astra-sim 解 bundle，并打印
+#    从 profile 反推的 service_ms / capacity，即 §5.3 的表）
+python3 tests/make_lp_probe_config.py \
+    --cluster-config configs/cluster/casr_p15b_three_domain.json \
+    --prompt-tokens 1250 --output /tmp/p15b_probe.json
 
-# 2) 逐项分解 LP 目标（把上一步的数字填进 probe 配置的 casr 块）
-python3 tests/diagnose_lp_terms.py --config /tmp/p15b_probe_config.json \
+# 2) 逐项分解 LP 目标：SLO 关、KV 用本模型的 16960 B/token
+python3 tests/diagnose_lp_terms.py --config /tmp/p15b_probe.json \
     --rate 32 --classes 8 --prompt-tokens 1250 --kv-bytes-per-token 16960 \
-    --prefills p3090,p4090,p5090 --decodes d3090,d4090,d5090 --flows
+    --prefills p0,p2,p4 --decodes d1,d3,d5 --flows
+# 只换 KV（Qwen3-8B 的 147456）就能复现 §6.2 的链路溢出
 
 # 3) 端到端三臂（baseline / greedy / LP）
 CLUSTER_CONFIG=configs/cluster/casr_p15b_three_domain.json \
