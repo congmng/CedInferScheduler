@@ -210,7 +210,19 @@ class CASRController:
             snapshot["telemetry"] = self.last_telemetry
             self.solver.set_telemetry(self.last_telemetry)
         all_prefill = [s for s in schedulers if s.pd_type == "prefill"]
-        self.last_lifecycle = self.lifecycle.update(current_ns, snapshot["prefix_states"], schedulers)
+        # Demand recovery has to happen *before* the lifecycle reads demand.
+        # Under back-pressure ``arrival_rate_ewma`` only reflects what was
+        # already served, so a saturated pool looks *idle* and the lifecycle's
+        # ``ceil(demand / capacity)`` shrinks the pool -- measured 2026-09-23 on
+        # the 30 rps peak: the controller drained the fastest Prefill while a
+        # spare was warming, leaving the RTX3090 as the only fully available
+        # Prefill, and the classes on it queued for 80 s.
+        backlog_prefill = [s for s in all_prefill if s.accepts_new_requests] or all_prefill
+        self._sample_backlog(current_ns, backlog_prefill)
+        self._inflate_demand(snapshot["prefix_states"])
+        self.last_lifecycle = self.lifecycle.update(
+            current_ns, snapshot["prefix_states"], schedulers,
+            backlog_rps=getattr(self, "_backlog_rps", 0.0))
         self.last_resource_snapshot = self.lifecycle.resources.snapshot()
         prefill = [s for s in all_prefill if s.accepts_new_requests]
         decode = [s for s in schedulers if s.pd_type == "decode" and s.accepts_new_requests]
@@ -221,12 +233,6 @@ class CASRController:
         if not decode:
             decode = [s for s in schedulers if s.accepts_new_requests]
 
-        # Recover the offered load before anything prices it: the evaluator, the
-        # LP and the lifecycle's length-aware capacity all read
-        # ``arrival_rate_ewma``, and under back-pressure that only reflects what
-        # was *served*.
-        self._sample_backlog(current_ns, prefill)
-        self._inflate_demand(snapshot["prefix_states"])
         # Price each Prefill by what it can actually push, not by its compute
         # capacity: the producer's egress (0.26 GB/s measured) is what caps a
         # 1250-token workload at ~1.4 req/s per worker, and without this term

@@ -79,6 +79,24 @@ class StructuralEvaluator:
         # reactive ``+P`` arm settled at 14572 ms where an egress-sized pool
         # reached 1120 ms.  ``0`` disables the predictive branch.
         self.prescale_utilization = float(config.get("prescale_utilization", 0.8) or 0.0)
+        # -- structural gates (2026-09-23, from the 30 rps peak post-mortem) --
+        # The evaluator used to allow a scale-down whenever the chosen instance
+        # looked momentarily free.  On the peak trace that rotated the pool
+        # 58-60 times: at tick 200 the *fastest* Prefill was DRAINING and
+        # another was WARMING, so the only fully available Prefill was the
+        # RTX3090 (884 ms/request) and the classes placed on it queued for
+        # 80 s.  No objective term can fix that, because it happens before the
+        # available set is fixed.  Three gates:
+        #   1. no scale-down while the *remaining* pool would overflow;
+        #   2. no scale-down of an instance that still owns demand;
+        #   3. no new structural edit while another one is still in flight.
+        self.block_scale_down_when_saturated = bool(
+            config.get("block_scale_down_when_saturated", True))
+        self.drain_requires_idle_classes = bool(
+            config.get("drain_requires_idle_classes", True))
+        self.block_edits_during_transition = bool(
+            config.get("block_edits_during_transition", True))
+        self.overflow_epsilon = float(config.get("overflow_epsilon", 0.01))
 
     def _holding_per_instance(self, instances, solver):
         """Per-second cost of keeping one Prefill active, in objective units.
@@ -285,6 +303,18 @@ class StructuralEvaluator:
         # dispatched-not-finished count; the simulator only has running/waiting).
         pool_busy = any(getattr(item, "waiting", ()) or getattr(item, "running", ())
                         for item in active_prefill)
+        # Gate 2: a class that still has demand keeps its Prefill.  ``waiting``
+        # and ``running`` only see requests that are already dispatched, so a
+        # lightly-loaded instance looks idle between arrivals while its class
+        # rate is very much alive -- draining it re-homes that class cold
+        # (measured 2026-09-16: the controller removed p5090 twice on a
+        # 1.05 req/s trace and the pool collapsed both times).
+        demand_by_prefill = {}
+        for row in rows:
+            rate = float(row.get("arrival_rate_ewma", 0.0) or 0.0)
+            if rate > 0.0:
+                owner = int(row.get("prefill_instance_id", -1))
+                demand_by_prefill[owner] = demand_by_prefill.get(owner, 0.0) + rate
         if len(active_prefill) > min_active and not pool_busy:
             # Every active instance is a candidate: which one is least useful is
             # a question for the counterfactual, not for the instance id.
@@ -293,9 +323,21 @@ class StructuralEvaluator:
                         getattr(candidate, "waiting", ()) or
                         float(getattr(candidate, "inflight", 0) or 0) > 0.0):
                     continue
+                if (self.drain_requires_idle_classes
+                        and demand_by_prefill.get(int(candidate.instance_id), 0.0) > 0.0):
+                    continue
                 candidate_prefill = [item for item in active_prefill if item is not candidate]
                 solver.solve(rows, candidate_prefill, decode)
                 candidate_objective = float(solver.diagnostics.get("objective", 0.0))
+                # Gate 1: the pool that would remain must still absorb the
+                # demand.  The gain test below can be positive *and* the
+                # remainder over capacity (spreading overflow is cheap), so
+                # this is a hard constraint, not a price.
+                if self.block_scale_down_when_saturated:
+                    overflow = solver.diagnostics.get("prefill_overflow") or {}
+                    if sum(max(0.0, float(value)) for value in overflow.values()) \
+                            > self.overflow_epsilon:
+                        continue
                 # Removal is immediate (drain only delays it), so the full
                 # horizon applies, and the holding cost it saves counts as a
                 # benefit -- this is the only way "-P" can be positive.
@@ -309,6 +351,21 @@ class StructuralEvaluator:
             return StructuralDecision("keep", "none", 0.0, base_objective, base_objective,
                                       tuple(s.instance_id for s in active_prefill),
                                       "no eligible one-step structure edit")
+        # Gate 3: one structural edit at a time.  WARMING and DRAINING both
+        # still hold their GPU and both distort what the solver sees; stacking
+        # another edit on top is how the peak trace's pool rotated 58-60 times.
+        # Checked here rather than up front so the "nothing to do" reasons
+        # above keep their meaning.
+        if self.block_edits_during_transition:
+            in_flight = [item.instance_id for item in (all_prefill or active_prefill)
+                         if getattr(item, "admission_state", "ACTIVE")
+                         in ("WARMING", "DRAINING")]
+            if in_flight:
+                return StructuralDecision(
+                    "keep", "none", 0.0, base_objective, base_objective,
+                    tuple(s.instance_id for s in active_prefill),
+                    f"structural edit in flight on {sorted(in_flight)}; "
+                    "not stacking another one")
         best = max(candidates, key=lambda item: (item.gain, item.action, item.mode))
         relative = best.gain / max(abs(self.window_ns / 1_000_000_000.0 * base_objective), demand_scale)
         if best.gain <= self.threshold_abs or relative <= self.threshold_rel:

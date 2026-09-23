@@ -71,6 +71,12 @@ class PrefillLifecycle:
         self.override_hold_ns = int(float(config.get("override_hold_ms", 5000)) * 1_000_000)
         self._override = ()
         self._override_until_ns = -1
+        # A shrinking pool under a growing backlog is a death spiral: the
+        # workers that leave make the backlog worse, which lowers the observed
+        # arrival rate further (it is measured *after* back-pressure), which
+        # shrinks the pool again.  When the controller reports a backlog the
+        # demand heuristic may only grow, never shrink.
+        self.hold_on_backlog = bool(config.get("hold_on_backlog", True))
 
     def _effective_capacity(self, scheduler, rows):
         """Requests/s this Prefill can absorb for the *observed* prompt mix."""
@@ -94,7 +100,8 @@ class PrefillLifecycle:
                 limit = min(limit, self.egress_bytes_per_s / per_request)
         return max(0.05, limit)
 
-    def update(self, current_ns, rows, schedulers, wanted_override=None):
+    def update(self, current_ns, rows, schedulers, wanted_override=None,
+               backlog_rps: float = 0.0):
         all_schedulers = list(schedulers)
         schedulers = [s for s in all_schedulers if s.pd_type == "prefill"]
         if not schedulers:
@@ -119,6 +126,14 @@ class PrefillLifecycle:
         if self.max_active is not None:
             desired = min(desired, int(self.max_active))
         desired = min(desired, len(schedulers))
+        if self.hold_on_backlog and float(backlog_rps or 0.0) > 0.05:
+            # Never shrink while the offered load is known to exceed what was
+            # served; growing is still allowed (the ceiling above bounds it).
+            in_pool = sum(1 for s in schedulers
+                          if s.admission_state != "INACTIVE")
+            desired = max(desired, in_pool)
+            if self.max_active is not None:
+                desired = min(desired, int(self.max_active))
         ranked = sorted(schedulers, key=lambda s: (
             0 if s.admission_state == "ACTIVE" else 1,
             len(s.running) + len(s.waiting), s.instance_id))
