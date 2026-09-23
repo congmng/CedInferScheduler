@@ -725,6 +725,80 @@ class InfeasibleOfferTests(unittest.TestCase):
         self.assertIs(clamped, rows)
 
 
+class SplitLinkBudgetTests(unittest.TestCase):
+    """A producer's KV budget must be its *best* pairing, not its worst.
+
+    Deployments price the same-host push and the wire separately (the measured
+    host path is 257 MB/s against a 0.11 GB/s wire), and the plan's own
+    per-link byte constraints already bound each pairing.  Collapsing the two
+    with ``min`` charged every producer at the cross-domain rate: measured
+    2026-09-24 on the P-15B WAN environment the plan capped the 5090 at
+    6.33 req/s while it executed 8.3, so the fastest Prefill idled while the
+    slowest one's queue grew to 203 requests (mean 8 648 ms against the
+    least-loaded baseline's 3 531).  With the split budget the same cell is
+    3 007 ms at 84.9% SLO.
+    """
+
+    class Instance:
+        def __init__(self, src, dst, budget):
+            self.src = src
+            self.dst = dst
+            self.budget = budget
+
+    def _config(self, split):
+        links = []
+        same = 0.257e9 if split else 0.11e9
+        links.append({"id": "p4-same", "capacity_bytes_per_s": same,
+                      "pairs": [[4, 5]]})
+        links.append({"id": "p4-wire", "capacity_bytes_per_s": 0.11e9,
+                      "pairs": [[4, 1], [4, 3]]})
+        return {"kv_bytes_per_token": 16960.0,
+                "capacity_reference_tokens": 1024,
+                "decode_reference_tokens": 16,
+                "prefill_capacity": {"4": 13.5788},
+                "decode_service_ms": {"5": 80.0},
+                "shared_links": links}
+
+    def test_the_budget_is_the_best_path(self):
+        _needs_pandas()
+        import os
+        from serving.core.hw_service import resolve_runtime_capacities
+        cwd = pathlib.Path.cwd()
+        os.chdir(REPO / "astra-sim")
+        try:
+            config = self._config(split=True)
+            instances = [{"instance_id": 4, "hardware": "RTX5090",
+                          "model_name": "casr/P15B", "pd_type": "prefill",
+                          "tp_size": 1, "max_num_seqs": 64}]
+            resolve_runtime_capacities(config, instances, verbose=False)
+            # The host path allows 0.257 GB/s / (16960 x 1024 B) = 14.8 ref-units,
+            # above the profiled 13.58, so nothing is capped.
+            self.assertAlmostEqual(config["prefill_capacity"]["4"], 13.5788,
+                                   delta=0.01)
+            # With one budget for both paths it would have been capped to the
+            # wire's 6.33.
+            capped = self._config(split=False)
+            resolve_runtime_capacities(capped, instances, verbose=False)
+            self.assertLess(float(capped["prefill_capacity"]["4"]), 7.0)
+        finally:
+            os.chdir(cwd)
+
+    def test_the_controller_uses_the_best_link_too(self):
+        from serving.casr.controller import CASRController
+        controller = CASRController(1_000_000_000, policy={
+            "kv_bytes_per_token": 16960.0,
+            "capacity_reference_tokens": 1024,
+            "prefill_capacity": {"4": 13.5788},
+            "shared_links": self._config(split=True)["shared_links"],
+        })
+        rows = [{"class_id": "c", "requested_tokens_ewma": 1024.0,
+                 "requested_tokens": 1024.0,
+                 "arrival_rate_ewma": 1.0}]
+        scheduler = type("S", (), {"instance_id": 4, "max_num_seqs": 64})()
+        caps = controller._egress_bound_prefill_capacity(rows, [scheduler])
+        self.assertAlmostEqual(caps[4], 13.5788, delta=0.01)
+
+
 class EgressMoverFitsComputeTests(unittest.TestCase):
     """The post-LP egress mover must not fix a link by overloading a card.
 

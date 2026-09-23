@@ -154,7 +154,15 @@ class CASRController:
             if capacity <= 0:
                 continue
             for prefill_id, _decode_id in (getattr(link, "pairs", ()) or ()):
-                budgets[int(prefill_id)] = min(budgets.get(int(prefill_id), capacity),
+                # A producer's *best* pairing, not its worst.  A deployment
+                # prices the two paths separately (the measured same-host push
+                # is faster than the wire), and the LP's own per-link byte
+                # constraints bound each pairing on its own.  Collapsing them
+                # with ``min`` charged every producer at the cross-domain rate:
+                # measured 2026-09-24 on the P-15B WAN environment the plan
+                # capped the 5090 at 5.19 req/s while it executed 8.3, so it
+                # idled while the slowest Prefill's queue grew to 203 requests.
+                budgets[int(prefill_id)] = max(budgets.get(int(prefill_id), 0.0),
                                                capacity)
         if not budgets:
             return {}

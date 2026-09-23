@@ -63,47 +63,71 @@
   "overflow_penalty": 10,
   "shared_links": [
    {
-    "id": "p0-to-decode",
-    "capacity_bytes_per_s": 330000000.0,
-    "_comment": "Producer-side KV push ceiling.  WAN = deployment measurement (0.257 GB/s same host / 0.11 GB/s cross host); metro = 3x both, same ratio.",
+    "id": "p0-same",
+    "capacity_bytes_per_s": 770000000.0,
     "pairs": [
      [
       0,
       1
-     ],
-     [
-      0,
-      3
-     ],
-     [
-      0,
-      5
      ]
-    ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
    },
    {
-    "id": "p1-to-decode",
+    "id": "p0-wire",
     "capacity_bytes_per_s": 330000000.0,
-    "_comment": "Producer-side KV push ceiling.  WAN = deployment measurement (0.257 GB/s same host / 0.11 GB/s cross host); metro = 3x both, same ratio.",
     "pairs": [
      [
-      2,
-      1
-     ],
-     [
-      2,
+      0,
       3
      ],
      [
-      2,
+      0,
       5
      ]
-    ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
    },
    {
-    "id": "p2-to-decode",
+    "id": "p2-same",
+    "capacity_bytes_per_s": 770000000.0,
+    "pairs": [
+     [
+      2,
+      3
+     ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
+   },
+   {
+    "id": "p2-wire",
     "capacity_bytes_per_s": 330000000.0,
-    "_comment": "Producer-side KV push ceiling.  WAN = deployment measurement (0.257 GB/s same host / 0.11 GB/s cross host); metro = 3x both, same ratio.",
+    "pairs": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      5
+     ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
+   },
+   {
+    "id": "p4-same",
+    "capacity_bytes_per_s": 770000000.0,
+    "pairs": [
+     [
+      4,
+      5
+     ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
+   },
+   {
+    "id": "p4-wire",
+    "capacity_bytes_per_s": 330000000.0,
     "pairs": [
      [
       4,
@@ -112,12 +136,9 @@
      [
       4,
       3
-     ],
-     [
-      4,
-      5
      ]
-    ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
    }
   ],
   "compute_weight": 1.0,
@@ -146,7 +167,8 @@
   "local_prefill_queue_weight": 1.0,
   "_fabric_comment": "metro fabric: same-host push 0.77 GB/s, cross-host push 0.33 GB/s + 0 ms RTT, local_prefill auto, container start 45 s",
   "prefill_queue_weight": 10.0,
-  "_prefill_queue_comment": "Prefill-side queue price (10.0).  Without it a producer sitting at exactly its priced capacity looks free, so a saturated plan pins every producer at 100% and the capacity error becomes an unbounded queue.  Measured 2026-09-24: P-15B metro 3674 -> 2395 ms (SLO 59.5% -> 100%), P-15B WAN p50 5894 -> 3927 ms, Qwen3 unchanged."
+  "_prefill_queue_comment": "Prefill-side queue price (10.0).  Without it a producer sitting at exactly its priced capacity looks free, so a saturated plan pins every producer at 100% and the capacity error becomes an unbounded queue.  Measured 2026-09-24: P-15B metro 3674 -> 2395 ms (SLO 59.5% -> 100%), P-15B WAN p50 5894 -> 3927 ms, Qwen3 unchanged.",
+  "_link_comment": "Per-producer KV push split by pairing: the same-domain path is the measured 257 MB/s host push, the wire path is the inter-domain fabric.  One budget for both charged same-domain handoffs at the cross-domain rate and capped the fastest producer below what it executes (measured 2026-09-24: priced 5.19 req/s against 8.3 executed)."
  },
  "nodes": [
   {

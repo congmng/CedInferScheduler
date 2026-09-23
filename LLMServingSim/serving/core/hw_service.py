@@ -456,8 +456,14 @@ def resolve_runtime_capacities(casr_config, instances, verbose=True):
                 continue
             for pair in (link.get("pairs") or ()):
                 prefill_id = int(pair[0])
-                budgets[prefill_id] = min(budgets.get(prefill_id, capacity),
-                                          capacity)
+                # A producer's *best* pairing.  Deployments price the same-host
+                # push and the wire separately, and the plan's own per-link byte
+                # constraints bound each pairing on its own; collapsing the two
+                # with ``min`` charged same-domain handoffs at the cross-domain
+                # rate, which capped the fastest Prefill below what it executes
+                # (measured 2026-09-24: priced 6.33 req/s against 8.3 executed
+                # on the P-15B WAN environment).
+                budgets[prefill_id] = max(budgets.get(prefill_id, 0.0), capacity)
         if budgets and per_request_bytes > 0.0:
             bounded = {}
             for prefill_id, capacity in budgets.items():
