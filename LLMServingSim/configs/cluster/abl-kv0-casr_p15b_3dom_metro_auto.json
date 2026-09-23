@@ -1,0 +1,294 @@
+{
+ "num_nodes": 3,
+ "link_bw": 0.33,
+ "link_latency": 20000,
+ "casr": {
+  "solver": "lp",
+  "lifecycle": {
+   "min_active_prefill": 3,
+   "max_active_prefill": 3,
+   "warmup_ms": 45000,
+   "prefill_capacity": {
+    "0": 140,
+    "2": 180,
+    "4": 220
+   },
+   "scale_on_demand": false
+  },
+  "structural": {
+   "evaluation_window_ms": 1000,
+   "gain_threshold_abs": 0.001,
+   "gain_threshold_rel": 0.01,
+   "dwell_time_ms": 1000,
+   "startup_cost": 0.0,
+   "warm_cost": 0.0
+  },
+  "resources": {
+   "startup_ms": 45000,
+   "reclaim_ms": 50,
+   "nodes": {
+    "0": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      24,
+      24
+     ]
+    },
+    "1": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      24,
+      24
+     ]
+    },
+    "2": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      32,
+      32
+     ]
+    }
+   }
+  },
+  "prefill_capacity": {
+   "0": 140,
+   "2": 180,
+   "4": 220
+  },
+  "decode_capacity": {
+   "1": 110,
+   "3": 170,
+   "5": 230
+  },
+  "overflow_penalty": 10,
+  "shared_links": [
+   {
+    "id": "p0-same",
+    "capacity_bytes_per_s": 770000000.0,
+    "pairs": [
+     [
+      0,
+      1
+     ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
+   },
+   {
+    "id": "p0-wire",
+    "capacity_bytes_per_s": 330000000.0,
+    "pairs": [
+     [
+      0,
+      3
+     ],
+     [
+      0,
+      5
+     ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
+   },
+   {
+    "id": "p2-same",
+    "capacity_bytes_per_s": 770000000.0,
+    "pairs": [
+     [
+      2,
+      3
+     ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
+   },
+   {
+    "id": "p2-wire",
+    "capacity_bytes_per_s": 330000000.0,
+    "pairs": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      5
+     ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
+   },
+   {
+    "id": "p4-same",
+    "capacity_bytes_per_s": 770000000.0,
+    "pairs": [
+     [
+      4,
+      5
+     ]
+    ],
+    "_comment": "Same-domain push: the deployment's measured 257 MB/s host path."
+   },
+   {
+    "id": "p4-wire",
+    "capacity_bytes_per_s": 330000000.0,
+    "pairs": [
+     [
+      4,
+      1
+     ],
+     [
+      4,
+      3
+     ]
+    ],
+    "_comment": "Cross-domain push over the inter-domain fabric."
+   }
+  ],
+  "compute_weight": 1.0,
+  "kv_bytes_per_token": 0.0,
+  "utilization_weight": 1.0,
+  "utilization_segments": 8,
+  "prefill_service_ms": {
+   "0": 457.143,
+   "2": 355.556,
+   "4": 290.909
+  },
+  "decode_service_ms": {
+   "1": 581.818,
+   "3": 376.471,
+   "5": 278.261
+  },
+  "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does.",
+  "_service_comment": "prefill/decode service_ms and capacities are Qwen3-8B placeholders: rescale_service_times/rescale_capacities overwrite them from profiler/perf/<HW>/casr/P15B/bf16.",
+  "ttft_slo_ms": 1500.0,
+  "slo_penalty": 10.0,
+  "_slo_comment": "SLO-priced twin of the fixed three-Prefill pool: TTFT <= 1500 ms, +10 per unit of flow on any (class, prefill, decode) triple whose predicted TTFT misses it; per-class budgets from the trace override this and the tightest wins.  Run it against workloads/matrix-<peak>rps-slo1500.jsonl.  The budget is 3x the interactive 500 ms on purpose: at these peaks 500 ms is below the pool's own service floor, so *every* pair violates and the penalty becomes a constant that changes nothing (measured 2026-09-23, docs/实验数据集与对比基线说明.md 6.22).",
+  "kv_egress_gbps": 0.33,
+  "local_prefill": "auto",
+  "local_prefill_ms_per_1k": 93.0,
+  "local_prefill_queue_cap": 3.0,
+  "local_prefill_queue_weight": 1.0,
+  "_fabric_comment": "metro fabric: same-host push 0.77 GB/s, cross-host push 0.33 GB/s + 0 ms RTT, local_prefill auto, container start 45 s",
+  "prefill_queue_weight": 10.0,
+  "_prefill_queue_comment": "Prefill-side queue price (10.0).  Without it a producer sitting at exactly its priced capacity looks free, so a saturated plan pins every producer at 100% and the capacity error becomes an unbounded queue.  Measured 2026-09-24: P-15B metro 3674 -> 2395 ms (SLO 59.5% -> 100%), P-15B WAN p50 5894 -> 3927 ms, Qwen3 unchanged.",
+  "_link_comment": "Per-producer KV push split by pairing: the same-domain path is the measured 257 MB/s host push, the wire path is the inter-domain fabric.  One budget for both charged same-domain handoffs at the cross-domain rate and capped the fastest producer below what it executes (measured 2026-09-24: priced 5.19 req/s against 8.3 executed).",
+  "_ablation": "kv_bytes_per_token=0: no transfer price, no egress cap, no link budget"
+ },
+ "nodes": [
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 0,
+     "model_name": "casr/P15B",
+     "hardware": "RTX3090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 936,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 1,
+     "model_name": "casr/P15B",
+     "hardware": "RTX3090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 936,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  },
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 2,
+     "model_name": "casr/P15B",
+     "hardware": "RTX4090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 1008,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 3,
+     "model_name": "casr/P15B",
+     "hardware": "RTX4090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 1008,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  },
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 4,
+     "model_name": "casr/P15B",
+     "hardware": "RTX5090",
+     "npu_mem": {
+      "mem_size": 32,
+      "mem_bw": 1792,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 5,
+     "model_name": "casr/P15B",
+     "hardware": "RTX5090",
+     "npu_mem": {
+      "mem_size": 32,
+      "mem_bw": 1792,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  }
+ ],
+ "_comment": "P-15B (casr/P15B) on the same three-domain topology as casr_real_qwen3_8b_three_domain.json, so the two are directly comparable: same nodes, same links, same instances -- only the model and its KV geometry differ. kv_bytes_per_token is the design's closed form (16960 B = 16.56 KB/token, docs/DSV4-P15B设计.md 5), against 147456 B for Qwen3-8B.  |  Fixed three-Prefill pool: the placement-only counterpart of the load/cache_aware baselines (they use the same three workers).  |  SLO-priced twin (ttft_slo_ms=1500, slo_penalty=10); pair it with workloads/matrix-<peak>rps-slo1500.jsonl.  |  metro fabric variant (producer-push rates).",
+ "intra_node_link_bw": 0.77,
+ "intra_node_link_latency": 1000,
+ "_intra_link_comment": "Intra-domain fabric: 1 GB/s, 2 us.  Without these two keys the pair-cost table gives same-node pairs zero bandwidth, so the router's recompute-vs-transfer price silently falls back to the recorded deployment constants (see 实验数据集与对比基线说明.md 6.15)."
+}
