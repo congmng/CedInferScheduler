@@ -1,0 +1,261 @@
+{
+ "num_nodes": 3,
+ "link_bw": 0.93,
+ "link_latency": 20000,
+ "casr": {
+  "solver": "lp",
+  "lifecycle": {
+   "min_active_prefill": 1,
+   "max_active_prefill": 1,
+   "warmup_ms": 250,
+   "prefill_capacity": {
+    "0": 140,
+    "2": 180,
+    "4": 220
+   },
+   "scale_on_demand": false
+  },
+  "structural": {
+   "evaluation_window_ms": 1000,
+   "gain_threshold_abs": 0.001,
+   "gain_threshold_rel": 0.01,
+   "dwell_time_ms": 1000,
+   "startup_cost": 0.0,
+   "warm_cost": 0.0
+  },
+  "resources": {
+   "startup_ms": 250,
+   "reclaim_ms": 50,
+   "nodes": {
+    "0": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      24,
+      24
+     ]
+    },
+    "1": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      24,
+      24
+     ]
+    },
+    "2": {
+     "gpu_count": 2,
+     "gpu_mem_gb": [
+      32,
+      32
+     ]
+    }
+   }
+  },
+  "prefill_capacity": {
+   "0": 140,
+   "2": 180,
+   "4": 220
+  },
+  "decode_capacity": {
+   "1": 110,
+   "3": 170,
+   "5": 230
+  },
+  "overflow_penalty": 10,
+  "shared_links": [
+   {
+    "id": "p0-to-decode",
+    "capacity_bytes_per_s": 2000000000.0,
+    "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective. Byte-denominated so the same constraint binds in the simulator and on the real router.",
+    "pairs": [
+     [
+      0,
+      1
+     ],
+     [
+      0,
+      3
+     ],
+     [
+      0,
+      5
+     ]
+    ]
+   },
+   {
+    "id": "p1-to-decode",
+    "capacity_bytes_per_s": 2000000000.0,
+    "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective.",
+    "pairs": [
+     [
+      2,
+      1
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      2,
+      5
+     ]
+    ]
+   },
+   {
+    "id": "p2-to-decode",
+    "capacity_bytes_per_s": 2000000000.0,
+    "_comment": "Producer-side KV push budget, measured on the 10.212 fabric: ~16 Gbps effective.",
+    "pairs": [
+     [
+      4,
+      1
+     ],
+     [
+      4,
+      3
+     ],
+     [
+      4,
+      5
+     ]
+    ]
+   }
+  ],
+  "compute_weight": 1.0,
+  "kv_bytes_per_token": 147456.0,
+  "utilization_weight": 1.0,
+  "utilization_segments": 8,
+  "prefill_service_ms": {
+   "0": 457.143,
+   "2": 355.556,
+   "4": 290.909
+  },
+  "decode_service_ms": {
+   "1": 581.818,
+   "3": 376.471,
+   "5": 278.261
+  },
+  "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does.",
+  "ttft_slo_ms": 1500.0,
+  "slo_penalty": 10.0,
+  "_slo_comment": "  SLO tier (ttft_slo_ms=1500, slo_penalty=10) for workload comparison; pair with workloads/matrix-<peak>rps-slo1500.jsonl."
+ },
+ "nodes": [
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 0,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX3090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 936,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 1,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX3090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 936,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  },
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 2,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX4090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 1008,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 3,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX4090",
+     "npu_mem": {
+      "mem_size": 24,
+      "mem_bw": 1008,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  },
+  {
+   "num_instances": 2,
+   "cpu_mem": {
+    "mem_size": 128,
+    "mem_bw": 256,
+    "mem_latency": 0
+   },
+   "instances": [
+    {
+     "instance_id": 4,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX5090",
+     "npu_mem": {
+      "mem_size": 32,
+      "mem_bw": 1792,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "prefill",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    },
+    {
+     "instance_id": 5,
+     "model_name": "Qwen/Qwen3-8B",
+     "hardware": "RTX5090",
+     "npu_mem": {
+      "mem_size": 32,
+      "mem_bw": 1792,
+      "mem_latency": 0,
+      "mem_util": 0.9
+     },
+     "pd_type": "decode",
+     "tp_size": 1,
+     "enable_prefix_caching": true
+    }
+   ]
+  }
+ ],
+ "intra_node_link_bw": 1.0,
+ "intra_node_link_latency": 2000,
+ "_comment": "  |  Static-pool twin: one fixed Prefill, no demand-driven resizing (the arena's casr_lp arm)."
+}
