@@ -356,7 +356,8 @@ class CASRController:
                     self.pending_warm_classes[instance_id] = set(decision.warm_classes)
             self.last_lifecycle = self.lifecycle.update(
                 current_ns, snapshot["prefix_states"], schedulers,
-                wanted_override=set(decision.wanted_ids))
+                wanted_override=set(decision.wanted_ids),
+                action=decision.action)
             self.last_resource_snapshot = self.lifecycle.resources.snapshot()
             blocked_ids = {event["instance_id"] for event in self.last_lifecycle
                            if event.get("action") == "resource_reject"}

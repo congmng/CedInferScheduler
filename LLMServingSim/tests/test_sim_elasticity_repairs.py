@@ -135,6 +135,67 @@ class LifecycleCapacityTests(unittest.TestCase):
         life.update(int(50 * 10 ** 9), rows, prefills, wanted_override={0})
         self.assertEqual(prefills[1].admission_state, "ACTIVE")
 
+    def test_the_operator_pool_is_a_floor_after_the_first_tick(self):
+        """With ``scale_on_demand=False`` only an explicit ``-P`` shrinks.
+
+        The evaluator's hold expires after the boot, and the demand branch then
+        recomputed ``desired = min_active`` and shrank the pool back to one
+        worker -- so the next ``+P`` had to boot another 45 s container.
+        Measured 2026-09-24 on the Qwen3 WAN 240 s peak: two workers swapped
+        ACTIVE/WARMING every 45 s, the pool never held three, and elastic came
+        out at 2 206 ms against the always-on pool's 1 759.
+        """
+        life = PrefillLifecycle({
+            "min_active_prefill": 1, "max_active_prefill": 3,
+            "scale_on_demand": False, "warmup_ms": 0, "override_hold_ms": 1000,
+            "prefill_capacity": {0: 63, 1: 45, 2: 59},
+            "resources": {"startup_ms": 0, "reclaim_ms": 0,
+                          "nodes": {str(i): {"gpu_count": 2, "gpu_mem_gb": [24, 24]}
+                                    for i in range(3)}},
+        })
+        prefills = [_Sched(0), _Sched(1, state="INACTIVE"),
+                    _Sched(2, state="INACTIVE")]
+        rows = [{"requested_tokens_ewma": 1250.0, "kv_bytes_per_request": 0.0,
+                 "arrival_rate_ewma": 1.0}]
+        # First tick: the pool is pruned to the declared floor.
+        life.update(0, rows, prefills)
+        self.assertEqual(life.last_wanted, {0})
+        # The evaluator scales out.
+        life.update(10 ** 9, rows, prefills, wanted_override={0, 1}, action="+P")
+        self.assertEqual(life.last_wanted, {0, 1})
+        # Past the hold, with no structural action in force: the worker the
+        # evaluator just paid a boot for must stay.
+        life.update(int(3 * 10 ** 9), rows, prefills)
+        self.assertEqual(life.last_wanted, {0, 1})
+
+    def test_a_scale_out_does_not_evict_the_worker_it_just_brought_up(self):
+        """``+P`` may only add; ``-P`` keeps the right to shrink.
+
+        The evaluator re-issues its wanted set every tick, and the set it
+        computed 45 s ago does not contain the worker that boot just finished.
+        Before this, that newcomer was drained the moment it became ACTIVE:
+        measured 2026-09-24 on the Qwen3 WAN 240 s peak the worker went ACTIVE
+        at 46.1 s, back to WARMING at 46.4 s, and cycled every 45 s -- so a peak
+        five times the boot time still gained nothing.
+        """
+        life = PrefillLifecycle({
+            "min_active_prefill": 1, "max_active_prefill": 4,
+            "warmup_ms": 45000, "override_hold_ms": 1000,
+            "prefill_capacity": {0: 63, 1: 63},
+            "resources": {"startup_ms": 45000,
+                          "nodes": {"0": {"gpu_count": 2, "gpu_mem_gb": [24, 24]}}},
+        })
+        prefills = [_Sched(0, state="ACTIVE"), _Sched(1, state="ACTIVE")]
+        rows = [{"requested_tokens_ewma": 1250.0, "kv_bytes_per_request": 0.0,
+                 "arrival_rate_ewma": 1.0}]
+        # A +P whose suggestion predates worker 1's boot: it must not evict it.
+        life.update(10 ** 9, rows, prefills, wanted_override={0}, action="+P")
+        self.assertEqual(life.last_wanted, {0, 1})
+        # A -P naming only the incumbent still shrinks.
+        life.update(int(2 * 10 ** 9), rows, prefills, wanted_override={0},
+                    action="-P")
+        self.assertEqual(life.last_wanted, {0})
+
 
 class RouterPlanAggregateTests(unittest.TestCase):
     def router(self):

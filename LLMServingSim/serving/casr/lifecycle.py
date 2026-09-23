@@ -22,6 +22,11 @@ class PrefillLifecycle:
         self.warmup_ns = max(0, int(float(config.get("warmup_ms", 0)) * 1_000_000))
         self.resources = ResourceOrchestrator(config.get("resources"))
         self._bootstrapped = False
+        #: Set once the first ``update`` has run.  Only the *first* tick may
+        #: prune the pool down to a recorded/declared set; after that the pool
+        #: an operator is running is the floor and only an explicit ``-P``
+        #: shrinks it (see the ``scale_on_demand`` branch in ``update``).
+        self._pruned_once = False
         self.capacity = {int(key): float(value)
                          for key, value in config.get("prefill_capacity", {}).items()}
         # The pool the deployment was actually running, when the caller knows
@@ -101,7 +106,7 @@ class PrefillLifecycle:
         return max(0.05, limit)
 
     def update(self, current_ns, rows, schedulers, wanted_override=None,
-               backlog_rps: float = 0.0):
+               backlog_rps: float = 0.0, action=None):
         all_schedulers = list(schedulers)
         schedulers = [s for s in all_schedulers if s.pd_type == "prefill"]
         if not schedulers:
@@ -147,6 +152,19 @@ class PrefillLifecycle:
             # three workers (measured 2026-09-15 in the elasticity replay).
             wanted = {int(instance_id) for instance_id in wanted_override}
             wanted &= {scheduler.instance_id for scheduler in schedulers}
+            # A *scale-out* request must not evict what is already up.  The
+            # evaluator re-issues its wanted set every tick, and the set it
+            # computed 45 s ago does not contain the worker that boot has just
+            # brought online -- so the newcomer was drained the moment it
+            # finished warming and the next tick started its boot again.
+            # Measured 2026-09-24 on the Qwen3 WAN 240 s peak: ACTIVE at 46.1 s,
+            # back to WARMING at 46.4 s, cycling every 45 s, and only 0.5 of the
+            # plan's flow ever landing on it -- i.e. a peak five times the boot
+            # time still gained nothing.  ``-P`` keeps its meaning: only a
+            # scale-in request may shrink the pool.
+            if action == "+P":
+                wanted |= {scheduler.instance_id for scheduler in schedulers
+                           if scheduler.admission_state != "INACTIVE"}
             limit = len(schedulers) if self.max_active is None else int(self.max_active)
             if len(wanted) > limit:
                 kept = []
@@ -202,6 +220,23 @@ class PrefillLifecycle:
                 wanted = set(self._override)
             elif self._override:
                 self._override = ()
+            if not self.scale_on_demand and self._pruned_once:
+                # The pool an operator is running is the floor; only an explicit
+                # ``-P`` (a ``wanted_override`` carrying that action) may shrink
+                # it.  Without this, ``desired = min_active`` collapsed the pool
+                # back to one worker on the first tick after the evaluator's
+                # 45 s hold expired, and the next ``+P`` had to boot another
+                # 45 s container -- measured 2026-09-24 on the Qwen3 WAN 240 s
+                # peak, where two workers swapped ACTIVE/WARMING every 45 s and
+                # the pool never held three (elastic 2 206 ms against the
+                # always-on pool's 1 759).  The first tick is exempt so a
+                # recorded pool is still pruned to what it should be.
+                wanted |= {scheduler.instance_id for scheduler in schedulers
+                           if scheduler.admission_state != "INACTIVE"}
+                if self.max_active is not None and len(wanted) > int(self.max_active):
+                    keep = [scheduler.instance_id for scheduler in ranked
+                            if scheduler.instance_id in wanted]
+                    wanted = set(keep[:int(self.max_active)])
         # Keep an acquired worker alive until startup completes.  Otherwise a
         # low-demand tick can immediately cancel a previous scale-out before
         # the new worker becomes eligible for the next plan.
@@ -238,4 +273,5 @@ class PrefillLifecycle:
                     self._warming_until[event.instance_id] = current_ns + startup_ns
                     events.append({"instance_id": event.instance_id, "action": "warm_start"})
         self.last_wanted = set(wanted)
+        self._pruned_once = True
         return tuple(events)
