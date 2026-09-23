@@ -266,6 +266,28 @@ class ObjectiveKnobTests(unittest.TestCase):
         self.assertFalse(off.block_scale_down_when_saturated)
 
 
+class ClusterConfigHygieneTests(unittest.TestCase):
+    """P-15B cluster configs must declare the intra-domain link.
+
+    Without both keys the pair-cost table gives same-node pairs *zero*
+    bandwidth, the router's link-derived price bails out, and the
+    recompute-vs-transfer decision silently reverts to the recorded deployment
+    constants (measured 2026-09-23: 43 of 44 decisions in a light run).  The
+    keys are easy to drop from a copied config, so they are pinned here.
+    """
+
+    def test_p15b_configs_declare_the_intra_link(self):
+        configs = sorted((REPO / "configs/cluster").glob("casr_p15b_*.json"))
+        self.assertTrue(configs, "no P-15B cluster configs found")
+        for path in configs:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(config=path.name):
+                self.assertIn("intra_node_link_bw", raw, path.name)
+                self.assertIn("intra_node_link_latency", raw, path.name)
+                self.assertGreater(float(raw["intra_node_link_bw"]), 0.0, path.name)
+                self.assertGreater(float(raw["intra_node_link_latency"]), 0.0, path.name)
+
+
 class TailPricingTests(unittest.TestCase):
     """The Decode tail term must price *time*, not only occupancy."""
 

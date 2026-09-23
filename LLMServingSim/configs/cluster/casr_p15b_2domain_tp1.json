@@ -202,5 +202,8 @@
       ]
     }
   ],
-  "_comment": "P-15B on RTX4090 + RTX5090 with tp_size=1: the same two domains twice, so a tp1/tp2 pair isolates what the TP bundle changes end to end. Cut down from casr_p15b_three_domain.json."
+  "_comment": "P-15B on RTX4090 + RTX5090 with tp_size=1: the same two domains twice, so a tp1/tp2 pair isolates what the TP bundle changes end to end. Cut down from casr_p15b_three_domain.json.",
+  "intra_node_link_bw": 1.0,
+  "intra_node_link_latency": 2000,
+  "_intra_link_comment": "Intra-domain fabric: 1 GB/s, 2 us.  Without these two keys the pair-cost table gives same-node pairs zero bandwidth, so the router's recompute-vs-transfer price silently falls back to the recorded deployment constants (see 实验数据集与对比基线说明.md 6.15)."
 }

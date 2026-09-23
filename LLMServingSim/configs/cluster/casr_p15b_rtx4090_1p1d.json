@@ -152,5 +152,8 @@
       ]
     }
   ],
-  "_comment": "P-15B (casr/P15B) on the same three-domain topology as casr_real_qwen3_8b_three_domain.json, so the two are directly comparable: same nodes, same links, same instances -- only the model and its KV geometry differ. kv_bytes_per_token is the design's closed form (16960 B = 16.56 KB/token, docs/DSV4-P15B设计.md 5), against 147456 B for Qwen3-8B.  |  Single-domain cut of casr_p15b_three_domain.json (RTX4090 only, 1P+1D): used to check that a real P-15B bundle is consumed end to end before the other three domains land."
+  "_comment": "P-15B (casr/P15B) on the same three-domain topology as casr_real_qwen3_8b_three_domain.json, so the two are directly comparable: same nodes, same links, same instances -- only the model and its KV geometry differ. kv_bytes_per_token is the design's closed form (16960 B = 16.56 KB/token, docs/DSV4-P15B设计.md 5), against 147456 B for Qwen3-8B.  |  Single-domain cut of casr_p15b_three_domain.json (RTX4090 only, 1P+1D): used to check that a real P-15B bundle is consumed end to end before the other three domains land.",
+  "intra_node_link_bw": 1.0,
+  "intra_node_link_latency": 2000,
+  "_intra_link_comment": "Intra-domain fabric: 1 GB/s, 2 us.  Without these two keys the pair-cost table gives same-node pairs zero bandwidth, so the router's recompute-vs-transfer price silently falls back to the recorded deployment constants (see 实验数据集与对比基线说明.md 6.15)."
 }
