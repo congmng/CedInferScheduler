@@ -858,6 +858,60 @@ class TailPricingTests(unittest.TestCase):
                            f"seconds more, not a few percent: {cheap} vs {dear}")
 
 
+class PrefillQueuePricingTests(unittest.TestCase):
+    """A Prefill at its priced capacity must not look free.
+
+    The objective priced only the Decode's queue, so a plan on a saturated pool
+    pinned every producer at 100% and any small capacity error became a growing
+    queue: measured 2026-09-24 on the P-15B WAN environment the pool was at its
+    limit (13.6 offered against 13.9), CASR and the least-loaded baseline placed
+    almost identically, and CASR still queued 3.6 s against the baseline's
+    0.75 s.
+    """
+
+    class Sched:
+        def __init__(self, instance_id, pd_type, service_ms=0.0, waiting=0,
+                     running=0, max_num_seqs=8):
+            self.instance_id = instance_id
+            self.pd_type = pd_type
+            self.service_ms = service_ms
+            self.max_num_seqs = max_num_seqs
+            self.waiting = [None] * waiting
+            self.running = [None] * running
+            self.node_id = 0
+            self.start_npu = 0
+
+    def _cost(self, weight, prefill):
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "prefill_queue_weight": weight,
+            "prefill_service_ms": {prefill.instance_id: prefill.service_ms},
+            "decode_service_ms": {"9": 50.0},
+        }))
+        decode = self.Sched(9, "decode", service_ms=50.0)
+        entry = {"arrival_rate_ewma": 1.0, "requested_tokens": {0: 1024},
+                 "requested_tokens_ewma": {0: 1024.0}}
+        return solver._pair_cost(prefill, decode, "c|out:16-31", entry)
+
+    def test_the_term_is_off_by_default(self):
+        queued = self.Sched(0, "prefill", service_ms=300.0, waiting=8)
+        idle = self.Sched(0, "prefill", service_ms=300.0)
+        self.assertEqual(self._cost(0.0, queued), self._cost(0.0, idle))
+
+    def test_a_queued_prefill_costs_more_than_an_idle_one(self):
+        queued = self.Sched(0, "prefill", service_ms=300.0, waiting=8)
+        idle = self.Sched(0, "prefill", service_ms=300.0)
+        spread = self._cost(1.0, queued) - self._cost(1.0, idle)
+        # 8 waiting on 8 slots => queue fraction 4.0 x 300 ms x work 1.0.
+        self.assertGreater(spread, 0.5)
+
+    def test_the_price_scales_with_the_instance_s_own_step(self):
+        fast = self.Sched(0, "prefill", service_ms=300.0, waiting=8)
+        slow = self.Sched(0, "prefill", service_ms=900.0, waiting=8)
+        self.assertGreater(self._cost(1.0, slow) - self._cost(1.0, fast), 1.0)
+
+
 class DeadlineAwareDecodeTests(unittest.TestCase):
     """The opt-in Decode fallback must rank by drain time, not by occupancy."""
 

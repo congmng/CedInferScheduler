@@ -143,7 +143,9 @@
   "local_prefill_ms_per_1k": 93.0,
   "local_prefill_queue_cap": 3.0,
   "local_prefill_queue_weight": 1.0,
-  "_fabric_comment": "metro fabric: same-host push 0.77 GB/s, cross-host push 0.33 GB/s + 0 ms RTT, local_prefill auto, container start 45 s"
+  "_fabric_comment": "metro fabric: same-host push 0.77 GB/s, cross-host push 0.33 GB/s + 0 ms RTT, local_prefill auto, container start 45 s",
+  "prefill_queue_weight": 10.0,
+  "_prefill_queue_comment": "Prefill-side queue price (10.0).  Without it a producer sitting at exactly its priced capacity looks free, so a saturated plan pins every producer at 100% and the capacity error becomes an unbounded queue.  Measured 2026-09-24: P-15B metro 3674 -> 2395 ms (SLO 59.5% -> 100%), P-15B WAN p50 5894 -> 3927 ms, Qwen3 unchanged."
  },
  "nodes": [
   {

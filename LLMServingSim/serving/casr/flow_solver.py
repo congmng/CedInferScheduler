@@ -81,6 +81,15 @@ class FlowSolverConfig:
     # actually costs.  Units are seconds, the same as every other term in
     # ``c_ijk``.  0 = off (the historical objective).
     tail_weight: float = 0.0
+    #: Prefill-side counterpart of ``tail_weight``: the producer's own queue,
+    #: as a fraction of its slots, converted to the seconds a new request would
+    #: wait behind it (scaled by the class's prompt work).  Without it a
+    #: producer sitting at exactly its priced capacity looks free, so a plan on
+    #: a saturated pool pins every producer at 100% and any small capacity error
+    #: turns into a growing queue -- measured 2026-09-24 on the P-15B WAN
+    #: environment: equal placement, but 3.6 s of queuing against the
+    #: least-loaded baseline's 0.75 s.  0 = off.
+    prefill_queue_weight: float = 0.0
     # -- min-max backlog pricing -------------------------------------------
     # The sum of per-instance overflow (``overflow_penalty``) is minimised by
     # spreading load in proportion to capacity, which under sustained overload
@@ -273,6 +282,7 @@ class FlowSolverConfig:
             utilization_weight=float(raw.get("utilization_weight", 0.0)),
             utilization_segments=max(1, int(raw.get("utilization_segments", 8))),
             tail_weight=float(raw.get("tail_weight", 0.0)),
+            prefill_queue_weight=float(raw.get("prefill_queue_weight", 0.0)),
             max_utilization_weight=float(raw.get("max_utilization_weight", 0.0)),
             backlog_weight=float(raw.get("backlog_weight", 0.0)),
             single_home_below_rps=float(raw.get("single_home_below_rps", 0.0)),
@@ -737,6 +747,23 @@ class CapacityAwareFlowSolver:
             tail = self.config.tail_weight * queue_fraction * decode_step_ms / 1000.0
         if work_ratio is None:
             work_ratio = self._cache_work(class_id, int(prefill.instance_id), entry)
+        # Prefill queue price.  The objective used to price only the *decode*
+        # queue, so a Prefill running at exactly its priced capacity looked
+        # free: nothing in ``c_ijk`` became more expensive as its backlog grew.
+        # On a pool that is at its limit that is the whole difference -- the
+        # offered 13.6 req/s against a 13.9 req/s pool made every plan pin all
+        # three producers at 100%, and the least-loaded baseline (which leaves
+        # margin) beat CASR 3.5 s to 9.2 s on the P-15B WAN environment
+        # (measured 2026-09-24).  Same shape as ``tail``: the queue as a
+        # *fraction* of the instance's slots, converted to the seconds a new
+        # request would wait behind it, scaled by this class's own work.
+        prefill_queue = 0.0
+        if self.config.prefill_queue_weight:
+            prefill_queue = (self.config.prefill_queue_weight
+                             * self._queue_fraction(prefill)
+                             * self._service_ms(prefill,
+                                                self.config.prefill_service_ms)
+                             * work_ratio / 1000.0)
         compute = 0.0
         if self.config.compute_weight:
             # Prefill cost scales with the tokens that are actually computed: a
@@ -751,7 +778,7 @@ class CapacityAwareFlowSolver:
                           * self.decode_work(class_id))
             compute = self.config.compute_weight * service_ms / 1000.0
         cost = (self.config.network_weight * (distance + rtt + transfer) +
-                queue + tail + compute)
+                queue + tail + prefill_queue + compute)
         slo_ms = self.config.class_ttft_slo_ms.get(class_id,
                                                    self.config.ttft_slo_ms)
         if slo_ms > 0 and self._predicted_ttft_ms(
