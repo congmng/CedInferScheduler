@@ -60,6 +60,9 @@ def main() -> int:
     parser.add_argument("--cluster-config", required=True)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--weights", default="0,0.5,1,2,5")
+    parser.add_argument("--knob", default="tail_weight",
+                        choices=["tail_weight", "max_utilization_weight", "backlog_weight"],
+                        help="Which objective knob to sweep.  tail_weight prices the queue a request would meet right now; max_utilization_weight prices the *worst* instance's backlog growth (min-max).")
     parser.add_argument("--out-root", default="/tmp/tail-sweep")
     parser.add_argument("--arm", default="lp", choices=["lp", "greedy"])
     parser.add_argument("--num-reqs", type=int, default=0)
@@ -76,13 +79,13 @@ def main() -> int:
     rows = []
     for raw_weight in args.weights.split(","):
         weight = float(raw_weight)
-        tag = f"tail{weight:g}"
+        tag = f"{args.knob.split("_")[0]}{weight:g}"
         config_path = out_root / f"{tag}.json"
         config = json.loads(json.dumps(base))
-        config["casr"]["tail_weight"] = weight
+        config["casr"][args.knob] = weight
         config_path.write_text(json.dumps(config, indent=1), encoding="utf-8")
         out_csv = out_root / f"{tag}.csv"
-        print(f"== tail_weight={weight:g} ==", flush=True)
+        print(f"== {args.knob}={weight:g} ==", flush=True)
         cmd = [
             sys.executable, "-m", "serving",
             "--cluster-config", str(config_path),
@@ -101,16 +104,16 @@ def main() -> int:
         with (out_root / f"{tag}.log").open("w") as log:
             subprocess.run(cmd, cwd=REPO, check=True, stdout=log, stderr=subprocess.STDOUT)
         summary = summarise(out_csv)
-        summary["tail_weight"] = weight
+        summary[args.knob] = weight
         rows.append(summary)
 
     print()
-    header = (f"{'tail_w':>7}{'mean ms':>10}{'p50':>9}{'p95':>10}"
+    header = (f"{args.knob[:7]:>7}{'mean ms':>10}{'p50':>9}{'p95':>10}"
               f"{'TTFT p50':>10}{'TPOT p50':>10}{'SLO %':>8}   decodes")
     print(header)
     for row in rows:
         attainment = "n/a" if row["attainment"] is None else f"{row['attainment']:.1f}"
-        print(f"{row['tail_weight']:>7g}{row['mean']:>10.0f}{row['p50']:>9.0f}"
+        print(f"{row[args.knob]:>7g}{row['mean']:>10.0f}{row['p50']:>9.0f}"
               f"{row['p95']:>10.0f}{row['ttft_p50']:>10.0f}{row['tpot_p50']:>10.1f}"
               f"{attainment:>8}   {row['decodes']}")
     (out_root / "summary.json").write_text(

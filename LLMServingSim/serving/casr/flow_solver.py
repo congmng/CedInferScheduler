@@ -81,6 +81,43 @@ class FlowSolverConfig:
     # actually costs.  Units are seconds, the same as every other term in
     # ``c_ijk``.  0 = off (the historical objective).
     tail_weight: float = 0.0
+    # -- min-max backlog pricing -------------------------------------------
+    # The sum of per-instance overflow (``overflow_penalty``) is minimised by
+    # spreading load in proportion to capacity, which under sustained overload
+    # leaves the *slowest* instance holding a queue that drains at its own pace:
+    # measured 2026-09-23 on the 30 rps peak, the slowest hundred requests all
+    # sat on the RTX3090 Prefill (884 ms/request, 3x the 5090) with 99% of their
+    # latency spent queueing, and p95 went 18.8 s -> 78-97 s against the
+    # least-loaded baseline.
+    #
+    # ``max_utilization_weight`` adds one auxiliary variable ``z`` with
+    #
+    #     z >= ( load_i / K_i ) x step_i        for every Prefill and Decode
+    #
+    # and prices it: the max is taken not over *utilisation* but over the
+    # instance's **backlog growth**, in seconds of queue added per second of
+    # operation.  Plain utilisation would be minimised by equalising load onto
+    # the slowest card (its K is smaller, so it needs fewer requests to reach
+    # the same fraction); weighting by the step time makes a slow instance cost
+    # what it actually costs.  Linear in the flows, so it stays an LP.
+    #
+    # Because it prices a *max*, it only binds on whoever is worst; the rest of
+    # the objective still decides the spread.  0 = off.
+    max_utilization_weight: float = 0.0
+    # The *sum* of the same per-instance quantity:
+    #
+    #     sum_i ( load_i / K_i ) x step_i        (seconds of backlog per second)
+    #
+    # Measured 2026-09-23: the max version above does not bind on the cohort
+    # that actually ruins the tail.  On the 30 rps peak the worst instance by
+    # this metric is a *Decode* (util 1.76 x 0.278 s = 0.49 s/s) while the
+    # RTX3090 Prefill that holds the slow cohort only reaches 0.32 s/s, so a
+    # max over instances never sees it and the cohort's queue survives at every
+    # weight (0/5/20/100 all leave the slowest hundred on p0).  A sum prices
+    # every instance's queue growth, and for a fixed total load it is minimised
+    # by concentrating on the fastest cards -- the direction the least-loaded
+    # baseline wins with.  0 = off.
+    backlog_weight: float = 0.0
     # A class whose offered load is below this (requests/s) is single-homed:
     # all of its flow is placed on the one Prefill the LP liked best.  A low
     # demand cannot amortise the cold first prefill a second edge costs, and
@@ -229,6 +266,8 @@ class FlowSolverConfig:
             utilization_weight=float(raw.get("utilization_weight", 0.0)),
             utilization_segments=max(1, int(raw.get("utilization_segments", 8))),
             tail_weight=float(raw.get("tail_weight", 0.0)),
+            max_utilization_weight=float(raw.get("max_utilization_weight", 0.0)),
+            backlog_weight=float(raw.get("backlog_weight", 0.0)),
             single_home_below_rps=float(raw.get("single_home_below_rps", 0.0)),
             class_demand_floor_rps=float(raw.get("class_demand_floor_rps", 0.0)),
             capacity_reference_tokens=int(raw.get("capacity_reference_tokens", 1024)),
@@ -793,6 +832,37 @@ class CapacityAwareFlowSolver:
             capacity = max(1e-6, float(capacity))
             total += penalty * max(0.0,
                                    float(link_load.get(link.link_id, 0.0)) / capacity - 1.0)
+        # Min-max twin: the same ``max_i (load_i / K_i) x step_i`` the LP puts
+        # on ``z``, so an incumbent is scored with the objective it was chosen
+        # by (hysteresis and the structural counterfactuals depend on this).
+        if self.config.max_utilization_weight:
+            worst = 0.0
+            for scheduler in prefill:
+                capacity = max(1e-6, float(self.config.prefill_capacity.get(
+                    scheduler.instance_id, float(scheduler.max_num_seqs))))
+                step_s = self._service_ms(scheduler, self.config.prefill_service_ms) / 1000.0
+                worst = max(worst, step_s * float(p_load.get(scheduler.instance_id, 0.0))
+                            / capacity)
+            for scheduler in decode:
+                capacity = max(1e-6, float(self.config.decode_capacity.get(
+                    scheduler.instance_id, float(scheduler.max_num_seqs))))
+                step_s = self._service_ms(scheduler, self.config.decode_service_ms) / 1000.0
+                worst = max(worst, step_s * float(d_load.get(scheduler.instance_id, 0.0))
+                            / capacity)
+            total += self.config.max_utilization_weight * worst
+        if self.config.backlog_weight:
+            for scheduler in prefill:
+                capacity = max(1e-6, float(self.config.prefill_capacity.get(
+                    scheduler.instance_id, float(scheduler.max_num_seqs))))
+                step_s = self._service_ms(scheduler, self.config.prefill_service_ms) / 1000.0
+                total += (self.config.backlog_weight * step_s
+                          * float(p_load.get(scheduler.instance_id, 0.0)) / capacity)
+            for scheduler in decode:
+                capacity = max(1e-6, float(self.config.decode_capacity.get(
+                    scheduler.instance_id, float(scheduler.max_num_seqs))))
+                step_s = self._service_ms(scheduler, self.config.decode_service_ms) / 1000.0
+                total += (self.config.backlog_weight * step_s
+                          * float(d_load.get(scheduler.instance_id, 0.0)) / capacity)
         return total
 
     def plan_objective(self, plan, rows, prefill, decode, work_overrides=None):
@@ -910,6 +980,8 @@ class CapacityAwareFlowSolver:
                             "compute_weight": self.config.compute_weight,
             "queue_weight": self.config.queue_weight,
             "tail_weight": self.config.tail_weight,
+            "max_utilization_weight": self.config.max_utilization_weight,
+            "backlog_weight": self.config.backlog_weight,
                             "capped_classes": len(self._last_capped),
                             "ttft_slo_ms": self.config.ttft_slo_ms,
                             "slo_penalty": self.config.slo_penalty,
@@ -980,6 +1052,32 @@ class CapacityAwareFlowSolver:
                            for class_id in work for p in prefill for d in decode
                            if link.carries(p.instance_id, d.instance_id)) / link_cap
                        <= 1.0 + link_slack[link.link_id])
+        # Min-max backlog: ``z`` is bounded below by every instance's (load /
+        # capacity) x step_time and priced once, so the LP flattens the *worst*
+        # instance's queue growth instead of only its sum.
+        backlog = None
+        if self.config.max_utilization_weight:
+            backlog = solver.NumVar(0.0, solver.infinity(), "z_backlog")
+            for p_sched in prefill:
+                cap = max(1e-6, self.config.prefill_capacity.get(
+                    p_sched.instance_id, float(p_sched.max_num_seqs)))
+                step_s = self._service_ms(p_sched, self.config.prefill_service_ms) / 1000.0
+                if step_s <= 0.0:
+                    continue
+                solver.Add(backlog >= step_s * sum(
+                    flows[class_id, p_sched.instance_id, d.instance_id]
+                    * p_work[p_sched.instance_id, class_id]
+                    for class_id in work for d in decode) / cap)
+            for d_sched in decode:
+                cap = max(1e-6, self.config.decode_capacity.get(
+                    d_sched.instance_id, float(d_sched.max_num_seqs)))
+                step_s = self._service_ms(d_sched, self.config.decode_service_ms) / 1000.0
+                if step_s <= 0.0:
+                    continue
+                solver.Add(backlog >= step_s * sum(
+                    flows[class_id, p.instance_id, d_sched.instance_id]
+                    * self.decode_work(class_id)
+                    for class_id in work for p in prefill) / cap)
         objective = solver.Objective()
         for (class_id, p_id, d_id), variable in flows.items():
             p_sched = next(item for item in prefill if item.instance_id == p_id)
@@ -1008,6 +1106,24 @@ class CapacityAwareFlowSolver:
             objective.SetCoefficient(variable, coefficient)
         for variable in (*p_slack.values(), *d_slack.values(), *link_slack.values()):
             objective.SetCoefficient(variable, self.config.overflow_penalty)
+        if backlog is not None:
+            objective.SetCoefficient(backlog, self.config.max_utilization_weight)
+        if self.config.backlog_weight:
+            # Sum of per-instance backlog growth: one linear coefficient per
+            # flow, so no extra variable is needed.
+            for (class_id, p_id, d_id), variable in flows.items():
+                p_sched = next(item for item in prefill if item.instance_id == p_id)
+                d_sched = next(item for item in decode if item.instance_id == d_id)
+                p_cap = max(1e-6, self.config.prefill_capacity.get(
+                    p_id, float(p_sched.max_num_seqs)))
+                d_cap = max(1e-6, self.config.decode_capacity.get(
+                    d_id, float(d_sched.max_num_seqs)))
+                p_step = self._service_ms(p_sched, self.config.prefill_service_ms) / 1000.0
+                d_step = self._service_ms(d_sched, self.config.decode_service_ms) / 1000.0
+                coefficient = (p_step * p_work[p_id, class_id] / p_cap
+                               + d_step * self.decode_work(class_id) / d_cap)
+                objective.SetCoefficient(
+                    variable, self.config.backlog_weight * coefficient)
         objective.SetMinimization()
         if solver.Solve() != pywraplp.Solver.OPTIMAL:
             raise RuntimeError("CASR LP did not find an optimal solution")
@@ -1046,6 +1162,8 @@ class CapacityAwareFlowSolver:
             "compute_weight": self.config.compute_weight,
             "queue_weight": self.config.queue_weight,
             "tail_weight": self.config.tail_weight,
+            "max_utilization_weight": self.config.max_utilization_weight,
+            "backlog_weight": self.config.backlog_weight,
             "work": self._work_diagnostics(p_work),
             "single_homed_classes": self._last_single_homed,
             "capped_classes": len(self._last_capped),
