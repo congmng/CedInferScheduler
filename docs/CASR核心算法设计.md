@@ -1,5 +1,8 @@
 # CASR 核心算法设计
 
+> **量化版本**：本文讲「为什么这样设计」；每条公式的实际形式、每个参数的取值与来源、
+> 以及用 LP 诊断工具现算出来的行为表，都在 [CASR算法量化设计.md](CASR算法量化设计.md)。
+
 ## 1. 目标与范围
 
 CASR（Cache-Aware Split-Request）面向 Prefill/Decode 分离的 LLM serving 集群，
