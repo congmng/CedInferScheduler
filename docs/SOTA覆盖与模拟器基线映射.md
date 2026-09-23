@@ -8,6 +8,24 @@
 
 ## 1 路线划分与覆盖情况
 
+先把"近一年"具体化到**系统级**（时间取公开时间，写作时需再核对 venue/版本——
+本项目比较的是**机制**，不是复现某个 commit）：
+
+| 系统（公开时间） | 它解决的调度问题 | 我们采样的机制 | 我们的对照臂 |
+|---|---|---|---|
+| DistServe（2024） | P/D 解耦 + 按 SLO/goodput 定 P:D 配比 | SLO 约束下的容量分配 | 无直接臂；`casr_plan3`/`casr_static` 是它的"固定池"参照 |
+| Splitwise（2024） | 机器级 prompt/decode 分池 | 分池 + 阶段迁移 | 同上（固定池） |
+| SGLang / RadixAttention（2024–2025） | 前缀复用 + cache-aware 路由 | 最长前缀匹配优先、忙则溢出 | **`cache_aware`**（与真机 `_pick_cache_aware` 同语义） |
+| Mooncake / KVCache-centric（2025） | 以 KV 为中心的数据面 + transfer engine | 按 KV 字节与链路占用定价 producer | **`kv_aware`** |
+| NetKV 类 KV-aware decode 选择 | P 固定后按 queue/网络/KV 选 D | 网络+队列感知的 D 选择 | `_decode_cost_select`（CASR 内部；非独立臂） |
+| LMCache / NIXL（2024–2025） | KV 存取与传输 | 逐请求"搬 vs 本地重算" | 所有臂共享的 `local_prefill: auto` |
+| DOPD 类动态 P/D autoscaling | 按需求调整 P/D 数量 | 需求/利用率阈值扩容 | `casr_elastic`（规则是反事实收益，见 §1 表格 R5） |
+| Llumnix（2024） | 实例内请求迁移 | 迁移在途请求 | **未实现** |
+| ServerlessLLM（2024） | 快速 checkpoint 加载/启动 | 缩短实例启动 | 只做了启动成本建模（`startup_ms`，6.25 用 46 次真机重启标定） |
+| MemServe（2024）/ TetriInfer（2024）/ Sarathi-Serve（2024） | 前缀感知调度、chunked prefill | chunked prefill、前缀亲和 | chunked prefill 在时间线里（`--max-num-batched-tokens`）；前缀亲和见 `cache_aware` |
+| PrfaaS 类跨 DC prefill 卸载（2025） | 跨数据中心 prefill + 带宽/缓存感知 | 跨域阈值与 P/D 比例调整 | WAN 环境上的全部臂（阈值搜索本身未单独实现） |
+| NVIDIA Dynamo（2025） | worker/router/传输组件化平台 | 可插拔编排底座 | 只作底座（`PrefillLifecycle`/`ReconfigExecutor`） |
+
 | # | 路线（代表系统） | 该路线的核心机制 | 我们的对照臂 | 覆盖度 |
 |---|---|---|---|---|
 | R1 | **P/D 解耦与配比**（DistServe、Splitwise 一类的分离式服务） | 把 prefill 与 decode 放到不同实例，按 TTFT/TPOT 预算与 goodput 定 P:D 比例 | `static`（固定池）、`casr_plan3`（等容量固定池）、`casr_static`（单 worker） | **部分**：我们比的是同一个池上的*放置*与*是否重构*；**没有**实现"按 SLO 搜 P:D 比例"的配比搜索 |
