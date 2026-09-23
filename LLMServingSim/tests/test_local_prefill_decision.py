@@ -52,6 +52,17 @@ def router(**options):
     instance.decode_rr_counter = 0
     instance.prefill_service_ms = {int(k): float(v) for k, v in
                                    (options.get("prefill_service_ms") or {}).items()}
+    # Link-derived pricing (2026-09-23): the decision should come from the
+    # cluster's own bandwidth/KV model rather than the deployment's recorded
+    # ms-per-1k-token constants.
+    instance.link_derived_pricing = bool(options.get("link_derived_pricing", True))
+    instance.kv_bytes_per_token = float(options.get("kv_bytes_per_token", 0.0))
+    instance.capacity_reference_tokens = float(options.get("capacity_reference_tokens", 1024))
+    instance.pair_bandwidth = {(int(p), int(d)): float(bandwidth)
+                               for (p, d), bandwidth in (options.get("pair_bandwidth") or {}).items()}
+    instance.pair_rtt_ms = {(int(p), int(d)): float(rtt)
+                            for (p, d), rtt in (options.get("pair_rtt_ms") or {}).items()}
+    instance.prefill_schedulers = list(options.get("prefill_schedulers") or ())
     instance.cost_weights = dict(options.get("weights") or {})
     instance.pd_link = None
     return instance
@@ -196,3 +207,63 @@ class OccupancyWeightTests(unittest.TestCase):
         candidates = [_Sched(0), _Sched(10)]
         self.assertEqual(instance._occupancy_weights(candidates, {0: 0.4, 10: 0.6}, 0),
                          {0: 0.4, 10: 0.6})
+
+
+class LinkDerivedPricingTests(unittest.TestCase):
+    """The recompute-vs-transfer choice must follow the cluster's own numbers.
+
+    Regression guard for the 2026-09-23 audit: the constants (93 / 585 / 1351 ms
+    per 1k tokens) describe the *deployment* -- Qwen3-8B's 147 KB/token over a
+    0.26 GB/s cross-domain budget.  Reused unchanged on a simulated cluster
+    they answer "recompute" for every model regardless of KV size, so the whole
+    "compressed KV makes moving it worthwhile" axis cannot appear.
+    """
+
+    #: The cross-domain producer budget measured on the real fabric.
+    CROSS_BW = 260_000_000.0
+    PREFILL_MS = {4: 290.9}          # a 5090 Prefill step
+
+    def _decide(self, kv_bytes_per_token, link_derived=True, tokens=1250):
+        prefill = _Sched(4, node_id=2)
+        decode = _Sched(5, node_id=4)
+
+        class _Producer(_Sched):
+            pass
+
+        instance = router(
+            link_derived_pricing=link_derived,
+            kv_bytes_per_token=kv_bytes_per_token,
+            prefill_service_ms=self.PREFILL_MS,
+            prefill_schedulers=[_Producer(4, node_id=4), _Producer(5, node_id=4)],
+            pair_bandwidth={(4, 5): self.CROSS_BW},
+            pair_rtt_ms={(4, 5): 48.0},
+            local_prefill_queue_weight=0.0,
+        )
+        return instance.kv_exchange_decision(prefill, decode, tokens, 0)
+
+    def test_compressed_kv_is_worth_moving(self):
+        use_local, local_ms, transfer_ms = self._decide(16_960.0)      # P-15B
+        self.assertFalse(use_local, f"expected transfer: {local_ms} vs {transfer_ms}")
+        self.assertAlmostEqual(transfer_ms, 21_200_000.0 / self.CROSS_BW * 1000 + 48.0,
+                               places=4)
+        self.assertAlmostEqual(local_ms, 290.9 * (1250 / 1024), places=4)
+
+    def test_fat_kv_prefers_recomputing_locally(self):
+        use_local, local_ms, transfer_ms = self._decide(147_456.0)     # Qwen3-8B
+        self.assertTrue(use_local, f"expected local: {local_ms} vs {transfer_ms}")
+        self.assertGreater(transfer_ms, local_ms)
+
+    def test_without_the_link_model_the_recorded_constants_still_apply(self):
+        # No bandwidth table: the decision must fall back, not guess.
+        prefill, decode = _Sched(4, node_id=2), _Sched(5, node_id=4)
+        instance = router(local_prefill_queue_weight=0.0)
+        use_local, local_ms, transfer_ms = instance.kv_exchange_decision(
+            prefill, decode, 1250, 0)
+        self.assertTrue(use_local)
+        self.assertAlmostEqual(local_ms, 93.0 * 1.25, places=4)
+        self.assertAlmostEqual(transfer_ms, 48.0 + 1351.0 * 1.25, places=4)
+
+    def test_opt_out_restores_the_recorded_behaviour(self):
+        use_local, local_ms, _ = self._decide(16_960.0, link_derived=False)
+        self.assertTrue(use_local, "opt-out must reproduce the old answer")
+        self.assertAlmostEqual(local_ms, 93.0 * 1.25, places=4)

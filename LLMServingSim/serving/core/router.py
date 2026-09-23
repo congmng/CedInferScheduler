@@ -147,6 +147,7 @@ class Router:
         # tells this router how much KV is already queued on a candidate pair.
         self.pd_link = None
         self.pair_rtt_ms = {}
+        self.pair_bandwidth = {}
         for key, value in (options.get("pair_costs") or {}).items():
             if isinstance(key, str):
                 source, target = (int(part) for part in
@@ -155,6 +156,8 @@ class Router:
                 source, target = int(key[0]), int(key[1])
             self.pair_rtt_ms[(source, target)] = float(
                 (value or {}).get("rtt_ms", 0.0))
+            self.pair_bandwidth[(source, target)] = float(
+                (value or {}).get("bandwidth_bytes_per_s", 0.0) or 0.0)
         # The fast router's own load denominator (``_pick_load``), which is the
         # deployment's ``capacity`` field rather than the LP's solver capacity.
         # Prefer it when the config carries it so a replay picks the same
@@ -170,6 +173,19 @@ class Router:
         self.transfer_fixed_ms_cross = float(
             options.get("transfer_fixed_ms_cross", 48.0) or 48.0)
         self.kv_bytes_per_token = float(options.get("kv_bytes_per_token", 0.0) or 0.0)
+        # Price moving KV from the *cluster's own* link model instead of the
+        # deployment's measured constants.  The hardcoded defaults (93 ms of
+        # local recompute per 1k tokens, 585 / 1351 ms to move them) describe
+        # the real fabric with Qwen3-8B's 147 KB/token; on a simulated cluster
+        # with a different KV size or a different link they are simply wrong in
+        # direction: P-15B's 16.96 KB/token over this fabric costs ~10 ms to
+        # move against ~290 ms to recompute, so the decision should be
+        # "transfer", while the old constants always said "recompute".  Turning
+        # this off restores the recorded behaviour for A/B.
+        self.link_derived_pricing = bool(
+            options.get("link_derived_pricing", True))
+        self.capacity_reference_tokens = float(
+            options.get("capacity_reference_tokens", 1024) or 1024)
         # Producer-side KV push ceiling (GB/s), the deployment's measured
         # NixlConnector rate.  It is what the KV-aware arm scores against.
         self.kv_egress_gbps = float(options.get("kv_egress_gbps", 0.0) or 0.0)
@@ -781,17 +797,31 @@ class Router:
             return False, 0.0, 0.0
         thousands = float(tokens) / 1000.0
         same_node = int(getattr(prefill, "node_id", -1)) == int(getattr(decode, "node_id", -2))
-        if same_node:
-            transfer_ms = self.transfer_ms_per_1k_local * thousands
+        derived = (self._link_derived_terms(prefill, decode, tokens)
+                   if getattr(self, "link_derived_pricing", False) else None)
+        if derived is not None:
+            local_service_ms, transfer_ms = derived
         else:
-            transfer_ms = (self.transfer_fixed_ms_cross
-                           + self.transfer_ms_per_1k_cross * thousands)
+            if same_node:
+                transfer_ms = self.transfer_ms_per_1k_local * thousands
+            else:
+                transfer_ms = (self.transfer_fixed_ms_cross
+                               + self.transfer_ms_per_1k_cross * thousands)
+            local_service_ms = self.local_prefill_ms_per_1k * thousands
         link = getattr(self, "pd_link", None)
         if link is not None and now_ns:
             transfer_ms += float(link.pending_ns(
                 int(getattr(prefill, "instance_id", -1)), int(now_ns))) / 1e6
-        local_service_ms = self.local_prefill_ms_per_1k * thousands
         local_ms = local_service_ms
+        if os.environ.get("LOCAL_PREFILL_DEBUG"):
+            print(f"[exchange] p{getattr(prefill, 'instance_id', '?')}"
+                  f"(node {getattr(prefill, 'node_id', '?')}) -> "
+                  f"d{getattr(decode, 'instance_id', '?')}"
+                  f"(node {getattr(decode, 'node_id', '?')}) tokens={tokens} "
+                  f"model={'link' if derived is not None else 'constants'} "
+                  f"local={local_ms:.1f}ms transfer={transfer_ms:.1f}ms "
+                  f"-> {'local' if local_ms < transfer_ms else 'transfer'}",
+                  flush=True)
         if self.local_prefill_queue_weight:
             budget = max(1.0, float(getattr(decode, "max_num_seqs", 1) or 1))
             inflight = float(len(getattr(decode, "running", ()) or ())
@@ -802,6 +832,60 @@ class Router:
                                                  amplification)
             local_ms += self.local_prefill_queue_weight * externality
         return local_ms < transfer_ms, local_ms, transfer_ms
+
+    def _link_derived_terms(self, prefill, decode, tokens):
+        """``(local_ms, transfer_ms)`` from the cluster's own numbers, or None.
+
+        Transfer = the request's KV over the pair's measured bandwidth plus the
+        pair's RTT; local recompute = this node's own Prefill step for a prompt
+        of this length.  Both come from the same tables the solver prices with
+        (``pair_costs`` / ``prefill_service_ms`` / ``kv_bytes_per_token``), so
+        the fast router and the plan cannot disagree about which way is
+        cheaper.  Returns ``None`` when the config does not carry what is
+        needed, which keeps the recorded constants as the fallback.
+        """
+        if float(getattr(self, "kv_bytes_per_token", 0.0) or 0.0) <= 0.0:
+            return None
+        pair = (int(getattr(prefill, "instance_id", -1)),
+                int(getattr(decode, "instance_id", -2)))
+        bandwidth = getattr(self, "pair_bandwidth", {}).get(pair, 0.0)
+        if bandwidth <= 0.0:
+            return None
+        kv_bytes = float(tokens) * self.kv_bytes_per_token
+        transfer_ms = (kv_bytes / bandwidth * 1000.0
+                       + getattr(self, "pair_rtt_ms", {}).get(pair, 0.0))
+        local_service_ms = self._local_prefill_ms(decode, tokens)
+        if local_service_ms is None:
+            return None
+        return local_service_ms, transfer_ms
+
+    def _local_prefill_ms(self, decode, tokens):
+        """What recomputing this prompt costs on the Decode's own node.
+
+        The local path runs the Prefill leg on the Decode's node, so the price
+        is that node's Prefill step (the sibling Prefill's measured service
+        time) scaled by the prompt length.  Without a sibling the cheapest
+        measured Prefill stands in, and with no measurements at all the caller
+        falls back to the recorded constants.
+        """
+        service_table = getattr(self, "prefill_service_ms", {}) or {}
+        if not service_table:
+            return None
+        node_id = getattr(decode, "node_id", None)
+        step_ms = None
+        for scheduler in (self.prefill_schedulers or ()):
+            if node_id is not None and getattr(scheduler, "node_id", None) == node_id:
+                step_ms = service_table.get(int(scheduler.instance_id))
+                if step_ms:
+                    break
+        if not step_ms:
+            candidates = [value for value in service_table.values() if value]
+            if not candidates:
+                return None
+            step_ms = min(candidates)
+        reference = float(getattr(self, "capacity_reference_tokens", 1024) or 1024)
+        work = max(1.0, float(tokens) / max(1.0, reference))
+        return float(step_ms) * work
 
     def _decode_instance_id_for(self, request, current_time_ns):
         """Decode instance the arriving request is paired with, or ``None``.
