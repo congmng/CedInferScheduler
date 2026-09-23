@@ -558,7 +558,7 @@ class CapacityAwareFlowSolver:
         the most the pool could possibly serve for this offer -- if even that
         exceeds the pool's capacity the plan is structurally infeasible, and
         the caller can degrade deliberately instead of letting the LP pick an
-        arbitrary vertex (see ``CASRController._clamp_demand_to_capacity``).
+        arbitrary vertex (see ``CASRController._clamped_rows``).
         """
         grouped, work = self._aggregate_rows(rows, prefill)
         total = 0.0

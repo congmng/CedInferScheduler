@@ -35,7 +35,7 @@ class CASRController:
         #: Clamp the offered rate to what the pool can serve before solving.
         #: On by default: above capacity the LP's choice of vertex is arbitrary
         #: and can single-home a peak onto the slowest worker (see
-        #: ``_clamp_demand_to_capacity``).  ``demand_capacity_clamp: false``
+        #: ``_clamped_rows``).  ``demand_capacity_clamp: false``
         #: restores the raw behaviour for A/B.
         self.demand_capacity_clamp = bool(
             (policy or {}).get("demand_capacity_clamp", True))
