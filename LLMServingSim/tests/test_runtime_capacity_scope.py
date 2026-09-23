@@ -478,10 +478,24 @@ class PromptLengthPricingTests(unittest.TestCase):
         config = self._config()
         self.resolve(config, self.instances, verbose=False)
         solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(config))
+        # The published period curve is the authority: a prompt past the first
+        # chunk boundary pays for a second step, so 1250 tokens is ~1.40
+        # reference units rather than the token ratio's 1.22.
         self.assertAlmostEqual(solver._prefill_length_work(1024, 4), 1.0,
-                               places=4)
-        self.assertAlmostEqual(solver._prefill_length_work(1250, 4),
-                               1250 / 1024, places=4)
+                               delta=1e-3)
+        self.assertAlmostEqual(solver._prefill_length_work(1250, 4), 1.40,
+                               delta=0.05)
+        curve = solver.config.prefill_period_ms[4]
+        self.assertGreater(curve[1025], curve[1024],
+                           "the curve must step at the chunk boundary")
+        # With only the token ceiling (no measured curve) it is the linear
+        # ratio, which is what 53 of the 59 configs used to fall back to.
+        ceiling_only = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
+            {"capacity_reference_tokens": 1024, "decode_reference_tokens": 16,
+             "prefill_capacity": {"4": 17.2},
+             "prefill_tokens_per_s": {"4": 17611.0}}))
+        self.assertAlmostEqual(ceiling_only._prefill_length_work(1250, 4),
+                               1250 / 1024, delta=1e-3)
         # Without the ceiling the same call silently returns 1.0, which is the
         # shape that hid the defect for every three-domain config.
         bare = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
@@ -511,6 +525,137 @@ class PromptLengthPricingTests(unittest.TestCase):
         self.assertAlmostEqual(solver._requested_tokens(entry, 4), 1250.0)
         self.assertAlmostEqual(solver._prefill_length_work(1250.0, 4),
                                1250 / 1024, delta=2e-3)
+
+
+class PrefillPeriodCalibrationTests(unittest.TestCase):
+    """The priced Prefill capacity must be the rate the pair executes.
+
+    The layer charge is exact (the trace generator and ``step_cost_ns`` agree
+    to <0.1%), but a serving pair pays a per-step cost the profile does not
+    time.  Measured 2026-09-23 with a saturated 1P1D probe (64 x 1024-token
+    prompts): periods 204.3 / 121.2 / 73.6 ms on the 3090 / 4090 / 5090
+    against charges of 164.9 / 89.7 / 58.1.  Pricing the bare charge overstated
+    the 5090 by 27% and the plan then loaded it to 1.5x what it executes.
+    """
+
+    def setUp(self):
+        _needs_pandas()
+        self._cwd = pathlib.Path.cwd()
+        os.chdir(REPO / "astra-sim")
+        self.addCleanup(os.chdir, self._cwd)
+        from serving.core.hw_service import rescale_capacities
+        self.rescale = rescale_capacities
+        self.instances = [
+            {"instance_id": 0, "hardware": "RTX3090", "model_name": "casr/P15B",
+             "pd_type": "prefill", "tp_size": 1},
+            {"instance_id": 2, "hardware": "RTX4090", "model_name": "casr/P15B",
+             "pd_type": "prefill", "tp_size": 1},
+            {"instance_id": 4, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "pd_type": "prefill", "tp_size": 1},
+            {"instance_id": 5, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "pd_type": "decode", "tp_size": 1},
+        ]
+
+    def test_capacity_matches_the_executed_period(self):
+        config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024,
+                  "max_num_batched_tokens": 1024}
+        prefill, _ = self.rescale(config, self.instances, verbose=False)
+        # Reference request = one 1024-token chunk, i.e. exactly the probe.
+        self.assertAlmostEqual(prefill[4], 1000.0 / 73.6, delta=0.15)
+        self.assertAlmostEqual(prefill[2], 1000.0 / 121.2, delta=0.15)
+        self.assertAlmostEqual(prefill[0], 1000.0 / 204.3, delta=0.15)
+        # And the ordering is still the profile's.
+        self.assertLess(prefill[0], prefill[2])
+        self.assertLess(prefill[2], prefill[4])
+
+    def test_a_longer_prompt_pays_for_its_extra_step(self):
+        from serving.core.hw_service import prefill_period_ms
+        config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024,
+                  "max_num_batched_tokens": 1024}
+        self.rescale(config, self.instances, verbose=False)
+        curve = config["prefill_period_ms"]["4"]
+        # The curve steps at the chunk boundary and keeps growing past it.
+        self.assertLess(curve["1024"], curve["1025"])
+        self.assertLess(curve["1025"], curve["2048"])
+        # It reproduces the measured periods at the anchors a run hits.
+        self.assertAlmostEqual(curve["1024"], 73.64, delta=0.2)
+        self.assertAlmostEqual(curve["2048"], 171.4, delta=1.0)
+        # 1250 tokens is a second step, not 1.22 reference units.
+        ratio = prefill_period_ms("RTX5090", "casr/P15B", tp=1, tokens=1250,
+                                  reference=1024, chunk=1024) / curve["1024"]
+        self.assertGreater(ratio, 1.35)
+
+
+class InfeasibleOfferTests(unittest.TestCase):
+    """Above capacity the plan must degrade *deliberately*.
+
+    Measured 2026-09-23 (32 rps Qwen3-8B, structurally infeasible: 33.2
+    reference units offered against a 27.2 pool): the LP's distribution is flat
+    in the excess, so it put 68% of 977 requests on the *slowest* Prefill.
+    Scaling the offer to the servable level keeps the shape and makes the
+    problem feasible, so each worker lands near its own capacity.
+    """
+
+    def setUp(self):
+        _needs_pandas()
+        from serving.casr.controller import CASRController
+        self.controller = CASRController(1_000_000_000, policy={
+            "solver": "greedy",
+            "prefill_capacity": {"0": 4.0, "1": 12.0},
+            "decode_capacity": {"2": 8.0, "3": 8.0},
+            "capacity_reference_tokens": 1024,
+        })
+
+    class Sched:
+        def __init__(self, instance_id, pd_type):
+            self.instance_id = instance_id
+            self.pd_type = pd_type
+            self.node_id = 0
+            self.start_npu = 0
+            self.admission_state = "ACTIVE"
+            self.running = []
+            self.waiting = []
+            self.max_num_seqs = 8
+            self.resource_gpu_ids = ()
+            self.resource_mem_gb = 0.0
+            self.accepts_new_requests = True
+
+        def set_admission_state(self, state):
+            self.admission_state = state
+
+    def _prefills(self):
+        return [self.Sched(0, "prefill"), self.Sched(1, "prefill")]
+
+    def test_an_offer_above_capacity_is_scaled_to_the_servable_level(self):
+        rows = [{"class_id": "c", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 100.0, "requested_tokens_ewma": 1024.0,
+                 "requested_tokens": 1024.0, "kv_bytes_per_request": 0.0}]
+        clamped, scale = self.controller._clamped_rows(rows, self._prefills())
+        # Pool = min(16 prefill, 16 decode) reference units against 100 offered.
+        self.assertAlmostEqual(scale, 16.0 / 100.0, places=4)
+        self.assertAlmostEqual(clamped[0]["arrival_rate_ewma"], 16.0, places=4)
+        # The caller's snapshot keeps the *offered* number, so the state log and
+        # the next tick both see the truth.
+        self.assertEqual(rows[0]["arrival_rate_ewma"], 100.0)
+        self.assertEqual(self.controller.last_demand_clamp["scale"], scale)
+
+    def test_an_offer_inside_capacity_is_left_alone(self):
+        rows = [{"class_id": "c", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 6.0, "requested_tokens_ewma": 1024.0,
+                 "requested_tokens": 1024.0, "kv_bytes_per_request": 0.0}]
+        clamped, scale = self.controller._clamped_rows(rows, self._prefills())
+        self.assertEqual(scale, 1.0)
+        self.assertIs(clamped, rows)
+        self.assertEqual(self.controller.last_demand_clamp["scale"], 1.0)
+
+    def test_the_clamp_can_be_switched_off(self):
+        self.controller.demand_capacity_clamp = False
+        rows = [{"class_id": "c", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 100.0, "requested_tokens_ewma": 1024.0,
+                 "requested_tokens": 1024.0, "kv_bytes_per_request": 0.0}]
+        clamped, scale = self.controller._clamped_rows(rows, self._prefills())
+        self.assertEqual(scale, 1.0)
+        self.assertIs(clamped, rows)
 
 
 class ClusterConfigHygieneTests(unittest.TestCase):

@@ -45,16 +45,119 @@ from .trace_generator import (_layer_types, _load_architecture, _load_perf_db,
 from .utils import get_config
 
 
-def attention_step_ns(db, tp, config, architecture, tokens):
+#: Per-card overhead a *pair* pays on top of the profiled Prefill step, in ms.
+#: The layer-wise charge is exact -- ``step_cost_ns`` and the trace generator
+#: agree to <0.1% at every prompt length -- but a serving pair's realised
+#: period is the charge plus a per-request cost the layer profile does not time:
+#: the P/D handoff, the Decode's own first step, and scheduler/host bookkeeping.
+#: Measured 2026-09-23 with a saturated 1P1D probe (64 x 1024-token prompts,
+#: ``max-num-batched-tokens 1024``, one P and one D on the same card), comparing
+#: the steady-state TTFT period against the charge:
+#:
+#:   card      charge(1024)   period   overhead
+#:   RTX5090      58.14 ms    73.6 ms    15.5 ms
+#:   RTX4090      89.74 ms   121.2 ms    31.5 ms
+#:   RTX3090     164.89 ms   204.3 ms    39.4 ms
+#:
+#: It is per card, and not a constant fraction of the charge, for the same
+#: reason ``DECODE_STEP_SCALE_BY_HARDWARE`` is: the 3090's Decode step is 2.7x
+#: the 5090's (14.96 vs 5.64 ms) while its Prefill is 2.8x, and the two do not
+#: scale the same way.  This is a *capacity* input only -- ``step_cost_ns``
+#: keeps pricing the pure layer model, so card ranking still comes from the
+#: profile.
+#:
+#: Without it the plan priced one 5090 at 17.2 reference req/s (14.1 requests/s
+#: of 1250-token prompts) against an executed 9.2, so it overloaded the fast
+#: worker by ~1.5x and the peak queued on it (measured 2026-09-23, the 16 rps
+#: P-15B cell: plan 98% of capacity, execution ~8.6 of 9.2 req/s, TTFT p50
+#: 8.7 s of pure queuing).
+PREFILL_PIPELINE_OVERHEAD_MS_BY_HARDWARE = {
+    "RTX5090": 15.5,
+    "RTX4090": 31.5,
+    "RTX3090": 39.4,
+}
+
+#: Overhead for a card with no measurement, in ms.  Mid-table on purpose: a
+#: card priced without any overhead looks ~27% faster than it runs, which is
+#: the failure this table exists to remove.  Measure it with
+#: ``tests/probe_prefill_pipeline.py`` and add the entry.
+PREFILL_PIPELINE_OVERHEAD_MS = 25.0
+
+
+def prefill_pipeline_overhead_ms(hardware):
+    """Per-request pair overhead for ``hardware``, in ms (0.0 to disable)."""
+    return float(PREFILL_PIPELINE_OVERHEAD_MS_BY_HARDWARE.get(
+        hardware, PREFILL_PIPELINE_OVERHEAD_MS))
+
+
+def prefill_period_ms(hardware, model, tp=1, tokens=1024, reference=1024,
+                      chunk=None, variant=None):
+    """Executed pair period for one ``tokens``-token prompt, in ms.
+
+    ``charge x chunks + overhead x chunks``: the layer charge is exact (the
+    trace generator and ``step_cost_ns`` agree to <0.1%), and every chunk-step
+    pays the per-step overhead measured in
+    ``PREFILL_PIPELINE_OVERHEAD_MS_BY_HARDWARE``.  This is the quantity the plan
+    has to price -- pricing the bare charge overstates a 5090 by 27% at the
+    reference length and by 47% at 1250 tokens (measured 2026-09-23: period
+    73.6 / 106.7 ms against charges of 58.1 / 72.2).
+    """
+    chunk = max(1, int(chunk or reference or tokens or 1))
+    steps = max(1, -(-int(tokens) // chunk))
+    charge = prefill_charge_ns(hardware, model, tp=tp, tokens=tokens,
+                               chunk=chunk, variant=variant) / 1e6
+    return charge + prefill_pipeline_overhead_ms(hardware) * steps
+
+
+#: Prompt lengths (as multiples of ``capacity_reference_tokens``) at which the
+#: period curve is published to the solver.  ``1.0`` and ``1.0009`` straddle the
+#: first chunk boundary, which is where the curve steps: a prompt one token
+#: longer than the chunk needs a second step and pays the overhead again.
+PREFILL_PERIOD_ANCHOR_RATIOS = (1.0, 1.0009, 1.25, 1.5, 2.0, 4.0)
+
+
+def prefill_charge_ns(hardware, model, tp=1, tokens=1024, chunk=None,
+                      variant=None):
+    """Layer-wise charge for a ``tokens``-token prompt, chunked like the run.
+
+    The scheduler feeds a prompt in ``max_num_batched_tokens``-sized chunks and
+    each chunk is its own step: the profiled prologue/head are paid again, and a
+    later chunk's attention runs over what the earlier ones already computed.
+    Reproduces the trace generator to <0.1%, which is what lets the capacity and
+    the timeline quote the same number for the same prompt.
+    """
+    chunk = max(1, int(chunk or tokens or 1))
+    config = get_config(model)
+    variant = variant or resolve_variant("bfloat16", "auto", config)
+    db = _load_perf_db(hardware, model, variant, {tp}, config["model_type"])
+    architecture = _load_architecture(config["model_type"])
+    total = 0
+    computed = 0
+    while computed < int(tokens):
+        size = min(chunk, int(tokens) - computed)
+        base = step_cost_ns(hardware, model, tp=tp, tokens=size,
+                            variant=variant)
+        if size > 1:
+            base = (base
+                    - attention_step_ns(db, tp, config, architecture, size)
+                    + attention_step_ns(db, tp, config, architecture, size,
+                                        computed))
+        total += base
+        computed += size
+    return total
+
+
+def attention_step_ns(db, tp, config, architecture, tokens, kv_prefill=0):
     """Per-layer attention cost for a ``tokens``-token prompt, in ns.
 
-    One lookup per layer, at ``(prefill_chunk=tokens, kv_prefill=0,
-    n_decode=0, kv_decode=0)`` -- a prompt with no prior context, which is
-    what a reference-length request is.  The **same per-block-type dispatch
-    the timeline uses**: a model that declares ``layers_block_type`` (P-15B:
-    full causal / window 4 / window 128) prices each layer against its own
-    ``attention_<block>.csv``, falling back to the single ``attention`` table
-    when the bundle carries only one.  Returns 0 when the bundle has no
+    One lookup per layer, at ``(prefill_chunk=tokens, kv_prefill=kv_prefill,
+    n_decode=0, kv_decode=0)``.  ``kv_prefill=0`` is a prompt with no prior
+    context, i.e. a first chunk; a later chunk of a long prompt attends over
+    what the earlier chunks already computed.  The **same per-block-type
+    dispatch the timeline uses**: a model that declares ``layers_block_type``
+    (P-15B: full causal / window 4 / window 128) prices each layer against its
+    own ``attention_<block>.csv``, falling back to the single ``attention``
+    table when the bundle carries only one.  Returns 0 when the bundle has no
     attention profile at all, so the flat models that predate it keep working.
     """
     names = config.get("layers_block_type")
@@ -68,7 +171,8 @@ def attention_step_ns(db, tp, config, architecture, tokens):
             if name in types:
                 table = f"attention_{name}"
         try:
-            total += _lookup_attention(db, tp, tokens, 0, 0, 0, table=table)
+            total += _lookup_attention(db, tp, tokens, kv_prefill, 0, 0,
+                                       table=table)
         except KeyError:
             return 0
     return total
@@ -239,8 +343,17 @@ def rescale_capacities(casr_config, instances, verbose=True):
         if role == "decode":
             decode_capacity[instance_id] = 1000.0 / (decode_ref * step_ms)
         else:
-            # The LP's capacity unit is "reference-length requests per second".
-            prefill_capacity[instance_id] = 1000.0 / step_ms
+            # The LP's capacity unit is "reference-length requests per second",
+            # priced at the rate a *pair* executes -- the charge plus the
+            # per-request handoff/Decode-first-step overhead (see
+            # ``PREFILL_PIPELINE_OVERHEAD_MS_BY_HARDWARE``).
+            reference_ms = prefill_period_ms(
+                instance["hardware"], instance["model_name"],
+                tp=int(instance.get("tp_size", 1) or 1), tokens=prefill_ref,
+                reference=prefill_ref,
+                chunk=int(casr_config.get("max_num_batched_tokens",
+                                          prefill_ref) or prefill_ref))
+            prefill_capacity[instance_id] = 1000.0 / reference_ms
     if prefill_capacity:
         casr_config["prefill_capacity"] = {
             str(key): round(value, 4) for key, value in sorted(prefill_capacity.items())}
@@ -267,12 +380,36 @@ def rescale_capacities(casr_config, instances, verbose=True):
         casr_config["prefill_tokens_per_s"] = {
             str(key): round(value * prefill_ref, 4)
             for key, value in sorted(prefill_capacity.items())}
+    # Publish the *period curve* the LP scales a longer prompt by.  A linear
+    # token ratio is the wrong shape once a prompt needs more than one chunk:
+    # 1250 tokens is not 1.22 reference units, it is a second step (measured
+    # period 106.7 ms against 73.6 ms, i.e. 1.45).  The curve is the same
+    # ``prefill_period_ms`` the capacity came from, sampled across the first
+    # chunk boundary, so the plan and the execution agree at the anchors.
+    chunk = int(casr_config.get("max_num_batched_tokens", prefill_ref)
+                or prefill_ref)
+    curve = {}
+    for instance in instances:
+        instance_id = int(instance["instance_id"])
+        if instance_id not in prefill_capacity:
+            continue
+        points = {}
+        for ratio in PREFILL_PERIOD_ANCHOR_RATIOS:
+            tokens = max(1, int(round(prefill_ref * ratio)))
+            points[str(tokens)] = round(prefill_period_ms(
+                instance["hardware"], instance["model_name"],
+                tp=int(instance.get("tp_size", 1) or 1), tokens=tokens,
+                reference=prefill_ref, chunk=chunk), 3)
+        curve[str(instance_id)] = points
+    if curve:
+        casr_config["prefill_period_ms"] = curve
     if verbose:
         print("  • capacities from profiler : "
               f"prefill {casr_config.get('prefill_capacity')} "
               f"decode {casr_config.get('decode_capacity')}")
-        print("  • length model from profiler : "
-              f"prefill_tokens_per_s {casr_config.get('prefill_tokens_per_s')}")
+        print("  • prefill period @ref     : "
+              + ", ".join(f"{key} {1000.0 / value:.1f} ms"
+                          for key, value in sorted(prefill_capacity.items())))
     return prefill_capacity, decode_capacity
 
 

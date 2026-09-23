@@ -32,6 +32,14 @@ class CASRController:
         self.solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(policy))
         self.policy = load_policy(policy_spec, policy)
         self.policy_spec = policy_spec
+        #: Clamp the offered rate to what the pool can serve before solving.
+        #: On by default: above capacity the LP's choice of vertex is arbitrary
+        #: and can single-home a peak onto the slowest worker (see
+        #: ``_clamp_demand_to_capacity``).  ``demand_capacity_clamp: false``
+        #: restores the raw behaviour for A/B.
+        self.demand_capacity_clamp = bool(
+            (policy or {}).get("demand_capacity_clamp", True))
+        self.last_demand_clamp = {}
         lifecycle_policy = dict((policy or {}).get("lifecycle", {}))
         lifecycle_policy.setdefault("prefill_capacity", (policy or {}).get("prefill_capacity", {}))
         lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
@@ -237,6 +245,47 @@ class CASRController:
             return 0.0
         return min(sum(prefill), sum(decode))
 
+    def _clamped_rows(self, rows, prefills):
+        """Defined degradation: plan the load the pool can actually serve.
+
+        Above the pool's capacity every plan is infeasible, and in that regime
+        the LP's objective is flat in the *distribution* -- total overflow is
+        the same wherever the excess lands, so whichever vertex the simplex
+        reaches decides, and it may put most of the peak on the slowest card
+        (measured 2026-09-23, the 32 rps Qwen3-8B cell: 68% of 977 requests on
+        the 3090 Prefill, mean 67.9 s against the baseline's 25.4 s).
+
+        Scaling every class's rate by ``servable / offered`` keeps the offer's
+        *shape* and makes the problem feasible, so the LP allocates by cost and
+        lands each worker at ~100% of its own capacity -- the best a scheduler
+        can do once the offer exceeds the fleet.  The clamp is uniform, so it
+        changes no relative ordering, and it is recorded so a run can tell
+        "this pool is short" from "this policy chose badly".
+
+        Returns ``(rows, scale)``; the caller's snapshot is left alone, so the
+        state log keeps reporting the *offered* load and a later tick cannot
+        inherit a previous tick's clamp.
+        """
+        scale = 1.0
+        offered = servable = 0.0
+        if self.demand_capacity_clamp:
+            servable = self._servable_reference_units()
+            if servable > 0.0 and prefills:
+                offered = self.solver.offered_reference_units(rows, prefills)
+                if offered > servable:
+                    scale = servable / offered
+        self.last_demand_clamp = {"offered": offered, "servable": servable,
+                                  "scale": scale}
+        if scale == 1.0:
+            return rows, scale
+        clamped = []
+        for row in rows:
+            copy = dict(row)
+            copy["arrival_rate_ewma"] = max(
+                0.0, float(row.get("arrival_rate_ewma") or 0.0)) * scale
+            clamped.append(copy)
+        return clamped, scale
+
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         self.last_execution = ()
         snapshot = profiler.snapshot(current_ns, schedulers)
@@ -337,8 +386,19 @@ class CASRController:
             if not classes:
                 self.pending_warm_classes.pop(instance_id, None)
 
-        proposed = self.policy.solve(snapshot, prefill, decode, self.solver)
-        self.last_flows = tuple(self._validate_flows(proposed, snapshot, prefill, decode))
+        # Degrade deliberately when the offer exceeds the fleet.  This runs
+        # *after* the lifecycle and the structural evaluator, which must both
+        # see the true offered load (a clamp before them would cap the demand
+        # at today's capacity, so ``ceil(demand / capacity)`` could never ask
+        # for another worker), and *before* the solve, so the plan the router
+        # installs is the feasible one.
+        solve_rows, _scale = self._clamped_rows(snapshot["prefix_states"],
+                                                all_prefill)
+        solve_snapshot = dict(snapshot, prefix_states=solve_rows)
+        proposed = self.policy.solve(solve_snapshot, prefill, decode,
+                                     self.solver)
+        self.last_flows = tuple(self._validate_flows(proposed, solve_snapshot,
+                                                     prefill, decode))
         self.last_solver_diagnostics = dict(self.solver.diagnostics)
         self.last_solver_diagnostics["policy"] = self.policy_spec
         self.last_solver_diagnostics["structural"] = self.last_structural_decision

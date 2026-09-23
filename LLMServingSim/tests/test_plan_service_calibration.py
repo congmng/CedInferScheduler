@@ -21,8 +21,10 @@ import unittest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from serving.core.hw_service import (attention_step_ns, rescale_capacities,
-                                     rescale_service_times,
+from serving.core.hw_service import (attention_step_ns, prefill_charge_ns,
+                                     prefill_period_ms,
+                                     prefill_pipeline_overhead_ms,
+                                     rescale_capacities, rescale_service_times,
                                      step_cost_ns)  # noqa: E402
 from serving.core.trace_generator import (DECODE_STEP_SCALE,  # noqa: E402
                                           _load_perf_db, decode_step_scale,
@@ -147,18 +149,24 @@ class AttentionIsPricedTests(_UnderAstraSim):
         self.assertGreater(full_only / dispatched, 2.0)
 
     def test_capacity_and_step_are_one_statement(self):
-        """The priced capacity is the reciprocal of the priced step.
+        """The priced capacity is the reciprocal of the priced *period*.
 
         The plan's constraint and its cost have to describe the same machine,
         and the number has to land on what the timeline executes: the P-15B
-        peak ran p4 (RTX5090) at ~13.5 req/s.
+        peak ran p4 (RTX5090) at ~13.5 req/s of 1024-token prompts.
         """
         config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024}
         prefill, decode = rescale_capacities(config, self._instances(),
                                              verbose=False)
-        step_ms = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1,
-                               tokens=1024) / 1e6
-        self.assertAlmostEqual(prefill[0], 1000.0 / step_ms, delta=0.05)
+        period_ms = prefill_period_ms("RTX5090", "Qwen/Qwen3-8B", tp=1,
+                                      tokens=1024, reference=1024) 
+        self.assertAlmostEqual(prefill[0], 1000.0 / period_ms, delta=0.05)
+        # The period is the charge plus the measured per-step overhead, and the
+        # charge is what the layer profile says.
+        charge_ms = prefill_charge_ns("RTX5090", "Qwen/Qwen3-8B", tp=1,
+                                      tokens=1024) / 1e6
+        self.assertAlmostEqual(period_ms - charge_ms,
+                               prefill_pipeline_overhead_ms("RTX5090"), delta=0.01)
         # Decode is untouched by the attention term: the calibrated 1-token
         # step already carries it, so its capacity must stay at what the TPOT
         # anchor implies.
@@ -220,9 +228,10 @@ class CapacityTests(_UnderAstraSim):
         prefill, decode = rescale_capacities(config, self._instances(), verbose=False)
         # One 5090: 16 reference output tokens x ~14.8 ms per step.
         self.assertAlmostEqual(decode[1], 1000.0 / (16 * 14.84), delta=0.3)
-        # A 1024-token prefill profiles at ~68 ms on the 0.29.0 bundle
-        # (was ~107 ms on 0.27.1), so ~15 reference requests/s.
-        self.assertAlmostEqual(prefill[0], 1000.0 / 68.4, delta=1.5)
+        # A 1024-token prefill charges ~68 ms of layer time on the 0.29.0
+        # bundle and the pair executes it in ~84 ms (charge + one step of
+        # measured overhead), so ~11.9 reference requests/s.
+        self.assertAlmostEqual(prefill[0], 1000.0 / 84.0, delta=0.6)
         self.assertLess(decode[5], decode[1])
         # Slower card, lower capacity: 3090a (2) < 4090 (4) < 5090 (0).
         self.assertLess(prefill[2], prefill[4])

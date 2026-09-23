@@ -138,6 +138,13 @@ class FlowSolverConfig:
     # units as the network RTT/transfer costs.
     prefill_service_ms: Mapping[int, float] = field(default_factory=dict)
     decode_service_ms: Mapping[int, float] = field(default_factory=dict)
+    #: ``{prefill_id: {prompt_tokens: period_ms}}`` -- the *executed* pair period
+    #: for a prompt of that length, published by ``hw_service`` from the profiler
+    #: plus the measured per-step overhead.  When present the prompt-length work
+    #: factor is interpolated from it, which is the only way to price the first
+    #: chunk boundary correctly: 1250 tokens is not 1.22 reference units but a
+    #: second step, i.e. 1.45x the period (measured 2026-09-23).
+    prefill_period_ms: Mapping[int, Mapping[int, float]] = field(default_factory=dict)
     compute_weight: float = 0.0
     # -- SLO modelling ----------------------------------------------------
     # Predicted client-visible TTFT above ``ttft_slo_ms`` makes a
@@ -280,6 +287,11 @@ class FlowSolverConfig:
             work_ceiling=float(raw.get("work_ceiling", 8.0)),
             prefill_service_ms=numeric_map(raw.get("prefill_service_ms")),
             decode_service_ms=numeric_map(raw.get("decode_service_ms")),
+            prefill_period_ms={
+                int(key): {int(tokens): float(value)
+                           for tokens, value in (points or {}).items()}
+                for key, points in (raw.get("prefill_period_ms") or {}).items()
+                if not str(key).startswith("_")},
             compute_weight=float(raw.get("compute_weight", 0.0)),
             ttft_slo_ms=float(raw.get("ttft_slo_ms", 0.0)),
             class_ttft_slo_ms={str(key): float(value) for key, value
@@ -490,6 +502,9 @@ class CapacityAwareFlowSolver:
             return 1.0
         if tokens <= 0.0:
             return 1.0
+        curved = self._period_work(tokens, prefill_id)
+        if curved is not None:
+            return curved
         capacity = self.config.prefill_capacity.get(int(prefill_id))
         token_ceiling = self.config.prefill_tokens_per_s.get(int(prefill_id))
         if capacity and token_ceiling:
@@ -498,6 +513,64 @@ class CapacityAwareFlowSolver:
         return self._relative_work(tokens, self.config.capacity_reference_tokens,
                                    self.config.prefill_fixed_ms,
                                    self.config.prefill_ms_per_1k_tokens)
+
+    def _period_work(self, tokens, prefill_id):
+        """Work factor from the published period curve, or ``None``.
+
+        Linear interpolation between the anchors, clamped to the ends.  The
+        curve is sampled across the first chunk boundary, so a prompt that needs
+        a second step is priced for that step rather than for its token ratio.
+        """
+        points = self.config.prefill_period_ms.get(int(prefill_id))
+        if not points:
+            return None
+        lengths = sorted(points)
+        if len(lengths) < 2:
+            return None
+        reference = self.config.capacity_reference_tokens
+        if reference not in points:
+            reference = min(lengths, key=lambda value: abs(value - reference))
+        base = float(points[reference])
+        if base <= 0.0:
+            return None
+        query = float(tokens)
+        if query <= lengths[0]:
+            period = float(points[lengths[0]])
+        elif query >= lengths[-1]:
+            period = float(points[lengths[-1]])
+        else:
+            for lo, hi in zip(lengths, lengths[1:]):
+                if lo <= query <= hi:
+                    span = float(hi - lo)
+                    blend = 0.0 if span <= 0 else (query - lo) / span
+                    period = float(points[lo]) + blend * (float(points[hi])
+                                                          - float(points[lo]))
+                    break
+            else:                                     # pragma: no cover
+                period = base
+        return min(max(0.05, period / base),
+                   max(0.05, float(self.config.work_ceiling)))
+
+    def offered_reference_units(self, rows, prefill):
+        """Offered load in the LP's capacity units: ``sum_k rate_k x work_k``.
+
+        The work factor is the class's *cheapest* placement, so the number is
+        the most the pool could possibly serve for this offer -- if even that
+        exceeds the pool's capacity the plan is structurally infeasible, and
+        the caller can degrade deliberately instead of letting the LP pick an
+        arbitrary vertex (see ``CASRController._clamp_demand_to_capacity``).
+        """
+        grouped, work = self._aggregate_rows(rows, prefill)
+        total = 0.0
+        for class_id, entry in grouped.items():
+            demand = max(float(entry.get("arrival_rate_ewma") or 0.0),
+                         self.config.class_demand_floor_rps)
+            if demand <= 0.0:
+                continue
+            factor = min((float(work.get((scheduler.instance_id, class_id), 1.0))
+                          for scheduler in prefill), default=1.0)
+            total += demand * factor
+        return total
 
     def decode_work(self, class_id):
         """Same normalisation for the Decode leg, keyed on *output* length.
