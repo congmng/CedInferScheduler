@@ -1,0 +1,23 @@
+{
+  "source_pool": "/tmp/cnndm-long-pool-9k.jsonl (CNN/DailyMail long-form, 9000 rows)",
+  "pipeline": "tests/make_phased_trace.py over the pool, then tests/annotate_trace_slo.py for the SLO tier",
+  "make_phased_trace": "python3 tests/make_phased_trace.py --input cnndm-long-pool-9k.jsonl --rates 2,16,2 --durations 5,45,5 --names warmup,peak,cool --output workloads/matrix-16rps.jsonl",
+  "phase_rates_rps": [
+    2,
+    16,
+    2
+  ],
+  "phase_durations_s": [
+    5,
+    45,
+    5
+  ],
+  "num_requests": 740,
+  "input_tokens": 1250,
+  "output_tokens_mean": 72.76081081081081,
+  "slo_ttft_ms": 1500.0,
+  "slo_tpot_ms": 50.0,
+  "_comment": "Same prompt pool and arrival plan for every model; only the model/GPU changes across the matrix.  The pool itself is not committed (69 MB); regenerating it gives the same prompts only if the same CNN/DailyMail sample is used, so these jsonl files are the artifact of record.",
+  "_slo_comment": "Budget relaxed from 500 ms to 1500 ms: 500 is below the pool's own service floor at these peaks, so every (prefill, decode) pair violates and slo_penalty degenerates to a constant offset.  See docs/实验数据集与对比基线说明.md 6.22.",
+  "annotate_command": "python3 tests/annotate_trace_slo.py --input workloads/matrix-16rps.jsonl --output workloads/matrix-16rps-slo1500.jsonl --slo-ttft-ms 1500 --slo-tpot-ms 50"
+}

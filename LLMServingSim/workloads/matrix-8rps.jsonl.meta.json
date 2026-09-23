@@ -1,0 +1,21 @@
+{
+  "source_pool": "/tmp/cnndm-long-pool-9k.jsonl (CNN/DailyMail long-form, 9000 rows)",
+  "pipeline": "tests/make_phased_trace.py over the pool, then tests/annotate_trace_slo.py for the SLO tier",
+  "make_phased_trace": "python3 tests/make_phased_trace.py --input cnndm-long-pool-9k.jsonl --rates 2,8,2 --durations 5,45,5 --names warmup,peak,cool --output workloads/matrix-8rps.jsonl",
+  "phase_rates_rps": [
+    2,
+    8,
+    2
+  ],
+  "phase_durations_s": [
+    5,
+    45,
+    5
+  ],
+  "num_requests": 380,
+  "input_tokens": 1250,
+  "output_tokens_mean": 71.98684210526316,
+  "slo_ttft_ms": 500.0,
+  "slo_tpot_ms": 50.0,
+  "_comment": "Same prompt pool and arrival plan for every model; only the model/GPU changes across the matrix.  The pool itself is not committed (69 MB); regenerating it gives the same prompts only if the same CNN/DailyMail sample is used, so these jsonl files are the artifact of record."
+}
