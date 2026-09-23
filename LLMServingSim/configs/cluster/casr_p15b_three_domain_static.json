@@ -6,13 +6,14 @@
     "solver": "lp",
     "lifecycle": {
       "min_active_prefill": 1,
-      "max_active_prefill": 3,
+      "max_active_prefill": 1,
       "warmup_ms": 250,
       "prefill_capacity": {
         "0": 140,
         "2": 180,
         "4": 220
-      }
+      },
+      "scale_on_demand": false
     },
     "structural": {
       "evaluation_window_ms": 1000,
@@ -120,7 +121,7 @@
       }
     ],
     "compute_weight": 1.0,
-    "kv_bytes_per_token": 147456.0,
+    "kv_bytes_per_token": 16960.0,
     "utilization_weight": 1.0,
     "utilization_segments": 8,
     "prefill_service_ms": {
@@ -134,8 +135,7 @@
       "5": 278.261
     },
     "_alignment_comment": "Mirrors deploy/real_lmcache_pd/router_config.json: the same FlowSolverConfig keys with the same semantics.  prefill/decode_service_ms are the single-request service times implied by each instance's capacity at the run's --max-num-seqs 64 (service_ms = 1000 * max_num_seqs / capacity), so compute_weight prices per-unit compute the way the real control loop does.",
-    "ttft_slo_ms": 500.0,
-    "slo_penalty": 10.0
+    "_service_comment": "prefill/decode service_ms and capacities are Qwen3-8B placeholders: rescale_service_times/rescale_capacities overwrite them from profiler/perf/<HW>/casr/P15B/bf16."
   },
   "nodes": [
     {
@@ -148,7 +148,7 @@
       "instances": [
         {
           "instance_id": 0,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX3090",
           "npu_mem": {
             "mem_size": 24,
@@ -162,7 +162,7 @@
         },
         {
           "instance_id": 1,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX3090",
           "npu_mem": {
             "mem_size": 24,
@@ -186,7 +186,7 @@
       "instances": [
         {
           "instance_id": 2,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX4090",
           "npu_mem": {
             "mem_size": 24,
@@ -200,7 +200,7 @@
         },
         {
           "instance_id": 3,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX4090",
           "npu_mem": {
             "mem_size": 24,
@@ -224,7 +224,7 @@
       "instances": [
         {
           "instance_id": 4,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX5090",
           "npu_mem": {
             "mem_size": 32,
@@ -238,7 +238,7 @@
         },
         {
           "instance_id": 5,
-          "model_name": "Qwen/Qwen3-8B",
+          "model_name": "casr/P15B",
           "hardware": "RTX5090",
           "npu_mem": {
             "mem_size": 32,
@@ -253,6 +253,8 @@
       ]
     }
   ],
+  "_comment": "P-15B (casr/P15B) on the same three-domain topology as casr_real_qwen3_8b_three_domain.json, so the two are directly comparable: same nodes, same links, same instances -- only the model and its KV geometry differ. kv_bytes_per_token is the design's closed form (16960 B = 16.56 KB/token, docs/DSV4-P15B设计.md 5), against 147456 B for Qwen3-8B.  |  Static-pool twin: one fixed Prefill, no demand-driven resizing (the arena's casr_lp arm).",
   "intra_node_link_bw": 1.0,
-  "intra_node_link_latency": 2000
+  "intra_node_link_latency": 2000,
+  "_intra_link_comment": "Intra-domain fabric: 1 GB/s, 2 us.  Without these two keys the pair-cost table gives same-node pairs zero bandwidth, so the router's recompute-vs-transfer price silently falls back to the recorded deployment constants (see 实验数据集与对比基线说明.md 6.15)."
 }

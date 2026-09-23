@@ -6,13 +6,14 @@
     "solver": "lp",
     "lifecycle": {
       "min_active_prefill": 1,
-      "max_active_prefill": 3,
+      "max_active_prefill": 1,
       "warmup_ms": 250,
       "prefill_capacity": {
         "0": 140,
         "2": 180,
         "4": 220
-      }
+      },
+      "scale_on_demand": false
     },
     "structural": {
       "evaluation_window_ms": 1000,
@@ -254,5 +255,6 @@
     }
   ],
   "intra_node_link_bw": 1.0,
-  "intra_node_link_latency": 2000
+  "intra_node_link_latency": 2000,
+  "_comment": "  |  Static-pool twin: one fixed Prefill, no demand-driven resizing (the arena's casr_lp arm)."
 }

@@ -41,6 +41,11 @@ ARMS = {
     "static": ["--no-enable-casr"],
     "greedy": ["--enable-casr", "--casr-solver", "greedy"],
     "casr_lp": ["--enable-casr", "--casr-solver", "lp"],
+    # The same solver with a *fixed single-worker pool*: the arena's
+    # ``casr_lp`` (static) against its ``casr_full`` (elastic).  The pool size
+    # is a config property, not a flag, so these two need ``--static-config``.
+    "casr_static": ["--enable-casr", "--casr-solver", "lp", "@static"],
+    "casr_elastic": ["--enable-casr", "--casr-solver", "lp"],
 }
 
 
@@ -86,6 +91,9 @@ def main() -> int:
     parser.add_argument("--max-num-batched-tokens", type=int, default=1024)
     parser.add_argument("--control-interval-ms", type=int, default=100)
     parser.add_argument("--client-concurrency", type=int, default=0)
+    parser.add_argument("--static-config", default=None,
+                        help="Cluster config used by arms flagged '@static' "
+                             "(a fixed-size Prefill pool).")
     args = parser.parse_args()
 
     arms = [arm.strip() for arm in args.arms.split(",") if arm.strip()]
@@ -98,10 +106,17 @@ def main() -> int:
 
     results = {}
     for arm in arms:
+        flags = list(ARMS[arm])
+        cluster_config = args.cluster_config
+        if "@static" in flags:
+            if not args.static_config:
+                raise SystemExit(f"arm {arm} needs --static-config")
+            flags.remove("@static")
+            cluster_config = args.static_config
         out_csv = out_root / f"{arm}.csv"
         cmd = [
             sys.executable, "-m", "serving",
-            "--cluster-config", args.cluster_config,
+            "--cluster-config", cluster_config,
             "--dataset", args.dataset,
             "--num-reqs", str(num_reqs),
             "--dtype", "bfloat16", "--block-size", "16",
@@ -111,7 +126,7 @@ def main() -> int:
             "--casr-control-interval-ms", str(args.control_interval_ms),
             "--output", str(out_csv),
             "--inputs-root", str(out_root / f"{arm}-inputs"),
-            *ARMS[arm],
+            *flags,
         ]
         if args.client_concurrency:
             cmd += ["--client-concurrency", str(args.client_concurrency)]
