@@ -69,6 +69,8 @@ def main() -> int:
     parser.add_argument("--control-interval-ms", type=int, default=100)
     parser.add_argument("--max-num-batched-tokens", type=int, default=1024)
     parser.add_argument("--max-num-seqs", type=int, default=64)
+    parser.add_argument("--client-concurrency", type=int, default=0,
+                        help="Closed-loop admission: the client submits the next request only when a slot frees, so a held-back request is not charged for the time it waits to be admitted. 0 = open-loop replay (the historical behaviour).")
     args = parser.parse_args()
 
     base = json.loads(pathlib.Path(args.cluster_config).read_text(encoding="utf-8"))
@@ -101,6 +103,8 @@ def main() -> int:
             "--casr-state-output", str(out_root / f"{tag}.jsonl"),
             "--inputs-root", str(out_root / f"{tag}-inputs"),
         ]
+        if args.client_concurrency:
+            cmd += ["--client-concurrency", str(args.client_concurrency)]
         with (out_root / f"{tag}.log").open("w") as log:
             subprocess.run(cmd, cwd=REPO, check=True, stdout=log, stderr=subprocess.STDOUT)
         summary = summarise(out_csv)
