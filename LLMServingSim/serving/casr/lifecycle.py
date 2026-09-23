@@ -205,9 +205,18 @@ class PrefillLifecycle:
         # Keep an acquired worker alive until startup completes.  Otherwise a
         # low-demand tick can immediately cancel a previous scale-out before
         # the new worker becomes eligible for the next plan.
-        if wanted_override is None:
-            wanted.update(scheduler.instance_id for scheduler in schedulers
-                          if scheduler.admission_state == "WARMING")
+        #
+        # This must also hold when a structural *override* is in force, which is
+        # why it is no longer gated on ``wanted_override is None``: the
+        # evaluator re-issues its own wanted set every tick, and if that set
+        # happens to name a different worker the WARMING one is dropped, its
+        # ``_warming_until`` deadline is lost, and the boot restarts from
+        # scratch.  Measured 2026-09-24 on the Qwen3 WAN 240 s peak with a 45 s
+        # container start: the +P worker went WARMING -> INACTIVE -> WARMING
+        # every second and never reached ACTIVE, so 230 +P decisions produced a
+        # pool that never grew and elastic == static.
+        wanted.update(scheduler.instance_id for scheduler in schedulers
+                      if scheduler.admission_state == "WARMING")
         wanted = {scheduler.instance_id for scheduler in schedulers
                   if scheduler.instance_id in wanted}
         if wanted_override is None:

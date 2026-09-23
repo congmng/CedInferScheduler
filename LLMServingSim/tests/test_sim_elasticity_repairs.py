@@ -102,6 +102,39 @@ class LifecycleCapacityTests(unittest.TestCase):
         life.update(2 * 10 ** 9, rows, prefills)          # +1 s, still inside
         self.assertEqual(life.last_wanted, {0, 1})
 
+    def test_a_warming_worker_survives_a_later_override(self):
+        """A WARMING worker must not be dropped by the next structural edit.
+
+        The evaluator re-issues its wanted set every tick.  If that set names a
+        different worker, the WARMING one used to be deactivated, its
+        ``_warming_until`` deadline lost, and the boot restarted from zero.
+        Measured 2026-09-24 on the Qwen3 WAN 240 s peak with a 45 s container
+        start: the +P worker cycled WARMING -> INACTIVE -> WARMING every second,
+        never reached ACTIVE, and 230 +P decisions produced a pool that never
+        grew (elastic == static despite a peak five times the boot time).
+        """
+        life = PrefillLifecycle({
+            "min_active_prefill": 1, "max_active_prefill": 4,
+            "warmup_ms": 45000, "override_hold_ms": 1000,
+            "prefill_capacity": {0: 63, 1: 63},
+            "resources": {"startup_ms": 45000,
+                          "nodes": {"0": {"gpu_count": 2, "gpu_mem_gb": [24, 24]}}},
+        })
+        prefills = [_Sched(0), _Sched(1, state="INACTIVE")]
+        rows = [{"requested_tokens_ewma": 1250.0, "kv_bytes_per_request": 0.0,
+                 "arrival_rate_ewma": 1.0}]
+        # The evaluator asks for the spare worker; it starts warming.
+        life.update(10 ** 9, rows, prefills, wanted_override={0, 1})
+        self.assertEqual(prefills[1].admission_state, "WARMING")
+        # A later structural edit names only the incumbent.  The warming worker
+        # must survive -- otherwise the 45 s boot restarts forever.
+        life.update(int(2 * 10 ** 9), rows, prefills, wanted_override={0})
+        self.assertIn(1, life.last_wanted)
+        self.assertNotEqual(prefills[1].admission_state, "INACTIVE")
+        # ... and it does come online once the boot elapses.
+        life.update(int(50 * 10 ** 9), rows, prefills, wanted_override={0})
+        self.assertEqual(prefills[1].admission_state, "ACTIVE")
+
 
 class RouterPlanAggregateTests(unittest.TestCase):
     def router(self):
