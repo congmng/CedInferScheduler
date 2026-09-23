@@ -450,6 +450,14 @@ def main():
                         help='cap generated tokens per request (0 = use the trace). '
                         'The real comparison client runs with 16, so a replay that '
                         'must match it has to cap here too.')
+    parser.add_argument('--slo-ttft-ms', type=float, default=None,
+                        dest='slo_ttft_ms',
+                        help='fallback TTFT budget (ms) for requests whose trace row '
+                             'carries none; the row wins.  Feeds the solver\'s '
+                             'class_ttft_slo_ms / p_slo term and the CSV verdict.')
+    parser.add_argument('--slo-tpot-ms', type=float, default=None,
+                        dest='slo_tpot_ms',
+                        help='fallback TPOT budget (ms) per output token, same rules.')
     parser.add_argument('--client-concurrency', type=int, default=0,
                         help='closed-loop arrival cap (0 = replay the trace open-loop, '
                              'the historical behaviour).  The real comparison client '
@@ -848,7 +856,9 @@ def main():
     if dataset != None:
         router.load_requests(dataset, enable_prefix_caching=any_prefix_caching,
                              is_init=is_init,
-                             max_output_tokens=args.max_output_tokens)
+                             max_output_tokens=args.max_output_tokens,
+                             slo_ttft_ms=getattr(args, "slo_ttft_ms", None),
+                             slo_tpot_ms=getattr(args, "slo_tpot_ms", None))
     else:
         # Manually adding request (legacy: route all upfront)
         for i in range(16):

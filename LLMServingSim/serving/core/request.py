@@ -65,6 +65,11 @@ class Request:
         # while block_hashes keep their full vLLM-compatible cache identity.
         self.class_id = class_id
         self.prefix_id = prefix_id
+        #: Request-level budget, filled from the trace (or the CLI fallback).
+        #: ``None`` means the request carries no SLO, which is how the output
+        #: CSV distinguishes "not measured" from "met".
+        self.slo_ttft_ms = None
+        self.slo_tpot_ms = None
         self.prefill_instance_id = instance_id
         self.decode_instance_id = None
         self.pd_kv_bytes = 0

@@ -113,7 +113,18 @@ class PrefixProfiler:
         self._last_sample_ns = -1
 
     def assign(self, model_id: str, input_tokens: int, output_tokens: int,
-               token_ids: Optional[Iterable[int]], kv_bytes_per_request: float = 0.0) -> Tuple[str, str]:
+               token_ids: Optional[Iterable[int]], kv_bytes_per_request: float = 0.0,
+               slo_ttft_ms: Optional[float] = None,
+               slo_tpot_ms: Optional[float] = None) -> Tuple[str, str]:
+        """Bucket one request into a prefix class.
+
+        ``slo_ttft_ms`` / ``slo_tpot_ms`` are the request's own budgets when
+        the trace carries them.  A class keeps the **tightest** bound seen, the
+        same rule the real router applies (``class_slo`` in ``/routing-state``):
+        one 250 ms interactive request makes the whole class 250 ms, which is
+        what stops a mixed class from being priced at the loosest of its
+        members.
+        """
         prefix_id = derive_prefix_id(model_id, token_ids, self.block_size,
                                      self.max_prefix_tokens)
         class_id = derive_class_id(model_id, prefix_id, input_tokens, output_tokens)
@@ -125,6 +136,15 @@ class PrefixProfiler:
             "output_bucket": _bucket(output_tokens),
             "kv_bytes_per_request": max(0.0, float(kv_bytes_per_request)),
         })
+        for key, value in (("slo_ttft_ms", slo_ttft_ms), ("slo_tpot_ms", slo_tpot_ms)):
+            try:
+                value = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                value = None
+            if value is None or value <= 0:
+                continue
+            prior = self._classes[class_id].get(key)
+            self._classes[class_id][key] = value if prior is None else min(prior, value)
         self._classes[class_id]["kv_bytes_per_request"] = max(
             self._classes[class_id]["kv_bytes_per_request"], float(kv_bytes_per_request))
         if token_ids:
@@ -171,8 +191,15 @@ class PrefixProfiler:
             row["prefill_instance_id"] = instance_id
             row["cache"] = cache_by_instance.get(instance_id, {})
             rows.append(row)
+        # Per-class TTFT budget for the solver's ``class_ttft_slo_ms``.  Only
+        # classes whose requests carried a budget appear, so a trace without
+        # SLO fields produces an empty map and the solver keeps its global
+        # ``ttft_slo_ms`` (0 = the term is off).
+        class_slo = {class_id: entry["slo_ttft_ms"]
+                     for class_id, entry in self._classes.items()
+                     if entry.get("slo_ttft_ms")}
         return {"time_ns": int(at_ns), "prefix_states": rows,
-                "instances": cache_by_instance}
+                "instances": cache_by_instance, "class_slo": class_slo}
 
     @staticmethod
     def append_snapshot(path: str, snapshot: Dict[str, object]) -> None:

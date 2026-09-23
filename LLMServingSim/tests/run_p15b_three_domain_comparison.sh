@@ -13,10 +13,13 @@ result_dir="${1:-$(mktemp -d /tmp/llmservingsim-p15b-three-domain.XXXXXX)}"
 num_reqs="${NUM_REQS:-80}"
 dataset="${DATASET:-workloads/casr_hetero_hot_cold.jsonl}"
 max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS:-1024}"
+# Same convention as run_casr_comparison.sh: the environment picks the
+# topology, so the SLO-priced twin is a drop-in replacement.
+cluster_config="${CLUSTER_CONFIG:-configs/cluster/casr_p15b_three_domain.json}"
 mkdir -p "$result_dir"
 
 common=(
-  --cluster-config configs/cluster/casr_p15b_three_domain.json
+  --cluster-config "$cluster_config"
   --dataset "$dataset"
   --num-reqs "$num_reqs"
   --dtype bfloat16

@@ -308,6 +308,30 @@ class CapacityAwareFlowSolver:
         if updates:
             self.config = dataclass_replace(self.config, **updates)
 
+    def apply_slo_overrides(self, ttft_slo_ms=None, class_ttft_slo_ms=None,
+                            slo_penalty=None):
+        """Publish this tick's latency budgets into the solver config.
+
+        ``class_ttft_slo_ms`` comes from the prefix profiler (the tightest
+        budget any request of that class carried); ``ttft_slo_ms`` is the
+        cluster-wide default from the policy.  Mirrors what the real control
+        plane does every tick, so a simulated replay and a recorded run price
+        the SLO term the same way.
+        """
+        updates = {}
+        if ttft_slo_ms is not None:
+            updates["ttft_slo_ms"] = float(ttft_slo_ms)
+        if slo_penalty is not None:
+            updates["slo_penalty"] = float(slo_penalty)
+        if class_ttft_slo_ms is not None:
+            merged = {str(key): float(value)
+                      for key, value in self.config.class_ttft_slo_ms.items()}
+            merged.update({str(key): float(value)
+                           for key, value in class_ttft_slo_ms.items()})
+            updates["class_ttft_slo_ms"] = merged
+        if updates:
+            self.config = dataclass_replace(self.config, **updates)
+
     def solve(self, rows, prefill, decode, work_overrides=None):
         self._slo_violations = set()
         if self.config.solver == "lp":

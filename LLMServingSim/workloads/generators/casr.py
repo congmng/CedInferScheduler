@@ -134,6 +134,16 @@ def register_args(p: argparse.ArgumentParser) -> None:
                    dest="slow_fraction",
                    help="(--decode-tier-mode skewed) fraction tagged slow. "
                         "Default 0.3.")
+    p.add_argument("--slo-ttft-ms", type=float, default=0.0, dest="slo_ttft_ms",
+                   help="Per-request TTFT budget written on every row. 0 = omit, "
+                        "which leaves the solver's p_slo term unpriced.")
+    p.add_argument("--slo-tpot-ms", type=float, default=0.0, dest="slo_tpot_ms",
+                   help="Per-request TPOT budget written on every row. 0 = omit.")
+    p.add_argument("--slo-slow-ttft-ms", type=float, default=0.0,
+                   dest="slo_slow_ttft_ms",
+                   help="Budget for rows tagged decode_tier=slow, so one trace can "
+                        "carry two classes of service. 0 = every row uses "
+                        "--slo-ttft-ms.")
     p.add_argument("--write-manifest", action=argparse.BooleanOptionalAction,
                    default=True,
                    dest="write_manifest",
@@ -362,6 +372,18 @@ def run(args: argparse.Namespace) -> int:
                 "phase": ("high" if _phase_index(arrival_ns, phase_schedule) == 1
                            else "low"),
             }
+            # ``getattr`` because callers that build a Namespace by hand (the
+            # generator tests) predate these flags.
+            slo_ttft = float(getattr(args, "slo_ttft_ms", 0.0) or 0.0)
+            slo_tpot = float(getattr(args, "slo_tpot_ms", 0.0) or 0.0)
+            slo_slow = float(getattr(args, "slo_slow_ttft_ms", 0.0) or 0.0)
+            if slo_ttft > 0:
+                budget = slo_ttft
+                if slo_slow > 0 and decode_tier == "slow":
+                    budget = slo_slow
+                row["slo_ttft_ms"] = budget
+            if slo_tpot > 0:
+                row["slo_tpot_ms"] = slo_tpot
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
 
             if hotspot is None:

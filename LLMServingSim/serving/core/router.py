@@ -41,6 +41,10 @@ class Router:
         self._plan_prefill_totals = {}
         self.routing_policy = routing_policy.upper()
         self.seed = seed
+        # CLI fallback for traces that carry no per-request SLO; the trace row
+        # wins, exactly like the real client's ``row_slo()``.
+        self._cli_slo_ttft_ms = None
+        self._cli_slo_tpot_ms = None
         # Only the domain-aware cluster configs name the Decode half of every
         # pair up front; see ``_decode_instance_id_for``.
         self.name_decode_at_arrival = name_decode_at_arrival
@@ -764,6 +768,8 @@ class Router:
             req_data['output_toks'] - req_data['input_toks'],
             req_data.get('input_hash_ids', []),
             req_data.get('kv_bytes_per_request', 0.0),
+            req_data.get('slo_ttft_ms'),
+            req_data.get('slo_tpot_ms'),
         )
         req_data['class_id'] = class_id
         req_data['prefix_id'] = prefix_id
@@ -774,7 +780,7 @@ class Router:
     # -----------------------------------------------------------------------
 
     def load_requests(self, path, enable_prefix_caching=False, is_init=True,
-                      max_output_tokens=0):
+                      max_output_tokens=0, slo_ttft_ms=None, slo_tpot_ms=None):
         """Load requests from dataset into pending queue (not yet routed).
 
         Supports two JSONL formats:
@@ -798,6 +804,8 @@ class Router:
         self._enable_prefix_caching = enable_prefix_caching
         self._is_init = is_init
         self._max_output_tokens = int(max_output_tokens or 0)
+        self._cli_slo_ttft_ms = slo_ttft_ms
+        self._cli_slo_tpot_ms = slo_tpot_ms
         loaded_lines = 0
 
         with open(path) as f:
@@ -839,6 +847,12 @@ class Router:
             'input_hash_ids': row.get('input_tok_ids', []),
             'output_hash_ids': output_ids,
             'kv_bytes_per_request': row.get('kv_bytes_per_request', 0.0),
+            # Request-level latency budget: trace row first, CLI second.  The
+            # solver's ``p_slo`` term prices a pair against this, and until now
+            # the simulated path dropped the fields the real client forwards as
+            # ``X-SLO-*`` headers.
+            'slo_ttft_ms': row.get('slo_ttft_ms', self._cli_slo_ttft_ms),
+            'slo_tpot_ms': row.get('slo_tpot_ms', self._cli_slo_tpot_ms),
         }
         self._pending_requests.append(self._decorate_req_data(req_data))
 
@@ -994,6 +1008,11 @@ class Router:
                 req_data.get('input_hash_ids', []), req_data.get('output_hash_ids', []),
                 req_data['class_id'], req_data['prefix_id'],
             ], is_init=True if local_request else self._is_init)
+            # Carry the request's own budget onto the Request so the output CSV
+            # can record the verdict (the real router writes the same three
+            # fields into ``metrics-<policy>.jsonl``).
+            request.slo_ttft_ms = req_data.get('slo_ttft_ms')
+            request.slo_tpot_ms = req_data.get('slo_tpot_ms')
             if local_request:
                 # The Decode owns the whole request: it runs the Prefill chunk
                 # itself, so the handoff path never sees it.

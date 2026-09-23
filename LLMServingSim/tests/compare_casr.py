@@ -24,6 +24,11 @@ def summary(path):
     for row in rows:
         decode_counts[row.get("decode_instance_id", "")] = decode_counts.get(
             row.get("decode_instance_id", ""), 0) + 1
+    # SLO verdicts the simulator writes once the trace carries budgets.  A run
+    # over a trace without them leaves every field blank and reports ``None``,
+    # which is the honest answer ("not measured") rather than 0% or 100%.
+    judged = [row for row in rows if str(row.get("slo_ok", "")).strip() != ""]
+    met = sum(1 for row in judged if str(row["slo_ok"]).strip().lower() == "true")
     return {
         "requests": len(rows),
         "latency_mean_ms": statistics.fmean(latency) if latency else 0.0,
@@ -37,6 +42,9 @@ def summary(path):
         "decode_instances": sorted(decode_counts),
         "decode_counts": decode_counts,
         "prefix_hit_tokens": sum(int(float(row.get("npu_hit_tokens", 0) or 0)) for row in rows),
+        "slo_judged": len(judged),
+        "slo_met": met,
+        "slo_attainment_pct": (100.0 * met / len(judged)) if judged else None,
     }
 
 
@@ -49,5 +57,11 @@ if __name__ == "__main__":
                 "latency_p99_ms", "ttft_mean_ms", "ttft_p95_ms",
                 "tpot_mean_ms", "tpot_p95_ms", "prefix_hit_tokens"):
         print(f"{key:22s} {base[key]:12.3f} {casr[key]:12.3f}")
+    if base["slo_judged"] or casr["slo_judged"]:
+        def show(entry):
+            return ("n/a" if entry["slo_attainment_pct"] is None
+                    else f"{entry['slo_attainment_pct']:.1f}% "
+                         f"({entry['slo_met']}/{entry['slo_judged']})")
+        print(f"{'slo_attainment':22s} {show(base):>12} {show(casr):>12}")
     print(f"{'decode_instances':22s} {base['decode_instances']} {casr['decode_instances']}")
     print(f"{'decode_counts':22s} {base['decode_counts']} {casr['decode_counts']}")

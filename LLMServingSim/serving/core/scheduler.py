@@ -849,7 +849,11 @@ class Scheduler:
                                 'class_id', 'prefix_id', 'prefill_instance_id',
                                 'decode_instance_id', 'npu_hit_tokens',
                                 'storage_hit_tokens', 'pd_kv_bytes', 'affinity_version',
-                                'exchange'])
+                                'exchange',
+                                # Same fields the real router writes into
+                                # ``metrics-<policy>.jsonl``; ``slo_ok`` is
+                                # blank when the request carried no budget.
+                                'slo_ttft_ms', 'slo_tpot_ms', 'slo_ok'])
             
             # Write each request's information
             for req in self.done:
@@ -877,7 +881,30 @@ class Scheduler:
                     # Same column the real router records, so a recorded real
                     # run and a simulated replay can be joined on it.
                     "local" if getattr(req, "local_prefill", False) else "transfer",
+                    *_slo_columns(req),
                 ])
+
+
+def _slo_columns(req):
+    """``(slo_ttft_ms, slo_tpot_ms, slo_ok)`` for the output CSV.
+
+    ``slo_ok`` is the same predicate the real aggregator applies: a request
+    with no budget records blanks (not "passed"), and a request is satisfied
+    only when *every* budget it carries is met.
+    """
+    ttft_budget = getattr(req, "slo_ttft_ms", None)
+    tpot_budget = getattr(req, "slo_tpot_ms", None)
+    if not ttft_budget and not tpot_budget:
+        return ("", "", "")
+    ok = True
+    if ttft_budget:
+        # ``-1`` is the "never measured" sentinel, not a very fast TTFT.
+        ok = ok and req.ttft is not None and 0 <= req.ttft / 1e6 <= float(ttft_budget)
+    if tpot_budget:
+        ok = ok and req.tpot is not None and 0 <= req.tpot / 1e6 <= float(tpot_budget)
+    return (f"{float(ttft_budget)}" if ttft_budget else "",
+            f"{float(tpot_budget)}" if tpot_budget else "",
+            "true" if ok else "false")
 
 
 def main():

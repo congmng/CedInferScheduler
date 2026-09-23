@@ -199,6 +199,12 @@ class CASRController:
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         self.last_execution = ()
         snapshot = profiler.snapshot(current_ns, schedulers)
+        # Publish this tick's latency budgets before anything prices a pair:
+        # the trace's per-class bounds (tightest wins) override the policy's
+        # global ``ttft_slo_ms``.  Without this the ``p_slo`` term is dead code
+        # in the simulator even when the traces carry budgets.
+        self.solver.apply_slo_overrides(
+            class_ttft_slo_ms=snapshot.get("class_slo") or None)
         if self.state_collector.enabled:
             self.last_telemetry = self.state_collector.collect()
             snapshot["telemetry"] = self.last_telemetry
