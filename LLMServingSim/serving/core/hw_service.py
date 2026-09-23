@@ -204,3 +204,76 @@ def rescale_capacities(casr_config, instances, verbose=True):
               f"prefill {casr_config.get('prefill_capacity')} "
               f"decode {casr_config.get('decode_capacity')}")
     return prefill_capacity, decode_capacity
+
+
+def resolve_runtime_capacities(casr_config, instances, verbose=True):
+    """Decide the capacity every part of the runtime will price, once.
+
+    Regression guard for the 2026-09-23 audit: the run used to price three
+    different answers for the same resource --
+
+    * the router's load denominators came from the cluster config's *declared*
+      numbers,
+    * the solver's Prefill capacity was rewritten every tick from the egress
+      bound,
+    * the lifecycle computed its own length-aware variant,
+
+    and ``rescale_capacities`` only ran when the config said
+    ``capacity_from_profile: true``.  On the P-15B peak that left Decode on the
+    deployment's placeholders (110/170/230 req/s = 510) while the bundle says
+    4.5/9.3/12.5 (26.3) -- a 19x overstatement that made every "is Decode the
+    bottleneck" conclusion unfalsifiable.
+
+    This resolves both roles from the profiler bundles (default) and then caps
+    the Prefill side by the producer's KV egress, so the number that lands here
+    is the one the router, the solver and the lifecycle all start from.
+    ``capacity_from_profile: false`` keeps the declared numbers (A/B only).
+
+    Returns ``(report, resolved)`` where ``report`` is a printable dict and
+    ``resolved`` says which sources/limits applied.
+    """
+    resolved = {"from_profile": False, "egress_limited": {}}
+    if casr_config.get("capacity_from_profile", True):
+        rescale_capacities(casr_config, instances, verbose=False)
+        resolved["from_profile"] = True
+
+    kv_per_token = float(casr_config.get("kv_bytes_per_token") or 0.0)
+    links = casr_config.get("shared_links") or ()
+    if kv_per_token > 0.0 and links:
+        reference = int(casr_config.get("capacity_reference_tokens", 1024) or 1024)
+        per_request_bytes = kv_per_token * reference
+        budgets: dict[int, float] = {}
+        for link in links:
+            capacity = float(link.get("capacity_bytes_per_s") or 0.0)
+            if capacity <= 0.0:
+                continue
+            for pair in (link.get("pairs") or ()):
+                prefill_id = int(pair[0])
+                budgets[prefill_id] = min(budgets.get(prefill_id, capacity),
+                                          capacity)
+        if budgets and per_request_bytes > 0.0:
+            bounded = {}
+            for prefill_id, capacity in budgets.items():
+                key = str(prefill_id)
+                declared = float((casr_config.get("prefill_capacity") or {})
+                                 .get(key, capacity / per_request_bytes))
+                bound = capacity / per_request_bytes
+                bounded[key] = round(min(declared, bound), 4)
+                if bound < declared:
+                    resolved["egress_limited"][key] = round(bound, 4)
+            casr_config["prefill_capacity"] = {**(casr_config.get("prefill_capacity") or {}),
+                                              **bounded}
+    report = {
+        "prefill_capacity": casr_config.get("prefill_capacity"),
+        "decode_capacity": casr_config.get("decode_capacity"),
+        "kv_bytes_per_token": kv_per_token,
+        **resolved,
+    }
+    if verbose:
+        print("  • capacities in use      : "
+              f"prefill {report['prefill_capacity']} "
+              f"decode {report['decode_capacity']} "
+              f"(kv {kv_per_token:.0f} B/token)"
+              + (f", egress-capped {resolved['egress_limited']}"
+                 if resolved["egress_limited"] else ""))
+    return report, resolved

@@ -634,14 +634,13 @@ def main():
         rescale_service_times(
             casr_config, instances, "prefill_service_ms",
             tokens=int(casr_config.get("capacity_reference_tokens", 1024) or 1024))
-        # Off by default: the profiled capacity is ~16x below the declared
-        # one (4.2 against 65 reference-length requests/s on a 5090), and
-        # turning it on today makes the router spill traffic cross-domain to
-        # escape an engine queue the real router prices as a *link* queue.
-        # The numbers and the experiment are in
-        # docs/模拟器与真机一致性核查.md 附十之十五.
-        if casr_config.get("capacity_from_profile"):
-            rescale_capacities(casr_config, instances)
+        # One resolution of the capacity every part of the runtime prices --
+        # router load denominators, solver constraints and the lifecycle all
+        # start from the same number (see
+        # ``hw_service.resolve_runtime_capacities``; the 2026-09-23 audit found
+        # they disagreed by up to 19x).
+        from serving.core.hw_service import resolve_runtime_capacities
+        resolve_runtime_capacities(casr_config, instances)
     casr_controller = (CASRController(int(args.casr_control_interval_ms * 1_000_000),
                                       policy=casr_config,
                                       policy_spec=args.casr_policy)
