@@ -579,7 +579,19 @@ def main():
     # the 4090 Prefill (faster kernel) in front of the 5090 one even though the
     # real system stays on a same-domain pair (measured 2026-09-12: real
     # ``casr_lp`` on Dolly used p5090+d5090 100%, the simulator 4090+5090).
-    if args.enable_casr and not casr_config.get("pair_costs"):
+    #
+    # Built for *every* run, not only ``--enable-casr``: the router's
+    # local-recompute-vs-transfer decision reads ``pair_bandwidth`` /
+    # ``pair_rtt_ms`` from here, and without them it silently falls back to the
+    # recorded deployment constants -- which encode the *deployment's* model
+    # (Qwen3-8B, 147,456 B/token at the measured push rate).  On a
+    # compressed-KV model that over-prices the handoff ~9x, so the non-CASR
+    # arms recomputed locally for 740/740 requests on a metro fabric where the
+    # link-derived price says transfer wins 43 ms to 355 ms, while the CASR arm
+    # (which did build the table) transferred all 740 -- i.e. the two sides of
+    # the comparison were being priced by different models (measured
+    # 2026-09-24, docs/实验数据集与对比基线说明.md 6.26).
+    if not casr_config.get("pair_costs"):
         link_bw_gbps = float(raw_cluster_config.get("link_bw", 0.0) or 0.0)
         link_latency_ms = float(raw_cluster_config.get("link_latency", 0.0) or 0.0) / 1e6
         node_of = {}

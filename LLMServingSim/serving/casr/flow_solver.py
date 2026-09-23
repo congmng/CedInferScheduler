@@ -1327,6 +1327,36 @@ class CapacityAwareFlowSolver:
         def bytes_of(item, link):
             return item.flow * self._class_link_bytes(item.class_id, grouped, link)
 
+        # The mover exists to fix a *link* overflow, and it used to check only
+        # the destination link for room -- never the destination's compute.  On
+        # a fabric whose producer budget is the binding constraint that turns
+        # into "fix the link by overloading a card": measured 2026-09-24 on the
+        # P-15B WAN environment, the LP's 10.3 req/s on the 5090 (capacity
+        # 13.6) was moved off when its 6.3 req/s egress budget filled, and the
+        # class landed on the 4090 whose capacity is 6.3 -- 547 of 740 requests
+        # on it, mean 27.9 s against the least-loaded baseline's 3.5 s.  Track
+        # the compute load the same way the links are tracked, and refuse a
+        # destination that would not fit.
+        def work_of(item):
+            return item.flow * float(self._cache_work(
+                item.class_id, item.prefill_id, grouped.get(item.class_id) or {}))
+
+        def decode_work_of(item):
+            return item.flow * float(self.decode_work(item.class_id))
+
+        p_load = {pid: 0.0 for pid in prefills}
+        d_load = {did: 0.0 for did in decodes}
+        for item in assignments:
+            p_load[item.prefill_id] = p_load.get(item.prefill_id, 0.0) + work_of(item)
+            d_load[item.decode_id] = d_load.get(item.decode_id, 0.0) + decode_work_of(item)
+
+        def capacity(role, instance_id):
+            table = (self.config.prefill_capacity if role == "p"
+                     else self.config.decode_capacity)
+            scheduler = prefills.get(instance_id) if role == "p" else decodes.get(instance_id)
+            return max(1e-6, float(table.get(
+                instance_id, getattr(scheduler, "max_num_seqs", 1.0) or 1.0)))
+
         for _sweep in range(4):
             load = {link.link_id: 0.0 for link in links}
             for item in assignments:
@@ -1372,6 +1402,15 @@ class CapacityAwareFlowSolver:
                                     break
                             if not spare:
                                 continue
+                            # ... and the destination has to have compute room.
+                            if (p_load.get(candidate_p.instance_id, 0.0)
+                                    + sum(work_of(item) for item in mine)
+                                    > capacity("p", candidate_p.instance_id)):
+                                continue
+                            if (d_load.get(candidate_d.instance_id, 0.0)
+                                    + sum(decode_work_of(item) for item in mine)
+                                    > capacity("d", candidate_d.instance_id)):
+                                continue
                             cost = self._pair_cost(candidate_p, candidate_d, class_id,
                                                    entry)
                             if best is None or cost < best[0]:
@@ -1386,8 +1425,15 @@ class CapacityAwareFlowSolver:
                             if other.carries(item.prefill_id, item.decode_id):
                                 load[other.link_id] = max(
                                     0.0, load[other.link_id] - bytes_of(item, other))
-                        moved.append(dataclass_replace(item, prefill_id=new_p,
-                                                       decode_id=new_d))
+                        p_load[item.prefill_id] = max(
+                            0.0, p_load.get(item.prefill_id, 0.0) - work_of(item))
+                        d_load[item.decode_id] = max(
+                            0.0, d_load.get(item.decode_id, 0.0) - decode_work_of(item))
+                        replacement = dataclass_replace(item, prefill_id=new_p,
+                                                        decode_id=new_d)
+                        p_load[new_p] = p_load.get(new_p, 0.0) + work_of(replacement)
+                        d_load[new_d] = d_load.get(new_d, 0.0) + decode_work_of(replacement)
+                        moved.append(replacement)
                     for item in moved:
                         for other in links:
                             if other.carries(item.prefill_id, item.decode_id):

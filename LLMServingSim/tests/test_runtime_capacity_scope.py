@@ -725,6 +725,78 @@ class InfeasibleOfferTests(unittest.TestCase):
         self.assertIs(clamped, rows)
 
 
+class EgressMoverFitsComputeTests(unittest.TestCase):
+    """The post-LP egress mover must not fix a link by overloading a card.
+
+    It walks classes off producers whose KV push budget is exhausted and picks
+    the cheapest pair with spare *link* room -- and until 2026-09-24 it checked
+    only the link, never the destination's compute.  On a fabric where the
+    producer budget binds, that is exactly the failure it produces: measured on
+    the P-15B WAN environment, the LP's 10.3 req/s on the 5090 (capacity 13.6)
+    was moved off when its 6.3 req/s egress filled, and the class landed on the
+    4090 (capacity 6.3) -- 547 of 740 requests, mean 27.9 s against the
+    least-loaded baseline's 3.5 s.
+    """
+
+    class Sched:
+        def __init__(self, instance_id, pd_type, max_num_seqs=64):
+            self.instance_id = instance_id
+            self.pd_type = pd_type
+            self.start_npu = instance_id
+            self.node_id = 0
+            self.max_num_seqs = max_num_seqs
+            self.running = []
+            self.waiting = []
+            self.service_ms = 0.0
+
+    def _solver(self, cheap_capacity):
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+        return CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            # 0: roomy but expensive; 1: cheap but (by construction) tiny.
+            "prefill_capacity": {"0": 50.0, "1": float(cheap_capacity)},
+            "decode_capacity": {"2": 50.0, "3": 50.0},
+            "prefill_service_ms": {"0": 500.0, "1": 1.0},
+            "decode_service_ms": {"2": 50.0, "3": 50.0},
+            "class_kv_bytes": {name: 1000000.0
+                               for name in ("c", "f1", "f2", "f3")},
+            "use_cache_capacity": False,
+            "shared_links": [
+                {"id": "link0", "capacity_bytes_per_s": 1000000.0,
+                 "pairs": [[0, 2], [0, 3]]},
+                {"id": "link1", "capacity_bytes_per_s": 1000000.0,
+                 "pairs": [[1, 2], [1, 3]]},
+            ],
+        }))
+
+    def _run(self, cheap_capacity):
+        from serving.casr.flow_solver import FlowAssignment
+        solver = self._solver(cheap_capacity)
+        prefills = [self.Sched(0, "prefill"), self.Sched(1, "prefill")]
+        decodes = [self.Sched(2, "decode"), self.Sched(3, "decode")]
+        # Four classes of 0.5 MB/s each on producer 0: 2 MB/s against a 1 MB/s
+        # budget, so the link is over and one class can be moved anywhere.
+        grouped = {name: {"class_id": name, "arrival_rate_ewma": 0.5,
+                          "requested_tokens_ewma": {}, "requested_tokens": {},
+                          "kv_bytes_per_request": 0.0}
+                   for name in ("c", "f1", "f2", "f3")}
+        assignments = [FlowAssignment(name, 0, 2, 0.5, 0.1)
+                       for name in ("c", "f1", "f2", "f3")]
+        moved = solver._enforce_egress_budget(assignments, grouped, prefills,
+                                              decodes)
+        return moved
+
+    def test_the_mover_refuses_a_destination_without_compute_room(self):
+        moved = self._run(cheap_capacity=0.1)
+        # The cheap producer cannot hold even one 0.5-unit class, so the mover
+        # leaves the (over-budget) link alone rather than overloading it.
+        self.assertEqual({item.prefill_id for item in moved}, {0})
+
+    def test_the_mover_still_moves_when_the_destination_fits(self):
+        moved = self._run(cheap_capacity=50.0)
+        self.assertIn(1, {item.prefill_id for item in moved})
+
+
 class ClusterConfigHygieneTests(unittest.TestCase):
     """P-15B cluster configs must declare the intra-domain link.
 
