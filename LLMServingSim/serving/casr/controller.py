@@ -89,6 +89,10 @@ class CASRController:
         self.alpha = float((policy or {}).get("ewma_alpha", 0.2) or 0.2)
         self.backlog_rps_multiple = max(
             0.0, float((policy or {}).get("backlog_rps_multiple", 4.0) or 0.0))
+        # Recovering the offered load must not invent demand the pool could not
+        # serve anyway; see ``_inflate_demand``.
+        self.backlog_capacity_bound = bool(
+            (policy or {}).get("backlog_capacity_bound", True))
         self._backlog_rps = 0.0
         self._last_backlog_waiting = None
         self._last_backlog_ns = 0
@@ -182,19 +186,56 @@ class CASRController:
 
         The queue is not class-attributed, so the missing rate is spread
         proportionally to each class's observed share (a mean-field
-        approximation), capped at ``backlog_rps_multiple`` times the observed
-        total so a transient cannot invent unbounded demand.
+        approximation).
+
+        Two caps, and the second is the one that matters:
+
+        * ``backlog_rps_multiple`` x the observed total (a transient cannot
+          invent unbounded demand), and
+        * the **capacity deficit** -- the part of the observed load the pool
+          cannot serve.  Recovering *offered* load only makes sense when the
+          pool is actually saturated: at 16 req/s against a 26 req/s pool the
+          deficit is zero, and adding the queue's growth to every class made
+          the solver plan for 88 req/s (measured 2026-09-23, matrix run).  With
+          demand that far above every instance, the LP minimises summed
+          overflow by topping up the small instances and dumping the rest on
+          the largest one -- 76 req/s onto a Decode whose capacity is 12.5 --
+          which is the worst possible tail.  Above capacity *every* plan is
+          infeasible, so the planner only needs to know how far above; the
+          deficit is that number.
         """
         observed = sum(max(0.0, float(row.get("arrival_rate_ewma") or 0.0))
                        for row in rows)
         if observed <= 0.0 or self._backlog_rps <= 0.0:
             return rows
         backlog = min(self._backlog_rps, self.backlog_rps_multiple * observed)
+        if self.backlog_capacity_bound:
+            servable = self._servable_reference_units()
+            if servable > 0.0:
+                backlog = min(backlog, max(0.0, observed - servable))
         scale = 1.0 + backlog / observed
         for row in rows:
             rate = float(row.get("arrival_rate_ewma") or 0.0)
             row["arrival_rate_ewma"] = max(0.0, rate) * scale
         return rows
+
+    def _servable_reference_units(self) -> float:
+        """How much reference-length load the current pool can absorb.
+
+        The binding side is whichever is smaller: the Prefills' capacity (the
+        controller rewrites it each tick from the egress bound) or the Decodes'.
+        Returns 0.0 when either side is unknown, which disables the cap.
+        """
+        config = getattr(self.solver, "config", None)
+        if config is None:
+            return 0.0
+        prefill = [float(value) for value in (getattr(config, "prefill_capacity", {}) or {}).values()
+                   if value and value > 0.0]
+        decode = [float(value) for value in (getattr(config, "decode_capacity", {}) or {}).values()
+                  if value and value > 0.0]
+        if not prefill or not decode:
+            return 0.0
+        return min(sum(prefill), sum(decode))
 
     def build_plan(self, current_ns: int, profiler, schedulers) -> AffinityPlan:
         self.last_execution = ()

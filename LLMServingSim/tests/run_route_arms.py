@@ -46,6 +46,10 @@ ARMS = {
     # is a config property, not a flag, so these two need ``--static-config``.
     "casr_static": ["--enable-casr", "--casr-solver", "lp", "@static"],
     "casr_elastic": ["--enable-casr", "--casr-solver", "lp"],
+    # A *fixed* pool the same size as the baseline's, so the comparison isolates
+    # placement at equal capacity (the arena's casr_lp vs casr_full conflates the
+    # two; pairing a 1-worker pool against a 3-worker baseline measures capacity).
+    "casr_plan3": ["--enable-casr", "--casr-solver", "lp", "@fixed"],
 }
 
 
@@ -91,6 +95,9 @@ def main() -> int:
     parser.add_argument("--max-num-batched-tokens", type=int, default=1024)
     parser.add_argument("--control-interval-ms", type=int, default=100)
     parser.add_argument("--client-concurrency", type=int, default=0)
+    parser.add_argument("--fixed-config", default=None,
+                        help="Cluster config used by arms flagged '@fixed' "
+                             "(a fixed pool the same size as the baseline's).")
     parser.add_argument("--static-config", default=None,
                         help="Cluster config used by arms flagged '@static' "
                              "(a fixed-size Prefill pool).")
@@ -113,6 +120,11 @@ def main() -> int:
                 raise SystemExit(f"arm {arm} needs --static-config")
             flags.remove("@static")
             cluster_config = args.static_config
+        if "@fixed" in flags:
+            if not args.fixed_config:
+                raise SystemExit(f"arm {arm} needs --fixed-config")
+            flags.remove("@fixed")
+            cluster_config = args.fixed_config
         out_csv = out_root / f"{arm}.csv"
         cmd = [
             sys.executable, "-m", "serving",

@@ -174,9 +174,12 @@ class DemandRecoveryOrderTests(unittest.TestCase):
     def setUp(self):
         _needs_pandas()
         from serving.casr.controller import CASRController
+        # A *saturated* pool on purpose: recovering the offered load only
+        # applies when the demand exceeds what the pool can serve (see
+        # DemandEstimateTests).  With headroom there is nothing to recover.
         self.controller = CASRController(1_000_000_000, policy={
-            "solver": "greedy", "prefill_capacity": {"0": 10.0, "1": 10.0},
-            "decode_capacity": {"2": 10.0, "3": 10.0},
+            "solver": "greedy", "prefill_capacity": {"0": 1.0, "1": 1.0},
+            "decode_capacity": {"2": 1.0, "3": 1.0},
         })
 
     class Sched:
@@ -264,6 +267,123 @@ class ObjectiveKnobTests(unittest.TestCase):
                                    "drain_requires_idle_classes": False,
                                    "block_edits_during_transition": False})
         self.assertFalse(off.block_scale_down_when_saturated)
+
+
+class DemandEstimateTests(unittest.TestCase):
+    """The demand estimate must not amplify itself through the backlog.
+
+    Measured 2026-09-23 (main matrix, 16 rps): the controller handed the solver
+    88.7 req/s against a pool that serves 26.3, because ``_inflate_demand``
+    added the Prefill queue's growth to every class's rate and capped it only at
+    5x the observation.  The solver then topped the small Decodes up to their
+    capacity and dumped 76 req/s on the one whose capacity is 12.5.
+    """
+
+    PREFILL = [29.5, 61.1, 89.4]
+    DECODE = [4.5, 9.3, 12.5]
+
+    def _controller(self, multiple=4.0):
+        from serving.casr.controller import CASRController
+        return CASRController(1_000_000_000, policy={
+            "solver": "greedy",
+            "prefill_capacity": {i: v for i, v in enumerate(self.PREFILL)},
+            "decode_capacity": {100 + i: v for i, v in enumerate(self.DECODE)},
+            "backlog_rps_multiple": multiple,
+        })
+
+    def _inflated_total(self, controller, observed, backlog):
+        rows = [{"class_id": "c", "arrival_rate_ewma": observed}]
+        controller._backlog_rps = backlog
+        controller._inflate_demand(rows)
+        return sum(row["arrival_rate_ewma"] for row in rows)
+
+    def test_a_pool_with_headroom_gets_no_inflation(self):
+        controller = self._controller()
+        self.assertAlmostEqual(
+            self._inflated_total(controller, observed=16.0, backlog=100.0),
+            16.0, places=6)
+
+    def test_the_inflation_stops_at_the_capacity_deficit(self):
+        controller = self._controller()
+        total = self._inflated_total(controller, observed=32.0, backlog=1000.0)
+        self.assertGreater(total, 32.0)
+        self.assertLessEqual(total, 32.0 + (32.0 - sum(self.DECODE)) + 1e-6)
+
+    def test_the_estimate_is_monotone_and_bounded_in_the_backlog(self):
+        controller = self._controller()
+        totals = [self._inflated_total(controller, observed=32.0, backlog=backlog)
+                  for backlog in (0.0, 5.0, 50.0, 500.0, 5000.0)]
+        self.assertEqual(totals, sorted(totals), totals)
+        self.assertLessEqual(max(totals), 32.0 + (32.0 - sum(self.DECODE)) + 1e-6)
+
+    def test_the_old_behaviour_stays_available_for_ab(self):
+        controller = self._controller()
+        controller.backlog_capacity_bound = False
+        self.assertAlmostEqual(
+            self._inflated_total(controller, observed=16.0, backlog=100.0),
+            16.0 * 5.0, places=6)
+
+
+class ArrivalEstimateTests(unittest.TestCase):
+    """A burst of dispatch must not read as a burst of demand.
+
+    Measured 2026-09-23 (main matrix, 16 req/s offered, 100 ms control loop):
+    the profiler's rate estimate sat at 80.6 req/s pool-wide because it took
+    ``arrivals / elapsed`` over each 100 ms tick, and the router dispatches in
+    batches once it starts holding requests.  The deployment differences a
+    counter over 1 s; the simulator must not shrink that window just because its
+    control loop is faster.
+    """
+
+    class Req:
+        def __init__(self, class_id):
+            self.class_id = class_id
+            self.original_input = 1024
+
+    def _profiler(self, window_ms=1000.0):
+        from serving.casr.prefix_profiler import PrefixProfiler
+        return PrefixProfiler(block_size=16, arrival_window_ms=window_ms)
+
+    def _total_rate(self, profiler, at_ns):
+        return sum(float(row["arrival_rate_ewma"])
+                   for row in profiler.snapshot(at_ns)["prefix_states"])
+
+    def test_a_burst_is_averaged_over_the_window_not_the_tick(self):
+        profiler = self._profiler()
+        class_id, _ = profiler.assign("m", 1024, 64, [1] * 64)
+        profiler.snapshot(0)                       # baseline tick
+        # 8 requests dispatched inside the first 100 ms -- the shape a held
+        # backlog releases with.  At 2 req/s per class the 1 s window says
+        # 8 req/s, not 8/0.1 = 80.
+        for index in range(8):
+            profiler.observe_arrival(self.Req(class_id), 0,
+                                     1_000_000 + index * 10_000_000)
+        self.assertEqual(self._total_rate(profiler, 100_000_000), 0.0)
+        self.assertAlmostEqual(self._total_rate(profiler, 1_000_000_000), 8.0,
+                               places=6)
+
+    def test_nothing_is_folded_before_the_window_completes(self):
+        profiler = self._profiler()
+        class_id, _ = profiler.assign("m", 1024, 64, [1] * 64)
+        profiler.snapshot(0)
+        for index in range(4):
+            profiler.observe_arrival(self.Req(class_id), 0,
+                                     1_000_000 + index * 10_000_000)
+        self.assertEqual(self._total_rate(profiler, 100_000_000), 0.0)
+        self.assertEqual(self._total_rate(profiler, 500_000_000), 0.0)
+        self.assertGreater(self._total_rate(profiler, 1_000_000_000), 0.0)
+
+    def test_the_window_knob_still_works(self):
+        # A shorter window is allowed (and is exactly why the default must not
+        # follow the control interval): 8 arrivals over 0.2 s reads 40 req/s.
+        profiler = self._profiler(window_ms=200.0)
+        class_id, _ = profiler.assign("m", 1024, 64, [1] * 64)
+        profiler.snapshot(0)
+        for index in range(8):
+            profiler.observe_arrival(self.Req(class_id), 0,
+                                     1_000_000 + index * 10_000_000)
+        self.assertAlmostEqual(self._total_rate(profiler, 200_000_000), 40.0,
+                               places=6)
 
 
 class ClusterConfigHygieneTests(unittest.TestCase):

@@ -927,6 +927,36 @@ class Router:
             return None
         return eligible[self._select_decode(eligible)].instance_id
 
+    def _note_offered_arrival(self, req_data, at_ns):
+        """Tell the profiler a request has been *offered*, wherever it lands.
+
+        Attributed to the Prefill the plan prefers for that class (a held
+        request has no placement yet, and the plan is the router's own opinion
+        anyway); falls back to the least-loaded accepting Prefill.  The counts
+        only feed the demand estimate, so being wrong about the instance costs
+        nothing as long as the class is right.
+        """
+        profiler = self.prefix_profiler
+        if profiler is None:
+            return
+        prefill_id = None
+        plan = self.affinity_plan
+        if plan is not None:
+            try:
+                weights = plan.prefill_for(req_data.get("class_id"))
+            except Exception:
+                weights = None
+            if weights:
+                prefill_id = max(weights.items(), key=lambda item: item[1])[0]
+        if prefill_id is None:
+            eligible = [s for s in self.prefill_schedulers if s.accepts_new_requests]
+            if not eligible:
+                return
+            prefill_id = eligible[self._select_instance(eligible, "prefill")].instance_id
+        profiler.observe_offered_arrival(
+            req_data.get("class_id"), int(prefill_id), int(at_ns),
+            int(req_data.get("input_toks", 0) or 0))
+
     def _decorate_req_data(self, req_data):
         if self.prefix_profiler is None:
             req_data.setdefault('class_id', 'default')
@@ -1078,6 +1108,20 @@ class Router:
             req_data = self._pending_requests[self._pending_idx]
             if req_data['arrival_time_ns'] > current_time_ns:
                 break
+            # Offer observation happens *here*, when the request is due -- not
+            # when it is finally dispatched.  Counting on dispatch makes the
+            # observed arrival rate a property of the dispatcher: once the
+            # router starts holding requests (which is exactly what happens
+            # under back-pressure), a batch release shows up as tens of
+            # arrivals in one window.  Measured 2026-09-23 (16 req/s offered):
+            # a 1 s window read 44 req/s and the plan sized for it.  The real
+            # router counts at the front door, before any placement.
+            # Once per request: a held request is re-examined on every call, and
+            # counting it again each time inflated the offer by the number of
+            # retries (measured: 5x).
+            if not req_data.get("_offered_noted"):
+                req_data["_offered_noted"] = True
+                self._note_offered_arrival(req_data, current_time_ns)
 
             recorded = self.placement_override.get(int(req_data['index']))
             recorded_decode = None
@@ -1230,9 +1274,8 @@ class Router:
                 self._request_pair[request.id] = (pair_prefill, served)
             else:
                 self._request_pair[request.id] = (pair_prefill,)
-            if self.prefix_profiler is not None:
-                self.prefix_profiler.observe_arrival(
-                    request, sched.instance_id, current_time_ns)
+            # The arrival itself was counted when the request became due
+            # (``_note_offered_arrival``); counting again here would double it.
 
             self._pending_idx += 1
             routed += 1

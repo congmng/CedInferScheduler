@@ -65,6 +65,10 @@ class PrefixState:
     # offered load is several times what the clients actually send.
     arrivals_since_sample: int = 0
     arrival_sampled: bool = False
+    #: Smoothed *share* of the window's arrivals (sums to 1 across classes).
+    #: The demand level comes from the global counter; multiplying the two
+    #: keeps ``sum_k rate_k`` from drifting above the true total.
+    share_ewma: float = 0.0
 
     def observe_arrival(self, at_ns: int, input_tokens: int, alpha: float) -> None:
         self.arrivals_since_sample += 1
@@ -76,17 +80,35 @@ class PrefixState:
         self.last_arrival_ns = at_ns
         self.last_access_ns = at_ns
 
-    def sample_arrivals(self, elapsed_s: float, alpha: float) -> None:
-        """Fold this window's arrival count into the rate estimate."""
-        if elapsed_s > 0.0:
-            instant = self.arrivals_since_sample / elapsed_s
-            if self.arrival_sampled:
-                self.arrival_rate_ewma = (alpha * instant +
-                                          (1.0 - alpha) * self.arrival_rate_ewma)
-            else:
-                self.arrival_rate_ewma = instant
-                self.arrival_sampled = True
-            self.arrivals_since_sample = 0
+    def sample_arrivals(self, window_s: float, alpha: float,
+                        total_arrivals: int | None = None) -> None:
+        """Fold a completed sampling window's count into the rate estimate.
+
+        ``window_s`` is the *accumulated* time, and the caller only folds once
+        it has reached the configured horizon (see ``PrefixProfiler``).  The
+        distinction matters: the real control loop differences a counter over
+        1 s, so its rate is a 1 s mean.  Taking the *instantaneous* ratio every
+        control tick instead makes the estimate a peak detector whenever the
+        router dispatches in batches -- which it does exactly under
+        back-pressure.  Measured 2026-09-23 (main matrix, 16 req/s offered,
+        100 ms control interval): a burst of dispatched requests pushed a
+        class whose true rate is 2 req/s to 9.75, and the pool's total from 16
+        to 80.6, which the solver then treated as the offered load.
+        """
+        if window_s <= 0.0:
+            return
+        instant = self.arrivals_since_sample / window_s
+        share = (self.arrivals_since_sample / total_arrivals
+                 if total_arrivals else 0.0)
+        if self.arrival_sampled:
+            self.arrival_rate_ewma = (alpha * instant +
+                                      (1.0 - alpha) * self.arrival_rate_ewma)
+            self.share_ewma = alpha * share + (1.0 - alpha) * self.share_ewma
+        else:
+            self.arrival_rate_ewma = instant
+            self.share_ewma = share
+            self.arrival_sampled = True
+        self.arrivals_since_sample = 0
 
     def observe_lookup(self, at_ns: int, npu_hit: int, storage_hit: int,
                        alpha: float) -> None:
@@ -102,11 +124,26 @@ class PrefixProfiler:
 
     def __init__(self, block_size: int, ewma_alpha: float = 0.2,
                  max_prefix_tokens: int = 512,
-                 arrival_half_life_ms: float = 1000.0):
+                 arrival_half_life_ms: float = 1000.0,
+                 arrival_window_ms: float = 1000.0):
         self.block_size = int(block_size)
         self.ewma_alpha = float(ewma_alpha)
         self.max_prefix_tokens = int(max_prefix_tokens)
         self.arrival_half_life_ns = max(1, int(float(arrival_half_life_ms) * 1_000_000))
+        # How much time the arrival count is accumulated over before a rate is
+        # derived.  The deployment differences a counter every 1 s; a simulator
+        # tuning the control loop to 100 ms must not shrink this along with it,
+        # or the estimate becomes a peak detector (see ``sample_arrivals``).
+        self.arrival_window_ns = max(1, int(float(arrival_window_ms) * 1_000_000))
+        self._window_elapsed_ns = 0
+        #: Global arrival count for the current window, and its smoothed rate.
+        #: The per-class estimates are renormalised against this: with a
+        #: unique-prefix trace every request is its own class, and summing
+        #: per-class EWMAs then adds each one-shot class's decaying tail to the
+        #: total (measured 2026-09-23: 16 req/s offered read as 44-80).
+        self._arrivals_total = 0
+        self._total_rate_ewma = 0.0
+        self._total_sampled = False
         self._states: Dict[Tuple[int, str], PrefixState] = defaultdict(PrefixState)
         self._classes: Dict[str, Dict[str, object]] = {}
         self._representatives: Dict[str, Tuple[int, list[int]]] = {}
@@ -158,6 +195,23 @@ class PrefixProfiler:
     def observe_arrival(self, request, prefill_instance_id: int, at_ns: int) -> None:
         self._states[(int(prefill_instance_id), request.class_id)].observe_arrival(
             int(at_ns), request.original_input, self.ewma_alpha)
+        self._arrivals_total += 1
+
+    def observe_offered_arrival(self, class_id, prefill_instance_id: int,
+                                at_ns: int, input_tokens: int = 0) -> None:
+        """Count a request when it is *offered*, not when it is dispatched.
+
+        The router calls this at the front door (see
+        ``Router._note_offered_arrival``).  Counting on dispatch turned the
+        arrival estimate into a property of the dispatcher: a held backlog
+        released in one go reads as tens of requests per window, and the plan
+        then sizes itself for that phantom load.
+        """
+        if not class_id:
+            return
+        state = self._states[(int(prefill_instance_id), str(class_id))]
+        state.observe_arrival(int(at_ns), int(input_tokens), self.ewma_alpha)
+        self._arrivals_total += 1
 
     def observe_lookup(self, request, prefill_instance_id: int, at_ns: int,
                        npu_hit_tokens: int, storage_hit_tokens: int) -> None:
@@ -168,8 +222,40 @@ class PrefixProfiler:
         elapsed_s = 0.0
         if self._last_sample_ns >= 0 and at_ns > self._last_sample_ns:
             elapsed_s = (at_ns - self._last_sample_ns) / 1e9
-        for state in self._states.values():
-            state.sample_arrivals(elapsed_s, self.ewma_alpha)
+        if elapsed_s > 0.0:
+            self._window_elapsed_ns += int(at_ns - self._last_sample_ns)
+        # Only fold a rate once the sampling horizon is complete; until then the
+        # counts keep accumulating (the caller's ticks can be much faster).
+        if self._window_elapsed_ns >= self.arrival_window_ns:
+            window_s = self._window_elapsed_ns / 1e9
+            total = self._arrivals_total
+            for state in self._states.values():
+                state.sample_arrivals(window_s, self.ewma_alpha, total)
+            # Level from the global counter, shares from the per-class EWMAs:
+            # the shares are renormalised so the published rates sum to exactly
+            # the observed total.  They need it: a class that stops arriving
+            # keeps a decaying share, and new classes keep adding theirs, so the
+            # raw sum drifts above 1 (measured: 16 req/s offered read as 38-80
+            # when the shares were used as-is).
+            instant_total = total / window_s
+            if self._total_sampled:
+                self._total_rate_ewma = (self.ewma_alpha * instant_total +
+                                         (1.0 - self.ewma_alpha) * self._total_rate_ewma)
+            else:
+                self._total_rate_ewma = instant_total
+                self._total_sampled = True
+            share_sum = sum(state.share_ewma for state in self._states.values()
+                            if state.arrival_sampled)
+            scale = (self._total_rate_ewma / share_sum) if share_sum > 0.0 else 0.0
+            for state in self._states.values():
+                if state.arrival_sampled:
+                    state.arrival_rate_ewma = scale * state.share_ewma
+            if os.environ.get("ARRIVAL_DEBUG"):
+                print(f"[arrival] t={at_ns/1e9:.2f}s window={window_s:.2f}s "
+                      f"count={total} classes={len(self._states)} "
+                      f"total_rate={self._total_rate_ewma:.2f}", flush=True)
+            self._arrivals_total = 0
+            self._window_elapsed_ns = 0
         self._last_sample_ns = int(at_ns)
         cache_by_instance = {}
         for scheduler in schedulers:
