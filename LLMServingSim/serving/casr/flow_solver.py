@@ -772,16 +772,28 @@ class CapacityAwareFlowSolver:
         the measured RTT + link, and the Decode instance contributes its own
         measured service time scaled by its queued fraction.
 
-        The decode term prices *queueing* (``service_ms × queued fraction``),
-        not the full generation time, because TTFT ends at the first token.
-        It is deliberately a first-order model: it is used only to decide
-        whether a pair is over the SLO, and it is calibrated against the
-        measured end-to-end service times rather than against a queueing
-        formula.
+        Both legs price *queueing* (``service_ms × queued fraction``), not the
+        full generation time, because TTFT ends at the first token.  It is
+        deliberately a first-order model: it is used only to decide whether a
+        pair is over the SLO, and it is calibrated against the measured
+        end-to-end service times rather than against a queueing formula.
+
+        The Prefill queue term was missing until 2026-09-23 and that made the
+        SLO gate unable to do its job at *any* budget: the prediction said a
+        loaded Prefill still answered in its service time, so the gate could
+        only ever prefer the fastest card (lower service) and never prefer to
+        spread (shorter queue).  Measured on the 16 rps P-15B peak with a
+        2000 ms budget: ``slo_violating_pairs`` was empty at every tick, so
+        ``slo_penalty`` changed nothing; and at a 500 ms budget the gate fired
+        on the *slow* cards' service times, which concentrates load further.
         """
         if work_ratio is None:
             work_ratio = 1.0
-        prefill_ms = (self._service_ms(prefill, self.config.prefill_service_ms) * work_ratio
+        prefill_service_ms = self._service_ms(prefill,
+                                              self.config.prefill_service_ms)
+        prefill_ms = (prefill_service_ms * work_ratio
+                      + prefill_service_ms * work_ratio
+                      * self._queue_fraction(prefill)
                       + float(self.config.prefill_overhead_ms.get(
                           prefill.instance_id, 0.0)))
         # One decode-side contribution is always paid, queued or not; the
@@ -793,6 +805,20 @@ class CapacityAwareFlowSolver:
                      * decode_work_ratio
                      * queue_fraction)
         return (distance * 1000.0 + rtt_ms + transfer_ms + prefill_ms + decode_ms)
+
+    @staticmethod
+    def _queue_fraction(scheduler):
+        """Queued work as a fraction of the instance's slots.
+
+        Same shape the pair cost uses for the Decode: a queued request costs
+        roughly four running ones (it has not started), and ``max_num_seqs``
+        normalises it.  ``waiting``/``running`` may be counts or the actual
+        request lists, depending on the producer.
+        """
+        waiting = len(getattr(scheduler, "waiting", ()) or ())
+        running = len(getattr(scheduler, "running", ()) or ())
+        max_num_seqs = max(1, int(getattr(scheduler, "max_num_seqs", 1) or 1))
+        return (4.0 * waiting + running) / max_num_seqs
 
     @staticmethod
     def _measured_ms(scheduler, measured, service, divisor):

@@ -61,8 +61,13 @@ def main() -> int:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--weights", default="0,0.5,1,2,5")
     parser.add_argument("--knob", default="tail_weight",
-                        choices=["tail_weight", "max_utilization_weight", "backlog_weight"],
+                        choices=["tail_weight", "max_utilization_weight",
+                                 "backlog_weight", "slo_penalty"],
                         help="Which objective knob to sweep.  tail_weight prices the queue a request would meet right now; max_utilization_weight prices the *worst* instance's backlog growth (min-max).")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="Extra ``casr`` key applied to *every* arm, e.g. "
+                             "--set slo_penalty=5 --set backlog_weight=20.  "
+                             "Values parse as JSON (numbers, true/false, null).")
     parser.add_argument("--out-root", default="/tmp/tail-sweep")
     parser.add_argument("--arm", default="lp", choices=["lp", "greedy"])
     parser.add_argument("--num-reqs", type=int, default=0)
@@ -85,6 +90,9 @@ def main() -> int:
         config_path = out_root / f"{tag}.json"
         config = json.loads(json.dumps(base))
         config["casr"][args.knob] = weight
+        for item in args.set:
+            key, _, raw = item.partition("=")
+            config["casr"][key.strip()] = json.loads(raw)
         config_path.write_text(json.dumps(config, indent=1), encoding="utf-8")
         out_csv = out_root / f"{tag}.csv"
         print(f"== {args.knob}={weight:g} ==", flush=True)

@@ -162,6 +162,73 @@ class SloPathTests(unittest.TestCase):
         missed.slo_ttft_ms = 0.5
         self.assertEqual(_slo_columns(missed)[2], "false")
 
+    def test_the_predicted_ttft_prices_the_prefill_queue(self):
+        """A loaded Prefill must predict a worse TTFT than an idle one.
+
+        Without this term the model answered "the Prefill's service time"
+        whatever its queue was, so the SLO gate could only ever prefer the
+        fastest card and never prefer to spread.  Measured 2026-09-23 on the
+        16 rps P-15B peak: with a 2000 ms budget ``slo_violating_pairs`` was
+        empty at every tick, i.e. ``slo_penalty`` was dead at that budget, and
+        at 500 ms it only fired on the slow cards and concentrated load.
+        """
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+
+        class Sched:
+            def __init__(self, instance_id, waiting=0, running=0):
+                self.instance_id = instance_id
+                self.pd_type = "prefill"
+                self.waiting = [None] * waiting
+                self.running = [None] * running
+                self.max_num_seqs = 8
+                self.service_ms = 0.0
+
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
+            {"prefill_service_ms": {"0": 100.0}, "decode_service_ms": {"1": 50.0}}))
+        idle = Sched(0)
+        loaded = Sched(0, waiting=8)
+        args = (idle, Sched(1), {}, 1.0, 0.0, 0.0, 0.0, 0.0)
+        predicted_idle = solver._predicted_ttft_ms(*args)
+        args = (loaded, Sched(1), {}, 1.0, 0.0, 0.0, 0.0, 0.0)
+        predicted_loaded = solver._predicted_ttft_ms(*args)
+        # 100 ms of Prefill service + the Decode's base step (50 / max_num_seqs).
+        self.assertAlmostEqual(predicted_idle, 100.0 + 50.0 / 8, delta=1e-6)
+        # Loaded: the Prefill also pays 4 x 8 waiting / 8 slots of its service.
+        self.assertGreater(predicted_loaded, 400.0)
+        self.assertGreater(predicted_loaded, predicted_idle + 300.0)
+
+    def test_the_slo_gate_flags_a_backed_up_pair(self):
+        """The gate is only useful if a queued pair can actually violate."""
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+
+        class Sched:
+            def __init__(self, instance_id, pd_type, waiting=0):
+                self.instance_id = instance_id
+                self.pd_type = pd_type
+                self.waiting = [None] * waiting
+                self.running = []
+                self.max_num_seqs = 8
+                self.service_ms = 0.0
+                self.start_npu = instance_id
+
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "prefill_service_ms": {"0": 100.0}, "decode_service_ms": {"1": 50.0},
+            "ttft_slo_ms": 300.0, "slo_penalty": 5.0,
+        }))
+        row = {"class_id": "c", "arrival_rate_ewma": 1.0,
+               "requested_tokens_ewma": 1024.0, "requested_tokens": 1024.0,
+               "hit_tokens_ewma": 0.0, "kv_bytes_per_request": 0.0,
+               "prefill_instance_id": 0}
+        prefill = [Sched(0, "prefill", waiting=8)]
+        decode = [Sched(1, "decode")]
+        solver.solve([dict(row)], prefill, decode)
+        self.assertIn((0, 1), solver.diagnostics["slo_violating_pairs"])
+        # Idle Prefill, same budget: no violation, so no penalty.
+        solver.solve([dict(row)], [Sched(0, "prefill")], decode)
+        self.assertEqual(solver.diagnostics["slo_violating_pairs"], [])
+
 
 class DemandRecoveryOrderTests(unittest.TestCase):
     """``build_plan`` must recover the offered load *before* it resizes.
