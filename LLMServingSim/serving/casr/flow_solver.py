@@ -62,6 +62,25 @@ class FlowSolverConfig:
     # same for the first and the last request an instance serves.
     utilization_weight: float = 0.0
     utilization_segments: int = 8
+    # -- Decode tail pricing ------------------------------------------------
+    # ``queue_weight`` prices a dimensionless queue *fraction*, so it is
+    # blind to how long that queue takes to drain: the same ``waiting`` count
+    # costs 46 ms per step on a 5090 and 372 ms on a 4090.  Measured on the
+    # 2026-09-23 peak trace (1900x 1250-token requests, 30 rps for 60 s), that
+    # blind spot was the whole story -- the least-loaded baseline pinned every
+    # request on the fastest Decode (p95 18.8 s) while the plan spread 20-30%
+    # onto 2-3x slower ones and took p95 78-97 s.
+    #
+    # With a positive ``tail_weight`` the queue term becomes a *time*: the
+    # number of decode steps a request has to wait, times this instance's own
+    # step time for this class,
+    #
+    #     queue_wait_ms = queue_fraction x decode_service_ms x decode_work_k
+    #
+    # so routing a long-output class to a slow, deep queue costs what it
+    # actually costs.  Units are seconds, the same as every other term in
+    # ``c_ijk``.  0 = off (the historical objective).
+    tail_weight: float = 0.0
     # A class whose offered load is below this (requests/s) is single-homed:
     # all of its flow is placed on the one Prefill the LP liked best.  A low
     # demand cannot amortise the cold first prefill a second edge costs, and
@@ -209,6 +228,7 @@ class FlowSolverConfig:
             network_weight=float(raw.get("network_weight", 1.0)),
             utilization_weight=float(raw.get("utilization_weight", 0.0)),
             utilization_segments=max(1, int(raw.get("utilization_segments", 8))),
+            tail_weight=float(raw.get("tail_weight", 0.0)),
             single_home_below_rps=float(raw.get("single_home_below_rps", 0.0)),
             class_demand_floor_rps=float(raw.get("class_demand_floor_rps", 0.0)),
             capacity_reference_tokens=int(raw.get("capacity_reference_tokens", 1024)),
@@ -578,6 +598,16 @@ class CapacityAwareFlowSolver:
         queue_fraction = (waiting * 4 + running) / max(1, max_num_seqs)
         queue = self.config.queue_weight * ((waiting * 4 + running) /
                                             max(1, max_num_seqs))
+        # Tail term: the same queue_fraction, converted to the seconds it takes
+        # *on this instance*.  ``decode_work_k`` is the class's output-length
+        # multiplier, so a class that generates four times as many tokens pays
+        # four times the drain time -- and a 2-3x slower Decode pays its own
+        # step time rather than the fleet average.
+        tail = 0.0
+        if self.config.tail_weight:
+            decode_step_ms = (self._service_ms(decode, self.config.decode_service_ms)
+                              * self.decode_work(class_id))
+            tail = self.config.tail_weight * queue_fraction * decode_step_ms / 1000.0
         if work_ratio is None:
             work_ratio = self._cache_work(class_id, int(prefill.instance_id), entry)
         compute = 0.0
@@ -594,7 +624,7 @@ class CapacityAwareFlowSolver:
                           * self.decode_work(class_id))
             compute = self.config.compute_weight * service_ms / 1000.0
         cost = (self.config.network_weight * (distance + rtt + transfer) +
-                queue + compute)
+                queue + tail + compute)
         slo_ms = self.config.class_ttft_slo_ms.get(class_id,
                                                    self.config.ttft_slo_ms)
         if slo_ms > 0 and self._predicted_ttft_ms(
@@ -878,6 +908,8 @@ class CapacityAwareFlowSolver:
                             "use_cache_capacity": self.config.use_cache_capacity,
                             "network_weight": self.config.network_weight,
                             "compute_weight": self.config.compute_weight,
+            "queue_weight": self.config.queue_weight,
+            "tail_weight": self.config.tail_weight,
                             "capped_classes": len(self._last_capped),
                             "ttft_slo_ms": self.config.ttft_slo_ms,
                             "slo_penalty": self.config.slo_penalty,
@@ -1012,6 +1044,8 @@ class CapacityAwareFlowSolver:
             "utilization_weight": self.config.utilization_weight,
             "utilization_segments": self.config.utilization_segments,
             "compute_weight": self.config.compute_weight,
+            "queue_weight": self.config.queue_weight,
+            "tail_weight": self.config.tail_weight,
             "work": self._work_diagnostics(p_work),
             "single_homed_classes": self._last_single_homed,
             "capped_classes": len(self._last_capped),

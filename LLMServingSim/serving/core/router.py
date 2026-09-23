@@ -45,6 +45,28 @@ class Router:
         # wins, exactly like the real client's ``row_slo()``.
         self._cli_slo_ttft_ms = None
         self._cli_slo_tpot_ms = None
+        # -- Deadline-aware Decode placement --------------------------------
+        # ``load`` ranks a Decode by *how full* it is; the same fullness costs
+        # 46 ms per step on a 5090 and 372 ms on a 4090, so a mostly-empty slow
+        # Decode looks cheap while it drains for seconds.  Measured on the
+        # 2026-09-23 peak trace: the plan named the fast Decode, the router's
+        # fallback (once that one stopped accepting) handed 8-11% of the
+        # requests to 2-3x slower ones, and p95 went 18.8 s -> 78-97 s.  With
+        # this on, the fallback minimises the *expected drain time*
+        # (queue_fraction x this instance's step time), skipping candidates
+        # whose wait already exceeds the request's budget when a compliant one
+        # exists.  Off by default: it changes routing, so it must be an arm.
+        options = policy_options or {}
+        self.deadline_aware_decode = bool(options.get("deadline_aware_decode", False))
+        self.decode_reference_tokens = max(
+            1.0, float(options.get("decode_reference_tokens", 16) or 16))
+        self.decode_service_ms = {}
+        for key, value in (options.get("decode_service_ms") or {}).items():
+            try:
+                self.decode_service_ms[int(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        self.tail_debug = bool(os.environ.get("TAIL_SELECT_DEBUG"))
         # Only the domain-aware cluster configs name the Decode half of every
         # pair up front; see ``_decode_instance_id_for``.
         self.name_decode_at_arrival = name_decode_at_arrival
@@ -200,6 +222,70 @@ class Router:
 
     def _get_counter(self, role):
         return self.decode_rr_counter if role == "decode" else self.prefill_rr_counter
+
+    # -- deadline-aware Decode placement (see __init__) ---------------------
+
+    def decode_step_ms(self, scheduler) -> float:
+        """One decode step on this instance, in ms (0 when uncalibrated)."""
+        table = getattr(self, "decode_service_ms", {}) or {}
+        step = table.get(int(scheduler.instance_id))
+        if step is None:
+            step = float(getattr(scheduler, "service_ms", 0.0) or 0.0)
+        return step
+
+    def expected_decode_wait_ms(self, scheduler, output_tokens) -> float:
+        """Milliseconds a request would spend queued on this Decode.
+
+        ``(4 x waiting + running) / max_num_seqs`` is the same queue fraction
+        the solver prices; multiplying it by *this* instance's step time (and
+        by the class's output-length multiplier) turns it into the time it
+        actually takes to drain, which is what a slow Decode was hiding.
+        """
+        step_ms = self.decode_step_ms(scheduler)
+        if step_ms <= 0.0:
+            return 0.0
+        reference = max(1.0, float(getattr(self, "decode_reference_tokens", 16) or 16))
+        multiplier = max(1.0, float(output_tokens or 0) / reference)
+        queue_fraction = ((4 * len(getattr(scheduler, "waiting", ()))
+                           + len(getattr(scheduler, "running", ())))
+                          / max(1, getattr(scheduler, "max_num_seqs", 1)))
+        return queue_fraction * step_ms * multiplier
+
+    def _select_decode(self, eligible, req_data=None):
+        """Index into ``eligible`` for the Decode of this request.
+
+        Falls through to the active routing policy when the deadline-aware
+        placement is off, so every existing arm keeps its exact behaviour.
+        """
+        if not getattr(self, "deadline_aware_decode", False) or not eligible:
+            return self._select_instance(eligible, "decode")
+        output_tokens = 0
+        budget = None
+        if req_data is not None:
+            try:
+                output_tokens = int(req_data.get("output_toks", 0)) - int(
+                    req_data.get("input_toks", 0))
+            except (TypeError, ValueError):
+                output_tokens = 0
+            budget = req_data.get("slo_ttft_ms")
+        scored = [(self.expected_decode_wait_ms(sched, output_tokens),
+                   int(sched.instance_id), index)
+                  for index, sched in enumerate(eligible)]
+        if budget:
+            try:
+                budget = float(budget)
+            except (TypeError, ValueError):
+                budget = None
+        pool = scored
+        if budget:
+            compliant = [item for item in scored if item[0] <= budget]
+            pool = compliant or scored
+        wait_ms, instance_id, index = min(pool, key=lambda item: (item[0], item[1]))
+        if getattr(self, "tail_debug", False):
+            print("[decode-select] " + " ".join(
+                f"d{instance}:{wait:.1f}ms" for wait, instance, _ in scored)
+                + f" budget={budget} -> d{instance_id}", flush=True)
+        return index
 
     def _set_counter(self, role, value):
         if role == "decode":
@@ -653,7 +739,7 @@ class Router:
                     if candidate.accepts_new_requests]
         if not eligible:
             return None
-        return eligible[self._select_instance(eligible, "decode")]
+        return eligible[self._select_decode(eligible, req_data)]
 
     def kv_exchange_decision(self, prefill, decode, tokens, now_ns=0):
         """Local recompute vs P/D handoff, mirroring the real router.
@@ -755,7 +841,7 @@ class Router:
                     if candidate.accepts_new_requests]
         if not eligible:
             return None
-        return eligible[self._select_instance(eligible, "decode")].instance_id
+        return eligible[self._select_decode(eligible)].instance_id
 
     def _decorate_req_data(self, req_data):
         if self.prefix_profiler is None:
@@ -1228,7 +1314,13 @@ class Router:
                             if candidate.accepts_new_requests]
                 if not eligible:
                     raise RuntimeError("No active Decode instance can accept a Prefill handoff")
-                instance_id = self._select_instance(eligible, "decode")
+                # Handoff fallback: same deadline-aware rule, fed from the
+                # request object (it carries its own budget and lengths).
+                instance_id = self._select_decode(eligible, {
+                    "input_toks": req.input,
+                    "output_toks": req.output,
+                    "slo_ttft_ms": getattr(req, "slo_ttft_ms", None),
+                })
                 sched = eligible[instance_id]
             if self.affinity_plan is not None:
                 req.affinity_version = self.affinity_plan.version
