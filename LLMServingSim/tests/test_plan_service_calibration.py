@@ -21,10 +21,13 @@ import unittest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from serving.core.hw_service import (rescale_capacities, rescale_service_times,
+from serving.core.hw_service import (attention_step_ns, rescale_capacities,
+                                     rescale_service_times,
                                      step_cost_ns)  # noqa: E402
 from serving.core.trace_generator import (DECODE_STEP_SCALE,  # noqa: E402
-                                          decode_step_scale)
+                                          _load_perf_db, decode_step_scale,
+                                          set_timing_calibration)
+from serving.core.utils import get_config  # noqa: E402
 
 
 class _UnderAstraSim(unittest.TestCase):
@@ -95,6 +98,90 @@ class StepCostTests(_UnderAstraSim):
         self.assertGreater(long / short, 4.0)
         # Raw profiled prefill on the 0.29.0 bundle (was 107.1 ms on 0.27.1).
         self.assertAlmostEqual(long / 1e6, 68.4, delta=6.0)
+
+
+class AttentionIsPricedTests(_UnderAstraSim):
+    """The capacity model must charge the op that actually fills the step.
+
+    Regression guard for the 2026-09-23 audit (docs/实验数据集与对比基线说明.md
+    6.19): ``step_cost_ns`` summed dense + MoE only, on the assumption that
+    attention is ~0.01 ms at 1k context.  That is true for a dense model and
+    false for a compressed-KV one, and the plan priced one 5090 at 89 req/s of
+    prefill against a measured ~13.5 -- so it single-homed all 740 requests of
+    the 16 rps peak on that worker and the router stalled behind it.
+    """
+
+    def test_attention_dominates_a_compressed_kv_prefill(self):
+        """P-15B's attention is most of the step; Qwen3-8B's is a rounding error."""
+        p15b = step_cost_ns("RTX5090", "casr/P15B", tp=1, tokens=1024) / 1e6
+        qwen = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1,
+                            tokens=1024) / 1e6
+        # P-15B: 11.2 ms of dense + MoE + 47.0 ms of attention == 58.1 ms
+        # (the dense-only figure the old code produced was 11.2 ms).
+        self.assertAlmostEqual(p15b, 58.1, delta=4.0)
+        # Qwen3-8B: 68.4 ms dense + 2.9 ms attention == 71.2 ms, i.e. extra
+        # attention is under 5% of the step -- why the omission never showed.
+        self.assertAlmostEqual(qwen, 71.2, delta=4.0)
+        # A compressed model's prefill is no longer "cheap" next to a dense
+        # one just because its weights are smaller.
+        self.assertLess(p15b, qwen)
+
+    def test_the_block_type_dispatch_is_used_for_every_layer(self):
+        """Each layer must be priced against its own attention table.
+
+        Charging the single full-attention table to all 28 layers is what the
+        flat walk does when it ignores ``layers_block_type``; the windowed
+        (r4/r128) layers are much cheaper, so the dispatched total has to come
+        out lower.  This is the same dispatch the timeline uses.
+        """
+        config = get_config("casr/P15B")
+        db = _load_perf_db("RTX5090", "casr/P15B", "bf16", {1},
+                           config["model_type"])
+        architecture = db["architecture"]
+        dispatched = attention_step_ns(db, 1, config, architecture, 1024)
+        full_only = attention_step_ns(
+            db, 1, {**config, "layers_block_type": None}, architecture, 1024)
+        self.assertGreater(dispatched, 0)
+        self.assertGreater(full_only, dispatched)
+        # All-full is ~222 ms against ~47 ms dispatched on this bundle.
+        self.assertGreater(full_only / dispatched, 2.0)
+
+    def test_capacity_and_step_are_one_statement(self):
+        """The priced capacity is the reciprocal of the priced step.
+
+        The plan's constraint and its cost have to describe the same machine,
+        and the number has to land on what the timeline executes: the P-15B
+        peak ran p4 (RTX5090) at ~13.5 req/s.
+        """
+        config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024}
+        prefill, decode = rescale_capacities(config, self._instances(),
+                                             verbose=False)
+        step_ms = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1,
+                               tokens=1024) / 1e6
+        self.assertAlmostEqual(prefill[0], 1000.0 / step_ms, delta=0.05)
+        # Decode is untouched by the attention term: the calibrated 1-token
+        # step already carries it, so its capacity must stay at what the TPOT
+        # anchor implies.
+        decode_ms = step_cost_ns("RTX5090", "Qwen/Qwen3-8B", tp=1, tokens=1,
+                                 decode=True) / 1e6
+        self.assertAlmostEqual(decode[1], 1000.0 / (16 * decode_ms), delta=0.05)
+
+    def test_the_compressed_kv_capacity_lands_on_the_measured_pool(self):
+        """p4's priced prefill capacity is within 30% of the measured 13.5."""
+        config = {"decode_reference_tokens": 16, "capacity_reference_tokens": 1024}
+        prefill, _ = rescale_capacities(config, self._p15b_instances(), verbose=False)
+        self.assertGreater(prefill[4], 13.5 * 0.7)
+        self.assertLess(prefill[4], 13.5 * 1.3)
+        # The dense-only figure (89.4) is what made the plan single-home.
+        self.assertLess(prefill[4], 30.0)
+
+    def _p15b_instances(self):
+        return [
+            {"instance_id": 4, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "tp_size": 1, "pd_type": "prefill"},
+            {"instance_id": 5, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "tp_size": 1, "pd_type": "decode"},
+        ]
 
 
 class RescaleServiceTimesTests(_UnderAstraSim):

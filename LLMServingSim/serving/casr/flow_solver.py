@@ -558,11 +558,26 @@ class CapacityAwareFlowSolver:
 
     @staticmethod
     def _requested_tokens(entry, prefill_id):
-        """Per-request prompt length observed for one (class, Prefill)."""
+        """Per-request prompt length of this *class*, in tokens.
+
+        The length is a property of the class, not of the (class, Prefill)
+        pair, so a Prefill that has not served the class yet must price the
+        same prompt rather than falling back to "one reference length".  The
+        fallback was not neutral: it made an un-seen Prefill look *cheaper*.
+        Measured 2026-09-23 on the 16 rps P-15B peak, 230 of 559 classes were
+        observed on a single Prefill, so every other Prefill priced those
+        1250-token prompts at 1.0 capacity unit instead of 1.22 -- and the LP
+        loaded the prefill with the most such classes to 89% instead of 108% of
+        its capacity, which is exactly the worker that then queued.
+        """
         for key in ("requested_tokens_ewma", "requested_tokens"):
             values = entry.get(key) or {}
             if isinstance(values, Mapping):
                 value = values.get(prefill_id, values.get(int(prefill_id), 0.0))
+                if not value:
+                    # Any Prefill's observation of this class is the same prompt.
+                    value = max((float(item) for item in values.values()
+                                 if isinstance(item, (int, float))), default=0.0)
             else:
                 value = values
             try:

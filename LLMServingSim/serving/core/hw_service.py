@@ -38,11 +38,40 @@ will actually behave.  Source of the TPOT column:
 ``small3-long-xfer/metrics-load.jsonl``.
 """
 
-from .trace_generator import (_load_architecture, _load_perf_db, _lookup_1d,
-                              _tp_tables, decode_step_scale,
-                              plan_layer_sequences, resolve_variant,
-                              timing_calibration)
+from .trace_generator import (_layer_types, _load_architecture, _load_perf_db,
+                              _lookup_1d, _lookup_attention, _tp_tables,
+                              decode_step_scale, plan_layer_sequences,
+                              resolve_variant, timing_calibration)
 from .utils import get_config
+
+
+def attention_step_ns(db, tp, config, architecture, tokens):
+    """Per-layer attention cost for a ``tokens``-token prompt, in ns.
+
+    One lookup per layer, at ``(prefill_chunk=tokens, kv_prefill=0,
+    n_decode=0, kv_decode=0)`` -- a prompt with no prior context, which is
+    what a reference-length request is.  The **same per-block-type dispatch
+    the timeline uses**: a model that declares ``layers_block_type`` (P-15B:
+    full causal / window 4 / window 128) prices each layer against its own
+    ``attention_<block>.csv``, falling back to the single ``attention`` table
+    when the bundle carries only one.  Returns 0 when the bundle has no
+    attention profile at all, so the flat models that predate it keep working.
+    """
+    names = config.get("layers_block_type")
+    types = architecture.get("layer_types") or {}
+    blocks = int(config.get("num_hidden_layers", 1) or 1)
+    total = 0
+    for layer in range(blocks):
+        table = None
+        if names and types and 0 <= layer < len(names):
+            name = str(names[layer])
+            if name in types:
+                table = f"attention_{name}"
+        try:
+            total += _lookup_attention(db, tp, tokens, 0, 0, 0, table=table)
+        except KeyError:
+            return 0
+    return total
 
 
 def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None, decode=False):
@@ -51,10 +80,24 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None, decode=False):
     Prologue plus ``num_hidden_layers`` blocks plus the head, each layer read
     from the profiler at ``tokens`` tokens.  At ``tokens=1`` that is a Decode
     step, which is a weight read; at the prompt length it is the Prefill's
-    compute.  Attention is deliberately left out: it is context dependent and
-    ~0.01 ms at 1k context, three orders of magnitude below the dense term, so
-    the ratio between two cards is carried by the weight read -- which is what
-    the cluster's TPOT and prefill times measure.
+    compute.  Attention is included on the Prefill path.
+
+    It used to be left out on the assumption that attention is ~0.01 ms at 1k
+    context, three orders of magnitude below the dense term.  That holds for a
+    dense model whose prefill really is a weight read (Qwen3-8B: 2.9 ms of
+    attention against 68.4 ms of dense at 1024 tokens on a 5090), and it is
+    badly false for a compressed-KV/hybrid model, where attention is the
+    prefill: on the P-15B bundle at 1024 tokens, RTX5090, dense + MoE is 11.2 ms
+    and attention is 47.0 ms -- 81% of the step, 4.2x the dense total.  Omitting
+    it put ``prefill_capacity = 1000/step_ms`` at 89 req/s against a measured
+    ~13.5 req/s, and the plan single-homed 740 requests on that one worker while
+    the router stalled behind it (measured 2026-09-23, docs/实验数据集与对比基线说明.md
+    6.19).  Capacity and timeline now read the same tables.
+
+    The Decode path does **not** add attention here: ``decode_step_scale``
+    already carries attention + sampling + scheduler + host for a 1-token step,
+    calibrated per card against the deployment's TPOT, so charging it twice
+    would break that anchor.
 
     ``decode=True`` applies the Decode-side calibration the simulator executes
     with (``trace_generator.DECODE_STEP_SCALE``): the layer-wise profile times
@@ -100,6 +143,11 @@ def step_cost_ns(hardware, model, tp=1, tokens=1, variant=None, decode=False):
                 total += dense_time(layer, blocks)
     for layer in sequence.get("head") or ():
         total += sequence_time(layer, 1)
+    # ``tokens == 1`` is a Decode step whatever the flag says, and that path's
+    # attention is the one ``decode_step_scale`` carries; charge attention only
+    # on a real prompt, so nothing is counted twice.
+    if not decode and tokens > 1:
+        total += attention_step_ns(db, tp, config, architecture, tokens)
     if decode:
         override = timing_calibration().get("decode_scale")
         scale = decode_step_scale(hardware) if override is None else override
@@ -199,10 +247,32 @@ def rescale_capacities(casr_config, instances, verbose=True):
     if decode_capacity:
         casr_config["decode_capacity"] = {
             str(key): round(value, 4) for key, value in sorted(decode_capacity.items())}
+    # Make the *prompt-length* term live.  ``_prefill_length_work`` scales a
+    # request by ``tokens / capacity_reference_tokens`` only when the instance
+    # declares a token-rate ceiling; without it the solver falls back to 1.0,
+    # and 53 of the 59 cluster configs -- including every three-domain matrix
+    # config -- declare none.  The LP then priced a 1250-token prompt as one
+    # 1024-token reference unit, 22% under, which is exactly the margin the
+    # plan needs to keep off a worker that is already at its measured limit.
+    # The ceiling is a restatement of the capacity just resolved, so derive it
+    # here instead of leaving it to each config author.
+    #
+    # The Decode side has the same dead knob (``decode_ms_per_1k_tokens``) and is
+    # deliberately left off: that capacity is a *serial* figure
+    # (``1000 / (reference_tokens x step)``) which understates a batched engine
+    # by roughly ``max_num_seqs``, so scaling the decode load by output length
+    # on top of it would compound two errors instead of removing one.  Fixing
+    # it needs the batched Decode capacity first.
+    if prefill_capacity and not casr_config.get("prefill_tokens_per_s"):
+        casr_config["prefill_tokens_per_s"] = {
+            str(key): round(value * prefill_ref, 4)
+            for key, value in sorted(prefill_capacity.items())}
     if verbose:
         print("  • capacities from profiler : "
               f"prefill {casr_config.get('prefill_capacity')} "
               f"decode {casr_config.get('decode_capacity')}")
+        print("  • length model from profiler : "
+              f"prefill_tokens_per_s {casr_config.get('prefill_tokens_per_s')}")
     return prefill_capacity, decode_capacity
 
 
@@ -266,6 +336,7 @@ def resolve_runtime_capacities(casr_config, instances, verbose=True):
     report = {
         "prefill_capacity": casr_config.get("prefill_capacity"),
         "decode_capacity": casr_config.get("decode_capacity"),
+        "prefill_tokens_per_s": casr_config.get("prefill_tokens_per_s"),
         "kv_bytes_per_token": kv_per_token,
         **resolved,
     }

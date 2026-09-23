@@ -386,6 +386,133 @@ class ArrivalEstimateTests(unittest.TestCase):
                                places=6)
 
 
+class PromptLengthEstimateTests(unittest.TestCase):
+    """The published prompt length must be the prompt's, not ``alpha`` of it.
+
+    Second half of the 2026-09-23 estimate audit.  ``requested_tokens_ewma``
+    decayed *from zero*, so a class the workload visits once -- i.e. every class
+    of the 1250-token CNN/DailyMail matrix, 740 of 740 -- published 250 tokens
+    instead of 1250.  ``_prefill_length_work`` then read ``250 / 1024 -> 1.0``
+    and the solver priced a 1250-token prompt as one 1024-token reference unit,
+    22% under.  It is the same defect ``_class_kv_bytes`` already carries a
+    workaround for.
+    """
+
+    class Req:
+        def __init__(self, class_id, tokens=1250):
+            self.class_id = class_id
+            self.original_input = tokens
+
+    def _profiler(self):
+        from serving.casr.prefix_profiler import PrefixProfiler
+        return PrefixProfiler(block_size=16)
+
+    def _row(self, profiler, class_id, at_ns=0):
+        for row in profiler.snapshot(at_ns)["prefix_states"]:
+            if row["class_id"] == class_id:
+                return row
+        raise AssertionError("class not published")
+
+    def test_a_class_seen_once_publishes_its_real_length(self):
+        profiler = self._profiler()
+        class_id, _ = profiler.assign("m", 1250, 41, [7] * 1250)
+        profiler.observe_arrival(self.Req(class_id), 0, 0)
+        row = self._row(profiler, class_id)
+        # Not alpha x 1250 == 250.
+        self.assertAlmostEqual(float(row["requested_tokens_ewma"]), 1250.0)
+        self.assertEqual(int(row["requested_tokens"]), 1250)
+
+    def test_a_repeated_class_still_smooths(self):
+        profiler = self._profiler()
+        class_id, _ = profiler.assign("m", 1000, 41, [7] * 1000)
+        profiler.observe_arrival(self.Req(class_id, 1000), 0, 0)
+        for index in range(1, 6):
+            profiler.observe_arrival(self.Req(class_id, 2000), 0,
+                                     index * 1_000_000)
+        value = float(self._row(profiler, class_id)["requested_tokens_ewma"])
+        # Bracketed by the two lengths, and no longer anchored on 0.
+        self.assertGreater(value, 1000.0)
+        self.assertLess(value, 2000.0)
+
+
+class PromptLengthPricingTests(unittest.TestCase):
+    """The length factor has to be live, not silently ``1.0``.
+
+    ``_prefill_length_work`` scales by ``tokens / capacity_reference_tokens``
+    only when the instance declares a token-rate ceiling.  53 of the 59 cluster
+    configs -- every three-domain matrix config among them -- declared none, so
+    the documented prompt-length pricing never ran.
+    """
+
+    def setUp(self):
+        _needs_pandas()
+        self._cwd = pathlib.Path.cwd()
+        os.chdir(REPO / "astra-sim")
+        self.addCleanup(os.chdir, self._cwd)
+        from serving.core.hw_service import resolve_runtime_capacities
+        self.resolve = resolve_runtime_capacities
+        self.instances = [
+            {"instance_id": 4, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "pd_type": "prefill", "tp_size": 1, "max_num_seqs": 64},
+            {"instance_id": 5, "hardware": "RTX5090", "model_name": "casr/P15B",
+             "pd_type": "decode", "tp_size": 1, "max_num_seqs": 64},
+        ]
+
+    def _config(self):
+        return {"capacity_reference_tokens": 1024,
+                "decode_reference_tokens": 16,
+                "decode_service_ms": {"5": 80.0}}
+
+    def test_the_resolver_publishes_a_token_ceiling(self):
+        config = self._config()
+        self.resolve(config, self.instances, verbose=False)
+        ceiling = config.get("prefill_tokens_per_s") or {}
+        self.assertIn("4", ceiling)
+        # capacity (reference requests/s) x reference tokens == tokens/s.
+        self.assertAlmostEqual(float(ceiling["4"]),
+                               config["prefill_capacity"]["4"] * 1024, delta=0.1)
+
+    def test_a_long_prompt_costs_more_than_a_reference_one(self):
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+        config = self._config()
+        self.resolve(config, self.instances, verbose=False)
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(config))
+        self.assertAlmostEqual(solver._prefill_length_work(1024, 4), 1.0,
+                               places=4)
+        self.assertAlmostEqual(solver._prefill_length_work(1250, 4),
+                               1250 / 1024, places=4)
+        # Without the ceiling the same call silently returns 1.0, which is the
+        # shape that hid the defect for every three-domain config.
+        bare = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
+            {"capacity_reference_tokens": 1024, "decode_reference_tokens": 16}))
+        self.assertAlmostEqual(bare._prefill_length_work(1250, 4), 1.0, places=4)
+
+    def test_a_prefill_that_has_not_met_the_class_prices_its_real_length(self):
+        """The prompt length belongs to the class, not to the (class, P) pair.
+
+        Measured 2026-09-23 on the 16 rps peak: 230 of 559 classes had been
+        observed on one Prefill only, and ``_requested_tokens`` fell back to
+        "one reference length" for the others -- so those Prefills looked
+        *cheaper* for exactly the prompts they had never seen.  The LP loaded
+        the worker with the most such classes to 89% of capacity while the
+        others sat at 9%, and that worker is the one that queued.
+        """
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
+            {"capacity_reference_tokens": 1024, "decode_reference_tokens": 16,
+             "prefill_capacity": {"4": 17.2},
+             "prefill_tokens_per_s": {"4": 17611.0}}))
+        entry = {"requested_tokens_ewma": {2: 1250.0},   # seen on p2 only
+                 "requested_tokens": {2: 1250.0}}
+        self.assertAlmostEqual(solver._requested_tokens(entry, 2), 1250.0)
+        # p4 has not met the class; it must still price the 1250-token prompt.
+        self.assertAlmostEqual(solver._requested_tokens(entry, 4), 1250.0)
+        self.assertAlmostEqual(solver._prefill_length_work(1250.0, 4),
+                               1250 / 1024, delta=2e-3)
+
+
 class ClusterConfigHygieneTests(unittest.TestCase):
     """P-15B cluster configs must declare the intra-domain link.
 

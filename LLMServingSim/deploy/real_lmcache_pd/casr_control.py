@@ -249,6 +249,11 @@ class ClassState:
     # per-request EWMA too; dividing by the cumulative counter makes the hit
     # ratio decay like 1/N and erases prefix affinity from the solver input.
     requested_tokens_ewma: float = 0.0
+    # ``False`` until the first observation, which then *is* the estimate.
+    # Decaying from zero reports ``alpha`` of the true prompt length for a class
+    # the workload visits once -- a 1250-token prompt published as 250, which
+    # made the solver price every request as one reference length.
+    requested_tokens_observed: bool = False
     hit_tokens_ewma: float = 0.0
     kv_bytes_per_request: float = 0.0
     last_arrival_ns: int = 0
@@ -422,8 +427,12 @@ class RealCASRController:
         state.arrivals_since_sample += 1
         state.last_arrival_ns = now_ns
         state.kv_bytes_per_request = max(state.kv_bytes_per_request, float(kv_bytes))
-        state.requested_tokens_ewma = (self.alpha * float(prompt_tokens) +
-                                       (1.0 - self.alpha) * state.requested_tokens_ewma)
+        if state.requested_tokens_observed:
+            state.requested_tokens_ewma = (self.alpha * float(prompt_tokens) +
+                                           (1.0 - self.alpha) * state.requested_tokens_ewma)
+        else:
+            state.requested_tokens_ewma = float(prompt_tokens)
+            state.requested_tokens_observed = True
         state.pending.append(float(prompt_tokens))
         # The workload declares its own per-class budget (trace row / client
         # fallback).  Keep the tightest bound seen for a class: if two requests

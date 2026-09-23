@@ -56,6 +56,13 @@ class PrefixState:
     # the whole run and dividing by it makes the observed hit ratio decay like
     # 1/N, which silently erases prefix affinity from the control plane.
     requested_tokens_ewma: float = 0.0
+    #: Whether ``requested_tokens_ewma`` has been initialised from a real
+    #: observation.  Decaying *from zero* makes the estimate ``alpha`` of the
+    #: true length for a class seen once -- a 1250-token prompt is published as
+    #: 250 -- and a unique-prompt workload is nothing but classes seen once, so
+    #: the solver priced every request as one reference length.  Same defect the
+    #: KV-bytes estimate had; here it silently disabled the prompt-length term.
+    requested_tokens_observed: bool = False
     last_access_ns: int = -1
     last_arrival_ns: int = -1
     # Arrivals counted since the last control tick.  The rate is derived from a
@@ -75,8 +82,15 @@ class PrefixState:
         self.reuse_ewma = alpha * 1.0 + (1.0 - alpha) * self.reuse_ewma
         self.request_count += 1
         self.requested_tokens += int(input_tokens)
-        self.requested_tokens_ewma = (alpha * float(input_tokens) +
-                                      (1.0 - alpha) * self.requested_tokens_ewma)
+        # The first observation *is* the estimate (as ``sample_arrivals`` does
+        # for the rate): decaying from zero would report ``alpha`` of the true
+        # prompt length for every class the workload only ever visits once.
+        if self.requested_tokens_observed:
+            self.requested_tokens_ewma = (alpha * float(input_tokens) +
+                                          (1.0 - alpha) * self.requested_tokens_ewma)
+        else:
+            self.requested_tokens_ewma = float(input_tokens)
+            self.requested_tokens_observed = True
         self.last_arrival_ns = at_ns
         self.last_access_ns = at_ns
 

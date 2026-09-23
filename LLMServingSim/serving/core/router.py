@@ -8,6 +8,9 @@ from .logger import get_logger
 from .block_pool import NONE_HASH
 
 
+_MAX_PLAN_ASSIGNMENTS = 200_000
+
+
 class Router:
     def __init__(
             self,
@@ -31,6 +34,11 @@ class Router:
         self.req_num = req_num
         self.prefix_profiler = prefix_profiler
         self.affinity_plan = None
+        #: Deficit counters for ``_select_weighted``, keyed by
+        #: ``(assignment_key, instance_id)``.  They are **not** reset when a new
+        #: plan is installed: the aggregate split has ~1.6 arrivals per control
+        #: tick at the 16 rps peak, and restarting the balance each tick sends
+        #: every one of them to the highest-weight worker.
         self._plan_assignments = defaultdict(int)
         # P/D handoffs a Decode refused because its KV pool was full; retried
         # on the next transfer call (see ``transfer_prefill_request``).
@@ -553,7 +561,13 @@ class Router:
         idle (run 0, wait 0) while two others queued 82 and 74 requests.
         """
         self.affinity_plan = plan
-        self._plan_assignments.clear()
+        # ``_plan_assignments`` is deliberately *not* cleared here.  It used to
+        # be, and that reset the deficit balance every control tick (~1.6
+        # arrivals at the 16 rps peak), so the split degenerated to "always the
+        # highest-weight worker": measured 2026-09-23, a plan asking for 91 / 9
+        # dispatched 737 of its 740 requests to the 91 % worker while the other
+        # sat idle.  See ``_select_weighted``.
+        #
         # Aggregate Prefill split of the plan.  A class the plan cannot name
         # (every request of a unique-prompt workload is its own class, so most
         # arrivals land here) still has to follow the *intended* load split --
@@ -604,6 +618,14 @@ class Router:
         selected = self._least_loaded([sched for sched in candidates
                                        if score(sched) >= highest - band])
         self._plan_assignments[(assignment_key, selected.instance_id)] += 1
+        # The counters are not reset per tick (see ``install_affinity_plan``),
+        # so a unique-prompt trace adds one key per request.  Prune the
+        # per-class keys when they grow past any plausible working set and keep
+        # the aggregate split, which is the one that must stay balanced.
+        if len(self._plan_assignments) > _MAX_PLAN_ASSIGNMENTS:
+            for key in [key for key in self._plan_assignments
+                        if key[0] != "prefill_aggregate"]:
+                del self._plan_assignments[key]
         return selected
 
     def _occupancy_weights(self, candidates, weights, current_time_ns):

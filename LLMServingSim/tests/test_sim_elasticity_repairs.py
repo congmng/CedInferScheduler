@@ -145,6 +145,33 @@ class RouterPlanAggregateTests(unittest.TestCase):
         self.assertGreater(picked[1], 20)
         self.assertLess(picked[1], 60)
 
+    def test_the_split_survives_a_plan_reinstall(self):
+        """The control loop re-installs the plan every tick; the split must hold.
+
+        The measured bug (2026-09-23, 16 rps P-15B peak): installing a plan also
+        reset the deficit counters, and at ~1.6 arrivals per 100 ms tick the
+        balance never recovered -- a 91 / 9 plan dispatched 737 of 740 requests
+        to the 91 % worker, which then queued ~250 requests while the other
+        worker sat at zero.  Every pick here is preceded by an install, exactly
+        as the event loop does it.
+        """
+        router = self.router()
+        flows = [FlowAssignment("c", 0, 10, 9.1, 0.1),
+                 FlowAssignment("c", 1, 10, 0.9, 0.1)]
+        candidates = router.prefill_schedulers
+        picked = collections.Counter()
+        for _ in range(740):
+            router.install_affinity_plan(self.plan(), flows)
+            sched = router._select_weighted(candidates,
+                                            router._plan_prefill_totals,
+                                            ("prefill_aggregate",))
+            picked[sched.instance_id] += 1
+        share = picked[1] / sum(picked.values())
+        # ~1/10 of the plan's flow, not zero: the band is 5 % of the score.
+        self.assertGreater(share, 0.03)
+        self.assertLess(share, 0.20)
+        self.assertGreater(picked[0], picked[1])
+
 
 class DecodeBackpressureTests(unittest.TestCase):
     class _KV:
