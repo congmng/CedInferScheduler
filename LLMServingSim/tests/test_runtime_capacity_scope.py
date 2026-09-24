@@ -336,6 +336,107 @@ class ObjectiveKnobTests(unittest.TestCase):
         self.assertFalse(off.block_scale_down_when_saturated)
 
 
+class CongestionPriceTests(unittest.TestCase):
+    """The convex utilisation price and its closed-form twin must agree.
+
+    ``_congestion_variables`` prices an instance with ``m`` linear blocks, and
+    ``_congestion_price`` reproduces the total without rebuilding the LP --
+    plan hysteresis and the structural counterfactuals are scored with the
+    second one.  If the two drift apart, an incumbent is judged by a different
+    objective than the one it was chosen by (docs/CASR量化设计.md §3.2.1).
+    """
+
+    def _solver(self, weight=1.0, segments=8, **extra):
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+        return CapacityAwareFlowSolver(FlowSolverConfig.from_dict(
+            {"utilization_weight": weight, "utilization_segments": segments,
+             **extra}))
+
+    def test_closed_form_is_the_analytic_convex_price(self):
+        # w * s * L^2 / (2K): nearly free on the first request, a full service
+        # time on the last one, linear in between.  The segment sum is the
+        # staircase integral of that curve, so it is exact at block boundaries
+        # and overestimates by at most w*s*K/(8*m^2) in between (0.39% of the
+        # full-capacity price at m=8).
+        solver = self._solver()
+        for load, capacity, service_ms in ((6.0, 10.0, 100.0),
+                                           (2.5, 8.0, 448.994),
+                                           (13.0, 13.5788, 290.909)):
+            price = solver._congestion_price(load, capacity, service_ms)
+            analytic = (service_ms / 1000.0) * load ** 2 / (2.0 * capacity)
+            tolerance = (service_ms / 1000.0) * capacity / (8.0 * 8 ** 2)
+            self.assertGreaterEqual(price + 1e-9, analytic)
+            self.assertLessEqual(price, analytic + tolerance + 1e-9)
+        # Exact at a block boundary -- a full instance costs w*s*K/2.
+        self.assertAlmostEqual(solver._congestion_price(10.0, 10.0, 300.0),
+                               0.5 * 0.3 * 10.0, places=9)
+
+    def test_the_marginal_price_saturates_above_capacity(self):
+        # The last block is unbounded, so overload stays feasible and its
+        # marginal price caps at w*s*(2m-1)/(2m), i.e. ~94% of a service time.
+        # That is why the term cannot stop a pool from running at 100%
+        # utilisation -- ``prefill_queue_weight`` is the term that does
+        # (P-15B WAN, 2026-09-24).
+        solver = self._solver()
+        capacity, service_ms = 10.0, 300.0
+        at_capacity = solver._congestion_price(capacity, capacity, service_ms)
+        self.assertAlmostEqual(at_capacity, 0.5 * 0.3 * capacity, places=9)
+        overload = solver._congestion_price(2.0 * capacity, capacity, service_ms)
+        # One extra capacity-unit is priced at the last (capped) marginal
+        # price, after which nothing rises any further.
+        self.assertAlmostEqual(overload - at_capacity,
+                               0.3 * 15.0 / 16.0 * capacity, places=9)
+
+    def test_it_prices_utilisation_not_card_speed(self):
+        # Both are at 50% utilisation (10/20 and 5/10) and have the same
+        # ``s * K``, so the price is equal: a card is charged for being *full*,
+        # not for being slow.  The speed difference is the compute term's job.
+        solver = self._solver()
+        self.assertAlmostEqual(solver._congestion_price(10.0, 20.0, 100.0),
+                               solver._congestion_price(5.0, 10.0, 200.0),
+                               places=9)
+
+    def test_the_lp_prices_exactly_this_closed_form(self):
+        # Single Prefill/Decode pair with every other objective term switched
+        # off, so the LP's objective is the congestion price alone.
+        from serving.casr.flow_solver import (CapacityAwareFlowSolver,
+                                              FlowSolverConfig)
+
+        class Sched:
+            def __init__(self, instance_id, role, service_ms):
+                self.instance_id = instance_id
+                self.pd_type = role
+                self.max_num_seqs = 64
+                self.running = []
+                self.waiting = []
+                self.start_npu = 0
+                self.service_ms = service_ms
+
+        solver = CapacityAwareFlowSolver(FlowSolverConfig.from_dict({
+            "solver": "lp",
+            "overflow_penalty": 0.0,
+            "utilization_weight": 1.0,
+            "prefill_capacity": {"0": 10.0},
+            "decode_capacity": {"2": 100.0},
+            "prefill_service_ms": {"0": 100.0},
+            "decode_service_ms": {"2": 10.0},
+        }))
+        rows = [{"class_id": "c", "prefill_instance_id": 0,
+                 "arrival_rate_ewma": 6.0, "hit_tokens_ewma": 0.0,
+                 "requested_tokens": 1024, "requested_tokens_ewma": 1024.0}]
+        try:
+            solver.solve(rows, [Sched(0, "prefill", 100.0)],
+                         [Sched(2, "decode", 10.0)])
+        except ImportError:
+            self.skipTest("OR-Tools is optional")
+        expected = (solver._congestion_price(6.0, 10.0, 100.0)
+                    + solver._congestion_price(6.0, 100.0, 10.0))
+        self.assertGreater(expected, 0.0)
+        self.assertAlmostEqual(solver.diagnostics["objective"], expected,
+                               places=6)
+
+
 class DemandEstimateTests(unittest.TestCase):
     """The demand estimate must not amplify itself through the backlog.
 
