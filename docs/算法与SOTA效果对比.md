@@ -4,14 +4,21 @@
 机制映射见 `docs/SOTA覆盖与模拟器基线映射.md`，逐项推导见
 `docs/实验数据集与对比基线说明.md` §6.26–6.31，结论汇总见 `docs/CASR多环境评估总结.md`。
 
-## 1 对照臂代表哪些 SOTA
+## 1 对照臂代表哪些 SOTA（系统名 + 我们实现的版本 + 差别）
 
-| 臂 | 对应路线/系统 | 它的决策依据 | 做不了什么 |
-|---|---|---|---|
-| `load` | 基线：least-load（vLLM/LMCache 部署的常规路由） | `(inflight+1)/capacity` | 不看 KV 搬运、不做结构动作 |
-| `cache_aware` | SGLang / RadixAttention 一类**前缀感知路由** | 最长前缀匹配优先，忙则溢出到最闲 | 同上；且本矩阵零复用 |
-| `kv_aware` | Mooncake / LMCache 一类**KV 中心路由** | producer 出口排队 + 序列化时间与算力等待取 max | 只选边，不改结构 |
-| **CASR** | 本文：状态条件化 P-D 关系矩阵 + 结构重构 + 存算协同 | LP：类级命中工作量 → 容量/链路约束 + P/D 单位成本；KV 预算**按配对**；排队进目标函数；结构动作按反事实收益 | — |
+> 出处按公开时间标注，写作时需再核对 venue/版本；我们比较的是**机制**，不是复现某个 commit。
+> 更完整的三列对照（含未实现项）见 `docs/组会汇报_2026-09-24.md` §4.0。
+
+| 臂 | 对应 SOTA 系统 | 它的决策依据 | **我们实现成什么（保真度）** | **我们的算法与它的差别** |
+|---|---|---|---|---|
+| `load` | **vLLM + LMCache 的 disagg 路由**（工程基线）；least-load 的通用形态 | `(inflight+1)/capacity` | 按真机路由器的同名策略实现（`--request-routing-policy LOAD`） | 它只看"谁最闲"；我们看"谁的单位成本最低 + KV 预算是否越界 + 结构是否值得改" |
+| `cache_aware` | **SGLang / RadixAttention**（NeurIPS'24）+ **SGLang router**（2025） | 最长前缀匹配优先，命中者优先，忙则溢出到最闲 | **逐字同语义**：与真机 `_pick_cache_aware` 一致（含 `CACHE_AWARE_OVERFLOW=0.75`） | 它在**既定实例集合内选边**；我们把缓存状态变成**容量与结构决策的输入**（命中率进 `w[i,k]`→LP，并决定加行/预热） |
+| `kv_aware` | **Mooncake**（FAST'25，KVCache-centric）；**NIXL / LMCache** 数据面 | 按 KV 传输代价/链路占用选边 | **机制等价**：producer 出口排队 + 序列化时间 与 算力等待 取 max（非其实现） | 它的对象是"怎么搬得快"；我们把 KV 字节做成**一等约束**（按配对的链路预算），并让"搬/不搬"参与**结构决策** |
+| **CASR** | 本文：状态条件化 P-D 关系矩阵 + 结构重构 + 存算协同 | LP：类级命中工作量 → 容量/链路约束 + P/D 单位成本 | 新增：KV 预算**按配对拆分**、排队进目标函数、结构动作按反事实收益（含启动成本） | — |
+
+**明确没有实现（所以本表不能声称胜过它们）**：DistServe/Splitwise 的 **P:D 比例搜索**、
+**Llumnix** 的实例内迁移、**ServerlessLLM** 的快速加载、**DOPD 类**的纯利用率阈值扩缩容
+（出处待核对）、**PrfaaS 类**的跨 DC 阈值搜索。
 
 所有臂共享：同一 vLLM/LMCache 语义的时间线（同一个 trace generator）、同一 SLO 档
 （TTFT 1500 ms / TPOT 50 ms）、同一 `local_prefill: auto`（逐请求"搬 vs 本地重算"）、
