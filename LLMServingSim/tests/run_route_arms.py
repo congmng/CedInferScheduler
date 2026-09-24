@@ -73,6 +73,10 @@ ARMS = {
     # routing so the arm isolates the *ratio* decision.
     "distserve": ["--request-routing-policy", "LOAD", "@fixed"],
     "distserve_lp": ["--enable-casr", "--casr-solver", "lp", "@fixed"],
+    # NetKV-class Decode choice: keep the baseline's Prefill routing, but rank
+    # the Decode by the *drain time* the request would join rather than by
+    # occupancy -- the network/queue-aware D selection a KV-aware router does.
+    "netkv": ["--request-routing-policy", "LOAD", "@overlay"],
 }
 
 #: Per-arm cluster-config overlays, deep-merged into a copy of
@@ -105,6 +109,7 @@ OVERLAYS = {
         "llumnix_gain_ratio": 2.0,
         "llumnix_batch": 4,
     }},
+    "netkv": {"casr": {"deadline_aware_decode": True}},
 }
 
 

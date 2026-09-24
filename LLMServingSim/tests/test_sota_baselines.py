@@ -307,6 +307,47 @@ class BootModelTests(unittest.TestCase):
         self.assertLess(serial, 24000.0)
 
 
+class ArmRegistryTests(unittest.TestCase):
+    """Every SOTA arm is declared *and* runnable through the harness."""
+
+    def test_the_new_arms_are_registered(self):
+        from run_route_arms import ARMS
+        expected = {"dopd", "prfaas", "prfaas_tight", "llumnix",
+                    "serverless_elastic", "distserve", "distserve_lp", "netkv"}
+        self.assertTrue(expected.issubset(set(ARMS)),
+                        msg=sorted(expected - set(ARMS)))
+
+    def test_overlays_and_arms_agree(self):
+        """No arm asks for an overlay that does not exist, and no overlay is
+        unreachable (an arm that would never apply it)."""
+        from run_route_arms import ARMS, OVERLAYS
+        for arm, flags in ARMS.items():
+            if "@overlay" in flags:
+                self.assertIn(arm, OVERLAYS, msg=arm)
+        for arm in OVERLAYS:
+            self.assertIn(arm, ARMS, msg=arm)
+            self.assertIn("@overlay", ARMS[arm], msg=arm)
+
+    def test_the_netkv_arm_turns_on_the_drain_time_decode(self):
+        from run_route_arms import OVERLAYS, _merge
+
+        class Sched:
+            def __init__(self, instance_id, role):
+                self.instance_id = instance_id
+                self.pd_type = role
+                self.node_id = 0
+                self.max_num_seqs = 8
+                self.waiting = []
+                self.running = []
+
+        config = _merge({"casr": {"decode_capacity": {"1": 4.0}}},
+                        OVERLAYS["netkv"])
+        from serving.core.router import Router
+        router = Router(2, [Sched(0, "prefill"), Sched(1, "decode")], 0,
+                        "LOAD", policy_options=config["casr"])
+        self.assertTrue(router.deadline_aware_decode)
+
+
 class LlumnixMigrationTests(unittest.TestCase):
     """Llumnix-style migration moves queued Decode work and charges the copy."""
 

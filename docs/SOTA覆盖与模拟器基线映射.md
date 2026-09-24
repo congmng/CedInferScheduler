@@ -17,7 +17,7 @@
 | Splitwise（2024） | 机器级 prompt/decode 分池 | 分池 + 阶段迁移 | 同上（配比搜索即"分池"决策；池内路由仍是最简 `load`） |
 | SGLang / RadixAttention（2024–2025） | 前缀复用 + cache-aware 路由 | 最长前缀匹配优先、忙则溢出 | **`cache_aware`**（与真机 `_pick_cache_aware` 同语义） |
 | Mooncake / KVCache-centric（2025） | 以 KV 为中心的数据面 + transfer engine | 按 KV 字节与链路占用定价 producer | **`kv_aware`** |
-| NetKV 类 KV-aware decode 选择 | P 固定后按 queue/网络/KV 选 D | 网络+队列感知的 D 选择 | `_decode_cost_select`（CASR 内部；非独立臂） |
+| NetKV 类 KV-aware decode 选择 | P 固定后按 queue/网络/KV 选 D | 网络+队列感知的 D 选择 | **`netkv`**（`deadline_aware_decode`：按"要加入的排水时间"选 D，不按占用率）；CASR 内部另走 `_decode_cost_select` |
 | LMCache / NIXL（2024–2025） | KV 存取与传输 | 逐请求"搬 vs 本地重算" | 所有臂共享的 `local_prefill: auto` |
 | DOPD 类动态 P/D autoscaling | 按需求调整 P/D 数量 | 需求/利用率阈值扩容 | **`dopd`**（`serving/casr/autoscalers.py::ThresholdScaler`，利用率/队列阈值 + 迟滞）；`casr_elastic` 是反事实收益版 |
 | Llumnix（2024） | 实例内请求迁移 | 迁移在途请求 | **`llumnix`**（`serving/core/migration.py`）：队列重平衡 + KV 搬运计费；**未建模**实例内 block 级搬移 |
