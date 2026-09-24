@@ -26,6 +26,8 @@ source is above ``llumnix_hot_threshold`` of its slots, the target is below
 
 from __future__ import annotations
 
+from .request import RequestStatus
+
 
 class LlumnixMigrator:
     """Periodic Decode-queue rebalancing with a modelled copy cost."""
@@ -34,10 +36,25 @@ class LlumnixMigrator:
         options = options or {}
         interval_ms = float(options.get("llumnix_interval_ms", 0.0) or 0.0)
         self.interval_ns = max(0, int(interval_ms * 1_000_000))
-        self.hot_threshold = float(options.get("llumnix_hot_threshold", 1.0) or 0.0)
-        self.cold_threshold = float(options.get("llumnix_cold_threshold", 0.5) or 0.0)
-        self.min_gain = float(options.get("llumnix_min_gain", 0.25) or 0.0)
+        #: The trigger is a *drain time*, not a load fraction: an instance at
+        #: ``(queued + running) / slots`` of its batch has that much work left,
+        #: and the same fraction costs 46 ms/step on a 5090 and 372 ms on a
+        #: 4090.  Millisecond thresholds keep the two comparable.
+        self.hot_ms = float(options.get("llumnix_hot_ms", 50.0) or 0.0)
+        self.cold_ms = float(options.get("llumnix_cold_ms", 20.0) or 0.0)
+        self.min_gain_ms = float(options.get("llumnix_min_gain_ms", 30.0) or 0.0)
         self.batch = max(1, int(options.get("llumnix_batch", 4) or 1))
+        # A request that is already stepping can still move, but the copy grows
+        # with everything it has generated.  Llumnix prefers the request with
+        # the least remaining work; this is the same idea with a bound that
+        # keeps the move cheap: only requests that have generated at most this
+        # many tokens are eligible.
+        self.migrate_running = bool(options.get("llumnix_migrate_running", True))
+        self.max_moved_tokens = int(options.get("llumnix_max_moved_tokens", 64) or 0)
+        # Llumnix only migrates when the move pays for itself.  The benefit is
+        # the work taken off the source; the cost is the KV copy plus the queue
+        # the request joins on the target.
+        self.gain_ratio = float(options.get("llumnix_gain_ratio", 1.0) or 0.0)
         self.next_ns = self.interval_ns if self.interval_ns else -1
         #: Observability: how many requests each direction has moved.
         self.moved = 0
@@ -56,6 +73,53 @@ class LlumnixMigrator:
         return int(getattr(req, "original_input", 0)
                    or getattr(req, "input", 0) or 0)
 
+    def drain_ms(self, router, sched):
+        """How long this Decode needs to work off what it is already holding."""
+        return self._drain_ms(router, sched, extra=0)
+
+    def arrival_ms(self, router, sched):
+        """Drain time this instance would have *after* taking one more request.
+
+        The source's pressure is the cost of leaving the request where it is;
+        the target's is the cost of putting it there.  Scoring a target by its
+        *idle* drain time is the mistake the deadline-aware Decode placement
+        already made once: an idle RTX3090 looks cheap (172 ms) while the next
+        request waits 16x its own step -- moving onto it turned a 27-move run
+        into a 3 773 ms mean against 2 977 ms for the arm that moved nothing
+        (measured 2026-09-24, P-15B WAN peak).
+        """
+        return self._drain_ms(router, sched, extra=1)
+
+    def _drain_ms(self, router, sched, extra=0):
+        slots = max(1, int(getattr(sched, "max_num_seqs", 1) or 1))
+        queued = (4 * len(getattr(sched, "waiting", ()) or ())
+                  + len(getattr(sched, "running", ()) or ()) + extra)
+        occupancy = queued / slots
+        table = (getattr(router, "capacity_tables", {}) or {}).get("decode", {}) or {}
+        capacity = table.get(int(sched.instance_id)) or slots
+        inflight = (getattr(router, "_assigned", {}) or {}).get(
+            int(sched.instance_id), 0)
+        load = (inflight + 1 + extra) / capacity if capacity else 1.0
+        return max(occupancy, load) * self.step_ms(router, sched)
+
+    @staticmethod
+    def step_ms(router, sched):
+        """One executed token on this instance, in milliseconds.
+
+        ``decode_service_ms`` is the *deployment's* measured per-token step
+        (772 ms on the 3090) while this simulator executes the P-15B Decode in
+        ~14 ms.  The queue this arm balances is the executed one, so the price
+        of a slot has to be the executed step -- and the resolved capacity *is*
+        ``1000 / (reference_tokens x step)``.
+        """
+        table = (getattr(router, "capacity_tables", {}) or {}).get("decode", {}) or {}
+        capacity = table.get(int(sched.instance_id))
+        if capacity:
+            reference = float(getattr(router, "decode_reference_tokens", 16.0) or 16.0)
+            return 1000.0 / (reference * capacity)
+        return (getattr(router, "decode_service_ms", {}) or {}).get(
+            int(sched.instance_id), 0.0) or 100.0
+
     def migrate(self, router, current_ns):
         """Rebalance every Decode's queue for one control tick.
 
@@ -69,15 +133,31 @@ class LlumnixMigrator:
         if len(decodes) < 2:
             self.last_reason = "fewer than two active Decodes"
             return 0
-        scored = sorted(((router._instance_load_score("decode", item),
+        # Source: the instance whose queue the request is stuck behind.
+        scored = sorted(((self.drain_ms(router, item),
                           int(item.instance_id), item) for item in decodes),
                         key=lambda entry: (-entry[0], entry[1]))
         hot_score, _, hot = scored[0]
-        cold_score, _, cold = scored[-1]
-        if (hot_score < self.hot_threshold or cold_score > self.cold_threshold
-                or hot_score - cold_score < self.min_gain):
-            self.last_reason = (f"no eligible pair (hot {hot_score:.2f} -> "
-                                f"cold {cold_score:.2f})")
+        # Target: the instance that would be cheapest to land on, i.e. the one
+        # with the smallest drain time *after* taking this request.
+        landing = sorted(((self.arrival_ms(router, item),
+                           int(item.instance_id), item) for item in decodes),
+                         key=lambda entry: (entry[0], entry[1]))
+        cold_score, _, cold = landing[0]
+        if cold is hot:
+            cold_score, _, cold = landing[1]
+        if __import__("os").environ.get("LLUMNIX_DEBUG"):
+            print(f"[llumnix] t={current_ns/1e9:.1f}s "
+                  + " ".join(f"d{entry[1]}={entry[0]:.0f}ms"
+                             f"(w{len(getattr(entry[2], 'waiting', ()) or ())}"
+                             f"/r{len(getattr(entry[2], 'running', ()) or ())})"
+                             for entry in scored)
+                  + f" pending={len(getattr(router, '_pending_handoffs', ()) or ())}",
+                  flush=True)
+        if (hot_score < self.hot_ms or cold_score > self.cold_ms
+                or hot_score - cold_score < self.min_gain_ms):
+            self.last_reason = (f"no eligible pair (hot {hot_score:.0f} ms -> "
+                                f"cold {cold_score:.0f} ms)")
             return 0
         self.attempts += 1
         moved = 0
@@ -103,10 +183,17 @@ class LlumnixMigrator:
                 self._repoint(router, req, hot, cold, current_ns)
                 cold.waiting.append(req)
                 moved += 1
+        # 3. Requests that are stepping but have barely started.  Their blocks
+        #    are released on the source and claimed on the target, and the copy
+        #    is charged; a target that cannot take it rolls the move back into
+        #    the source's own queue.
+        if self.migrate_running and moved < self.batch:
+            moved += self._migrate_running(router, hot, cold, current_ns,
+                                           self.batch - moved)
         self.moved += moved
         self.last_reason = (f"moved {moved} request(s) d{hot.instance_id} -> "
-                            f"d{cold.instance_id} (score {hot_score:.2f} -> "
-                            f"{cold_score:.2f})")
+                            f"d{cold.instance_id} (drain {hot_score:.0f} ms -> "
+                            f"{cold_score:.0f} ms)")
         return moved
 
     def _repoint(self, router, req, hot, cold, current_ns):
@@ -116,6 +203,83 @@ class LlumnixMigrator:
                                + max(0.0, cost_ms) * 1e6)
         req.decode_instance_id = int(cold.instance_id)
         req.instance_id = int(cold.instance_id)
+        self._move_counters(router, hot, cold)
+
+    def _migrate_running(self, router, hot, cold, current_ns, budget):
+        """Move just-admitted requests between two stepping Decodes."""
+        generated_of = lambda req: max(  # noqa: E731
+            0, int(getattr(req, "num_tokens_reached", 0)
+                   - getattr(req, "original_input", 0)))
+        # Llumnix moves the request with the *least remaining* work: that frees
+        # the source soonest per unit of copy.  Requests that have already
+        # finished generating are not moved.
+        def remaining_of(req):
+            return max(0, int(getattr(req, "output", 0)
+                              - getattr(req, "num_tokens_reached", 0)))
+        # A request in an in-flight batch cannot leave: the batch will complete
+        # it on this instance, and its blocks are already accounted for.
+        in_flight = {req.id for batch in (getattr(hot, "inflight", ()) or ())
+                     for req in getattr(batch, "requests", ()) or ()}
+        eligible = [req for req in list(getattr(hot, "running", ()) or ())
+                    if getattr(req, "id", None) not in in_flight
+                    and generated_of(req) <= self.max_moved_tokens
+                    and remaining_of(req) > 0]
+        eligible.sort(key=lambda req: (remaining_of(req), getattr(req, "id", 0)))
+        moved = 0
+        for req in eligible:
+            if moved >= budget:
+                break
+            tokens = int(getattr(req, "num_tokens_reached", 0)
+                         or self._tokens(req))
+            cost_ms = router.node_link_cost_ms(hot, cold, tokens)
+            landing_ms = max(0.0, self.arrival_ms(router, cold)
+                             - self.drain_ms(router, cold))
+            remaining = remaining_of(req)
+            source_step_ms = self.step_ms(router, hot)
+            benefit_ms = remaining * source_step_ms
+            if self.gain_ratio > 0.0 and benefit_ms < self.gain_ratio * (
+                    cost_ms + landing_ms):
+                self.last_reason = (f"move refused: benefit {benefit_ms:.0f} ms < "
+                                    f"cost {cost_ms + landing_ms:.0f} ms "
+                                    f"(copy {cost_ms:.0f} + landing {landing_ms:.0f})")
+                continue
+            hot.kv.preempt(req)
+            hot.running.remove(req)
+            req.status = RequestStatus.WAITING
+            # The generated history travels with the request: ``add_decode``
+            # keeps ``num_computed_tokens`` and allocates the blocks on the
+            # target, and the copy that makes that possible is what
+            # ``migration_ns`` charges.  Resetting the counter here instead
+            # would make the target re-prefill the whole prompt -- measured
+            # 2026-09-24 on the P-15B WAN peak: 20 moved requests raised the
+            # mean from 2 977 to 3 434 ms and TPOT p50 from 27 to 36 ms.
+            #
+            # A request that left its batch with nothing pending
+            # (``num_tokens == num_computed_tokens``) has to be given one token
+            # of work, or the target's scheduler has nothing to run and the run
+            # deadlocks: the token advance belonged to the source's in-flight
+            # batch.  One recomputed token is the cost of landing on a step
+            # boundary, and it is far below a re-prefill.
+            if req.num_tokens <= req.num_computed_tokens:
+                req.num_computed_tokens = max(0, req.num_tokens - 1)
+            req.migration_ns = int(getattr(req, "migration_ns", 0)
+                                   + max(0.0, cost_ms) * 1e6)
+            req.decode_instance_id = int(cold.instance_id)
+            req.instance_id = int(cold.instance_id)
+            if not cold.add_decode(req):
+                # The target could not take it: hand it back to its own queue
+                # rather than dropping it (its blocks are already released, so
+                # it re-enters through the normal admission path).
+                hot.waiting.append(req)
+                self.last_reason = (f"d{cold.instance_id} refused a migrated "
+                                    "request; it re-queues on the source")
+                continue
+            self._move_counters(router, hot, cold)
+            moved += 1
+        return moved
+
+    @staticmethod
+    def _move_counters(router, hot, cold):
         assigned = getattr(router, "_assigned", None)
         if assigned is not None:
             assigned[int(hot.instance_id)] = max(

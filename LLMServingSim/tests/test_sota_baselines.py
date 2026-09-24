@@ -188,6 +188,21 @@ class PrfaasOffloadTests(unittest.TestCase):
             self.capacity = capacity
             self.model = "P-15B"
             self.accepts_new_requests = True
+            self.kv = PrfaasOffloadTests._FakeKv()
+
+        def add_decode(self, req):
+            self.running.append(req)
+            return True
+
+
+    class _FakeKv:
+        """Records which request's blocks a migration released."""
+
+        def __init__(self):
+            self.preempted = []
+
+        def preempt(self, req):
+            self.preempted.append(req.id)
 
     def _router(self, **options):
         from serving.core.router import Router
@@ -303,7 +318,7 @@ class LlumnixMigrationTests(unittest.TestCase):
                    PrfaasOffloadTests._Node(3, "decode", 1)]
         config = {
             "prefill_capacity": {"0": 100.0, "2": 100.0},
-            "decode_capacity": {"1": 10.0, "3": 10.0},
+            "decode_capacity": {"1": 2.0, "3": 8.0},
             "kv_bytes_per_token": 16960.0,
             "pair_costs": {
                 "0,1": {"rtt_ms": 0.0, "bandwidth_bytes_per_s": 257e6},
@@ -313,6 +328,12 @@ class LlumnixMigrationTests(unittest.TestCase):
             },
             "llumnix_interval_ms": 1000.0,
             "llumnix_batch": 4,
+            # The executed step is derived from the capacity
+            # (1000 / (16 x capacity)), so node 1 steps in 31 ms and node 3 in
+            # 8 ms; 20 dispatched requests on node 1 is the "loaded" case.
+            "llumnix_hot_ms": 50.0,
+            "llumnix_cold_ms": 20.0,
+            "llumnix_min_gain_ms": 30.0,
             **options,
         }
         router = Router(4, prefills + decodes, 0, "LOAD", policy_options=config)
@@ -351,18 +372,35 @@ class LlumnixMigrationTests(unittest.TestCase):
         self.assertEqual(migrator.migrate(router, 0), 0)
         self.assertIn("no eligible pair", migrator.last_reason)
 
-    def test_a_running_request_is_not_moved(self):
+    def test_a_request_that_already_generated_is_not_moved(self):
+        # Moving it would copy everything it has produced; the arm bounds that.
         from serving.core.migration import LlumnixMigrator
         router, _, decodes = self._router()
         hot = decodes[0]
         running = self._request(99)
-        running.status = "RUNNING"
+        running.num_tokens_reached = running.original_input + 40
         hot.running = [running]
         router._assigned[1] = 20
         migrator = LlumnixMigrator(router.policy_options)
         self.assertEqual(migrator.migrate(router, 0), 0)
         self.assertEqual(hot.running, [running])
         self.assertEqual(hot.running[0].migration_ns, 0)
+        self.assertEqual(hot.kv.preempted, [])
+
+    def test_a_just_admitted_request_moves_and_releases_its_blocks(self):
+        from serving.core.migration import LlumnixMigrator
+        router, _, decodes = self._router()
+        hot, cold = decodes
+        running = self._request(42)
+        running.num_tokens_reached = running.original_input   # just admitted
+        hot.running = [running]
+        router._assigned[1] = 20
+        migrator = LlumnixMigrator(router.policy_options)
+        self.assertEqual(migrator.migrate(router, 0), 1)
+        self.assertEqual(hot.running, [])
+        self.assertEqual(hot.kv.preempted, [42])
+        self.assertEqual([req.id for req in cold.running], [42])
+        self.assertGreater(running.migration_ns, 0)
 
     def test_a_refused_handoff_is_re_targeted(self):
         from serving.core.migration import LlumnixMigrator

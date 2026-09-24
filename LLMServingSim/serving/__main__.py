@@ -381,12 +381,22 @@ def main():
                         help='Llumnix arm: rebalance Decode queues every N ms of '
                              'simulated time by migrating queued requests '
                              '(0 = off)')
-    parser.add_argument('--llumnix-hot-threshold', type=float, default=1.0,
-                        help='Llumnix arm: source Decode must be at least this '
-                             'loaded before a request leaves it')
-    parser.add_argument('--llumnix-cold-threshold', type=float, default=0.5,
-                        help='Llumnix arm: target Decode must be at most this '
-                             'loaded to receive a request')
+    parser.add_argument('--llumnix-hot-ms', type=float, default=50.0,
+                        help='Llumnix arm: source Decode must have this many '
+                             'milliseconds of work queued before a request '
+                             'leaves it')
+    parser.add_argument('--llumnix-cold-ms', type=float, default=20.0,
+                        help='Llumnix arm: target Decode must be below this '
+                             'drain time to receive a request')
+    parser.add_argument('--llumnix-min-gain-ms', type=float, default=30.0,
+                        help='Llumnix arm: the drain-time difference a move '
+                             'has to clear')
+    parser.add_argument('--llumnix-migrate-running', type=float, default=1.0,
+                        help='Llumnix arm: also move requests that have just '
+                             'started generating (1 = on)')
+    parser.add_argument('--llumnix-max-moved-tokens', type=int, default=64,
+                        help='Llumnix arm: a running request may have generated '
+                             'at most this many tokens to be moved')
     parser.add_argument('--llumnix-batch', type=int, default=4,
                         help='Llumnix arm: migrations per control tick')
     parser.add_argument('--expert-routing-policy', type=str,
@@ -603,8 +613,13 @@ def main():
                            float(args.prfaas_max_offload_ms))
     # Llumnix-style migration knobs ride on the same policy block.
     casr_config.setdefault("llumnix_interval_ms", float(args.llumnix_interval_ms))
-    casr_config.setdefault("llumnix_hot_threshold", float(args.llumnix_hot_threshold))
-    casr_config.setdefault("llumnix_cold_threshold", float(args.llumnix_cold_threshold))
+    casr_config.setdefault("llumnix_hot_ms", float(args.llumnix_hot_ms))
+    casr_config.setdefault("llumnix_cold_ms", float(args.llumnix_cold_ms))
+    casr_config.setdefault("llumnix_min_gain_ms", float(args.llumnix_min_gain_ms))
+    casr_config.setdefault("llumnix_migrate_running",
+                           bool(args.llumnix_migrate_running))
+    casr_config.setdefault("llumnix_max_moved_tokens",
+                           int(args.llumnix_max_moved_tokens))
     casr_config.setdefault("llumnix_batch", int(args.llumnix_batch))
     # A modelled boot (ServerlessLLM-style fast loading) replaces the single
     # ``startup_ms`` with engine init + weights / storage bandwidth; both the
@@ -1729,6 +1744,11 @@ def main():
         if routing:
             print("Prefill placement path (planned / plan-aggregate / fallback): "
                   + ", ".join(f"{key}: {value}" for key, value in routing.items()))
+    if llumnix_migrator.enabled or getattr(router, "_counters", {}).get(
+            "llumnix_migrated"):
+        print(f"Llumnix migration: {llumnix_migrator.moved} request(s) moved over "
+              f"{llumnix_migrator.attempts} engaged tick(s); last: "
+              f"{llumnix_migrator.last_reason}")
 
     if casr_profiler is not None and args.casr_state_output is not None:
         snapshot = casr_profiler.snapshot(current, schedulers)

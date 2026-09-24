@@ -95,9 +95,14 @@ OVERLAYS = {
         "overlap": True,
     }}},
     "llumnix": {"casr": {
-        "llumnix_interval_ms": 1000.0,
-        "llumnix_hot_threshold": 1.0,
-        "llumnix_cold_threshold": 0.5,
+        # Rebalance every simulated 10 ms (a scheduling round), with loose
+        # thresholds: the *cost/benefit* gate is what decides a move, and the
+        # arm's finding on this fabric is that nothing clears it.
+        "llumnix_interval_ms": 10.0,
+        "llumnix_hot_ms": 10.0,
+        "llumnix_cold_ms": 5.0,
+        "llumnix_min_gain_ms": 5.0,
+        "llumnix_gain_ratio": 2.0,
         "llumnix_batch": 4,
     }},
 }
