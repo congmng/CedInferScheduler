@@ -77,6 +77,13 @@ ARMS = {
     # the Decode by the *drain time* the request would join rather than by
     # occupancy -- the network/queue-aware D selection a KV-aware router does.
     "netkv": ["--request-routing-policy", "LOAD", "@overlay"],
+    # semi-PD-style phase sharing: once the chosen Prefill is past a load
+    # threshold, the request's Prefill phase runs on its own Decode instead of
+    # queueing behind a saturated pool.
+    "semi_pd": ["--request-routing-policy", "LOAD", "@overlay"],
+    # Coordinated autoscaling: both pools sized from the same demand estimate
+    # (the Decode side weighted by output length), rather than a fixed P:D set.
+    "coord_autoscale": ["--enable-casr", "--casr-solver", "lp", "@overlay"],
 }
 
 #: Per-arm cluster-config overlays, deep-merged into a copy of
@@ -110,6 +117,12 @@ OVERLAYS = {
         "llumnix_batch": 4,
     }},
     "netkv": {"casr": {"deadline_aware_decode": True}},
+    "semi_pd": {"casr": {"prefill_overflow_to_decode": 0.5}},
+    "coord_autoscale": {"casr": {"lifecycle": {
+        "decode_min_active": 2,
+        "decode_max_active": 3,
+        "scale_on_demand_decode": True,
+    }}},
 }
 
 

@@ -8,17 +8,35 @@ from .resources import ResourceOrchestrator
 
 
 class PrefillLifecycle:
-    """Coordinate worker lifecycle with a node-level resource pool."""
+    """Coordinate worker lifecycle with a node-level resource pool.
 
-    def __init__(self, config=None):
+    ``role`` selects which half of the deployment this instance sizes:
+    ``prefill`` (the original use) or ``decode``.  A Decode pool has its own
+    capacity unit -- *reference-length* requests per second -- so its demand is
+    weighted by each class's output length instead of its prompt length, and
+    the producer-side token/egress terms do not apply.  Everything else
+    (warm-up, the resource pool, the hold-on-backlog rule) is shared, which is
+    what makes "coordinated autoscaling" of both pools a configuration choice
+    rather than a second implementation.
+    """
+
+    def __init__(self, config=None, role="prefill", work_of=None):
         config = config or {}
-        self.min_active = max(0, int(config.get("min_active_prefill", 1)))
-        self.max_active = config.get("max_active_prefill")
+        self.role = str(role)
+        self.work_of = work_of
+        self.min_active = max(0, int(config.get(f"min_active_{self.role}",
+                                                config.get("min_active_prefill", 1))))
+        self.max_active = config.get(f"max_active_{self.role}",
+                                     config.get("max_active_prefill")
+                                     if self.role == "prefill" else None)
         # Whether the lifecycle may resize the pool from observed demand.  The
         # real deployment decides pool size only through the router's structural
         # actions, so an alignment arm that models "no scaling" must switch this
         # off; the default stays on to preserve the existing elastic behaviour.
-        self.scale_on_demand = bool(config.get("scale_on_demand", True))
+        # Role-specific override first: a deployment may size one pool from
+        # demand while the other stays fixed (``scale_on_demand_decode``).
+        self.scale_on_demand = bool(config.get(
+            f"scale_on_demand_{self.role}", config.get("scale_on_demand", True)))
         self.warmup_ns = max(0, int(float(config.get("warmup_ms", 0)) * 1_000_000))
         self.resources = ResourceOrchestrator(config.get("resources"))
         self._bootstrapped = False
@@ -28,13 +46,15 @@ class PrefillLifecycle:
         #: shrinks it (see the ``scale_on_demand`` branch in ``update``).
         self._pruned_once = False
         self.capacity = {int(key): float(value)
-                         for key, value in config.get("prefill_capacity", {}).items()}
+                         for key, value in config.get(f"{self.role}_capacity", {}).items()}
         # The pool the deployment was actually running, when the caller knows
         # it (a replay reads it off the recorded run).  The demand heuristic
         # below can only rank workers by load or declared capacity, and neither
         # of those is what an operator's ``STOP_BEFORE_RUN`` decided.
-        self.initial_active = {int(value)
-                               for value in (config.get("initial_active_prefill") or ())}
+        self.initial_active = {int(value) for value in (
+            config.get(f"initial_active_{self.role}")
+            or (config.get("initial_active_prefill")
+                if self.role == "prefill" else ()) or ())}
         # Length-aware capacity.  ``prefill_capacity`` is a requests/s figure
         # measured at ONE prompt length; the real router scales it by the
         # observed prompt size (``prefill_tokens_per_s``) and the simulator has
@@ -87,6 +107,11 @@ class PrefillLifecycle:
         """Requests/s this Prefill can absorb for the *observed* prompt mix."""
         declared = max(1.0, float(self.capacity.get(
             scheduler.instance_id, scheduler.max_num_seqs)))
+        if self.role != "prefill":
+            # A Decode's capacity is already expressed in *reference-length*
+            # requests per second; the prompt-length and egress terms below are
+            # producer-side effects and do not apply to it.
+            return declared
         tokens = [float(row.get("requested_tokens_ewma") or 0.0) for row in rows]
         tokens = [value for value in tokens if value > 0.0]
         ceiling = float(self.tokens_per_s.get(scheduler.instance_id, 0.0) or 0.0)
@@ -108,13 +133,26 @@ class PrefillLifecycle:
     def update(self, current_ns, rows, schedulers, wanted_override=None,
                backlog_rps: float = 0.0, action=None):
         all_schedulers = list(schedulers)
-        schedulers = [s for s in all_schedulers if s.pd_type == "prefill"]
+        schedulers = [s for s in all_schedulers if s.pd_type == self.role]
         if not schedulers:
             return ()
         events = [event.as_dict() for event in self.resources.bootstrap(all_schedulers, current_ns)] if not self._bootstrapped else []
         self._bootstrapped = True
         startup_ns = max(self.warmup_ns, self.resources.startup_ns)
-        demand = sum(max(float(row["arrival_rate_ewma"]), 0.0) for row in rows)
+        # Demand in this role's own capacity unit.  For a Decode that means
+        # weighting each class by its output length (how many reference-length
+        # requests it costs); for a Prefill the prompt weighting is already
+        # inside ``_effective_capacity``.
+        def weight_of(row):
+            if self.work_of is None:
+                return 1.0
+            try:
+                return max(1e-6, float(self.work_of(row.get("class_id", ""))))
+            except Exception:                       # unparsable class id
+                return 1.0
+
+        demand = sum(max(float(row["arrival_rate_ewma"]), 0.0) * weight_of(row)
+                     for row in rows)
         average_capacity = max(1.0, sum(self._effective_capacity(s, rows)
                                         for s in schedulers) / len(schedulers))
         if self.scale_on_demand:

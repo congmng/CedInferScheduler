@@ -217,6 +217,17 @@ class Router:
         self.prfaas_max_offload_ms = float(
             options.get("prfaas_max_offload_ms", 300.0) or 0.0)
 
+        # -- Phase sharing (semi-PD style) ----------------------------------
+        # semi-PD's claim is that the Prefill and Decode phases do not have to
+        # own disjoint machines: under pressure, a request's Prefill phase can
+        # run on the Decode that will generate its tokens ("unified resource
+        # management").  This simulator has one knob for that -- the
+        # local-recompute path, which makes the Decode run the prompt itself --
+        # so the arm forces it once the chosen Prefill is past this load
+        # (0 = off, the deployment's own cost comparison decides).
+        self.prefill_overflow_to_decode = float(
+            options.get("prefill_overflow_to_decode", 0.0) or 0.0)
+
         # Pending requests (loaded but not yet routed)
         self._pending_requests = []
         self._pending_idx = 0
@@ -645,6 +656,22 @@ class Router:
         if not eligible:
             return None
         return eligible[self._least_load_select(eligible, "decode")]
+
+    def _prefill_pressure(self, sched):
+        """How loaded a Prefill really is, for the semi-PD phase-sharing arm.
+
+        ``(inflight+1)/capacity`` is the *routing* score and understates a
+        saturated producer badly: on the P-15B WAN peak it reads 0.07-0.20 while
+        the worker's own queue is backed up, because ``inflight`` is released
+        the moment the Prefill leg finishes and ``capacity`` is the *compute*
+        figure (4.9-13.6 req/s) rather than the push bound (~1.4 req/s).
+        Queue occupancy is the signal that actually moves, so the arm takes the
+        larger of the two.
+        """
+        slots = max(1, int(getattr(sched, "max_num_seqs", 1) or 1))
+        queued = (4 * len(getattr(sched, "waiting", ()) or ())
+                  + len(getattr(sched, "running", ()) or ()))
+        return max(self._instance_load_score("prefill", sched), queued / slots)
 
     def _prfaas_select(self, schedulers, role, req_data=None, now_ns=0):
         """Prefill placement with a cross-data-centre offload gate.
@@ -1400,6 +1427,15 @@ class Router:
                         use_local, _, _ = self.kv_exchange_decision(
                             sched, decode_sched, req_data['input_toks'],
                             current_time_ns)
+                    # Phase sharing (semi-PD): a saturated Prefill pool hands its
+                    # phase to the Decode rather than queueing behind it, even
+                    # when the KV would have travelled cheaply.
+                    if (not use_local and self.prefill_overflow_to_decode > 0.0
+                            and self._prefill_pressure(sched)
+                            >= self.prefill_overflow_to_decode):
+                        use_local = True
+                        self._counters["prefill_phase_shared"] = (
+                            self._counters.get("prefill_phase_shared", 0) + 1)
                     if use_local:
                         sched = decode_sched
                         local_request = True
@@ -1636,7 +1672,17 @@ class Router:
                 eligible = [candidate for candidate in self.decode_schedulers
                             if candidate.accepts_new_requests]
                 if not eligible:
-                    raise RuntimeError("No active Decode instance can accept a Prefill handoff")
+                    # A Decode pool that scales (coordinated autoscaling) can be
+                    # momentarily empty of ACTIVE workers -- every one DRAINING
+                    # or WARMING.  The KV is already in flight, so the request
+                    # waits in the pending list and is retried on the next
+                    # iteration, exactly like a handoff a full Decode refused.
+                    # Raising here killed the run the first time the pooled arm
+                    # drained below its peak (measured 2026-09-24).
+                    self._pending_handoffs.append(req)
+                    self._counters["handoff_no_active_decode"] = (
+                        self._counters.get("handoff_no_active_decode", 0) + 1)
+                    continue
                 # Handoff fallback: same deadline-aware rule, fed from the
                 # request object (it carries its own budget and lengths).
                 instance_id = self._select_decode(eligible, {

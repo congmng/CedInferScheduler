@@ -42,6 +42,7 @@ class CASRController:
         self.last_demand_clamp = {}
         lifecycle_policy = dict((policy or {}).get("lifecycle", {}))
         lifecycle_policy.setdefault("prefill_capacity", (policy or {}).get("prefill_capacity", {}))
+        lifecycle_policy.setdefault("decode_capacity", (policy or {}).get("decode_capacity", {}))
         lifecycle_policy.setdefault("resources", (policy or {}).get("resources", {}))
         # The producer-side egress budget lives in the solver/lifecycle-facing
         # policy (``casr.shared_links``, or the cluster-level ``kv_egress_gbps``
@@ -59,6 +60,16 @@ class CASRController:
             if (policy or {}).get(key) is not None:
                 lifecycle_policy.setdefault(key, policy[key])
         self.lifecycle = PrefillLifecycle(lifecycle_policy)
+        # Coordinated autoscaling: when the config declares a Decode pool bound
+        # (``decode_min_active`` / ``decode_max_active``), the same lifecycle
+        # machinery also sizes the Decode pool, from the class demand weighted
+        # by output length.  Absent those keys nothing changes: every existing
+        # configuration keeps its fixed Decode set.
+        self.decode_lifecycle = None
+        if lifecycle_policy.get("decode_max_active") is not None \
+                or lifecycle_policy.get("decode_min_active") is not None:
+            self.decode_lifecycle = PrefillLifecycle(
+                lifecycle_policy, role="decode", work_of=self.solver.decode_work)
         # ``max_active_prefill`` is declared with the lifecycle block, but it is
         # the ceiling on *structural* scale-out.  Passing only
         # ``casr.structural`` to the evaluator left it without a cap, so a pool
@@ -79,6 +90,7 @@ class CASRController:
         self.last_action_ns = -1
         self.last_flows = ()
         self.last_lifecycle = ()
+        self.last_decode_lifecycle = ()
         self.last_warmups = ()
         self.last_solver_diagnostics = {}
         self.last_resource_snapshot = {}
@@ -324,6 +336,9 @@ class CASRController:
         self.last_lifecycle = self.lifecycle.update(
             current_ns, snapshot["prefix_states"], schedulers,
             backlog_rps=getattr(self, "_backlog_rps", 0.0))
+        if self.decode_lifecycle is not None:
+            self.last_decode_lifecycle = self.decode_lifecycle.update(
+                current_ns, snapshot["prefix_states"], schedulers)
         self.last_resource_snapshot = self.lifecycle.resources.snapshot()
         prefill = [s for s in all_prefill if s.accepts_new_requests]
         decode = [s for s in schedulers if s.pd_type == "decode" and s.accepts_new_requests]

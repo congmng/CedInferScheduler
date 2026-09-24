@@ -268,6 +268,20 @@ class PrfaasOffloadTests(unittest.TestCase):
         index = router._prfaas_select(prefills, "prefill", self._request())
         self.assertEqual(prefills[index].instance_id, 0)
 
+    def test_a_handoff_with_no_active_decode_is_parked_not_fatal(self):
+        # A pooled Decode set can be momentarily empty of ACTIVE workers (all
+        # DRAINING or WARMING).  The KV is in flight, so the request waits.
+        from serving.core.request import Request
+        router, _, decodes = self._router()
+        for sched in decodes:
+            sched.accepts_new_requests = False
+        req = Request(3, "P-15B", 1250, 1266, arrival=0, instance_id=1)
+        req.decode_instance_id = 1
+        router._pending_handoffs = [req]
+        pending = router.transfer_prefill_request((), 0)
+        self.assertIn(req, pending)
+        self.assertEqual(router._counters["handoff_no_active_decode"], 1)
+
 
 class BootModelTests(unittest.TestCase):
     """ServerlessLLM-style loading: startup derived from what it loads."""
@@ -346,6 +360,69 @@ class ArmRegistryTests(unittest.TestCase):
         router = Router(2, [Sched(0, "prefill"), Sched(1, "decode")], 0,
                         "LOAD", policy_options=config["casr"])
         self.assertTrue(router.deadline_aware_decode)
+
+
+class CoordinatedScalingTests(unittest.TestCase):
+    """Coordinated autoscaling: the same lifecycle sizes both pools."""
+
+    class _Sched:
+        def __init__(self, instance_id, role, capacity=4.0):
+            self.instance_id = instance_id
+            self.pd_type = role
+            self.node_id = 0
+            self.max_num_seqs = 8
+            self.waiting = []
+            self.running = []
+            self.admission_state = "ACTIVE"
+            self.resource_gpu_ids = (0,)
+            self.resource_mem_gb = 24.0
+            self.num_npus = 1
+            self.memory = type("M", (), {"npu_mem": 24 * 1024 ** 3})()
+
+        def set_admission_state(self, state):
+            self.admission_state = state
+
+    def _rows(self, rate, class_id="c|out:64-79"):
+        return [{"class_id": class_id, "arrival_rate_ewma": rate,
+                 "prefill_instance_id": 0, "requested_tokens_ewma": 1024.0,
+                 "requested_tokens": 1024}]
+
+    def _lifecycle(self, **config):
+        from serving.casr.lifecycle import PrefillLifecycle
+        return PrefillLifecycle({
+            "decode_min_active": 1, "decode_max_active": 3,
+            "scale_on_demand_decode": True,
+            "decode_capacity": {"1": 4.0, "3": 4.0, "5": 4.0},
+            **config,
+        }, role="decode", work_of=lambda class_id: 4.0)
+
+    def test_demand_is_weighted_by_output_length(self):
+        # 3 req/s x 4 reference units each = 12 units against 4 per instance
+        # => 3 Decodes, not 1.
+        lifecycle = self._lifecycle()
+        schedulers = [self._Sched(1, "decode"), self._Sched(3, "decode"),
+                      self._Sched(5, "decode")]
+        lifecycle.update(0, self._rows(3.0), schedulers)
+        self.assertEqual(sum(1 for s in schedulers
+                             if s.admission_state != "INACTIVE"), 3)
+
+    def test_a_quiet_pool_scales_in_but_never_below_its_floor(self):
+        lifecycle = self._lifecycle(decode_min_active=2)
+        schedulers = [self._Sched(1, "decode"), self._Sched(3, "decode"),
+                      self._Sched(5, "decode")]
+        lifecycle.update(0, self._rows(0.1), schedulers)
+        active = [s for s in schedulers if s.admission_state != "INACTIVE"]
+        self.assertGreaterEqual(len(active), 2)
+        self.assertLessEqual(len(active), 3)
+
+    def test_the_decode_capacity_has_no_prompt_or_egress_term(self):
+        # A Decode's capacity is already in reference-length requests/s; the
+        # Prefill-only token and push limits must not be applied to it.
+        lifecycle = self._lifecycle(prefill_tokens_per_s={"1": 1.0},
+                                    kv_egress_gbps=0.0001)
+        scheduler = self._Sched(1, "decode")
+        self.assertAlmostEqual(
+            lifecycle._effective_capacity(scheduler, self._rows(9.0)), 4.0)
 
 
 class LlumnixMigrationTests(unittest.TestCase):

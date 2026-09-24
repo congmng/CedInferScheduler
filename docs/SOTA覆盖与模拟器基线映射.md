@@ -25,6 +25,9 @@
 | MemServe（2024）/ TetriInfer（2024）/ Sarathi-Serve（2024） | 前缀感知调度、chunked prefill | chunked prefill、前缀亲和 | chunked prefill 在时间线里（`--max-num-batched-tokens`）；前缀亲和见 `cache_aware` |
 | PrfaaS 类跨 DC prefill 卸载（2025） | 跨数据中心 prefill + 带宽/缓存感知 | 跨域阈值与 P/D 比例调整 | **`prfaas` / `prfaas_tight`**：本地域优先 + `--prfaas-max-offload-ms` 硬预算（阈值本身可扫） |
 | NVIDIA Dynamo（2025） | worker/router/传输组件化平台 | 可插拔编排底座 | 只作底座（`PrefillLifecycle`/`ReconfigExecutor`） |
+| semi-PD（2025） | 阶段式解耦：P/D 不再各占固定机器 | 统一资源管理下的相位共享 | **`semi_pd`**：选中的 Prefill 压力超阈值时，把该请求的 Prefill 相位交给自己的 Decode 跑（`prefill_overflow_to_decode`） |
+| P/D-Serve（2024） | 大规模分级调度 | 集群级配比 + 实例级路由的两层结构 | 第一层 = **`distserve`** 配比搜索，第二层 = `load`/`netkv`；两层可分别开关 |
+| coordinated autoscaling（2025） | 异构/解耦下的 P、D 协同扩缩容 | 同一需求估计同时驱动两侧 | **`coord_autoscale`**：Decode 侧也由 `PrefillLifecycle`（按输出长度加权）定规模 |
 
 | # | 路线（代表系统） | 该路线的核心机制 | 我们的对照臂 | 覆盖度 |
 |---|---|---|---|---|
@@ -77,6 +80,9 @@ Qwen3 / WAN     local 355.1 ms  vs transfer 1723.6 ms -> local
 | `prfaas` `/` `prfaas_tight` | 请求先落到自己的域：本地 Prefill 未超阈值就在本地跑；超了才按 `max(transfer, compute wait)` 选，且搬运时间不得超过 `--prfaas-max-offload-ms` | 阈值是全局常数（不是 per-DC 搜索）；不做 P/D 比例调整 | 同档最强：2 447 ms（−26% vs `load`），TTFT p50 1 157 → 446 ms |
 | `llumnix` | 每 N ms 比较各 Decode 的**排水时间**，把队首外的请求搬到更空的一台，搬一次扣一次 KV 搬运时间（`migration_ns` 进 TTFT 与总延迟，不改 TPOT），收益不够就不搬 | 只搬"不在飞行批次里"的请求，**不建模** block 级搬移；因此它是 Llumnix 的队列子集 | 本 fabric 上一次都没搬（搬运 240 ms ≫ 队列排水 ~ms）；放松闸门后搬 24 次反而劣化 2 977 → 3 649 ms |
 | `serverless_elastic` | 启动 = 引擎初始化 17.2 s + 权重 15.26 GiB / 存储带宽，默认与初始化重叠 | 只改启动成本，不改加载**流程**；带宽是参数 | 20 s → 17.2 s 只值 0.7% 均值；启动不是这一档的瓶颈 |
+| `netkv` | P 路由不变，Decode 改按「要加入的排水时间」排 | 只改 Decode 选择，不改可行域 | 同一轮 300 请求：TTFT p50 1 015 → 767 ms、SLO 86.0% → 91.7%，均值不变 |
+| `semi_pd` | Prefill 压力超阈值时把 Prefill 相位交给 Decode | 只在**请求级**共享相位，不做 chunk 级角色切换 | 阈值 0.5：共享 226 次，TTFT p50 1 015 → 309 ms，但均值 2 977 → 4 747 ms（Decode 是瓶颈） |
+| `coord_autoscale` | P、D 两侧由同一需求估计定规模（Decode 按输出长度加权） | Decode 侧生命周期已实现；规则仍是**观测式**，没有预测 | 300 请求切片上均值 8 662 ms（基线 2 977）：暖机期缩容 + 20 s 启动追不上 45 s 峰值 |
 | `distserve` `/` `distserve_lp` | 枚举拓扑能表达的配比，用 profiler 容量算每档 goodput，取最大者、同分取最少机器，写出集群配置再跑 | 域式拓扑只能 `n:n`；Decode 容量是串行的，需要 `--decode-batch-factor` 标定 | arena 上：未标定 → 选 1:2（实测最差 2 532 ms）；标定 4.8× → 选 2:2（实测最好 1 466 ms） |
 
 **这一轮同时说明了两件事**（建议写进汇报）：
