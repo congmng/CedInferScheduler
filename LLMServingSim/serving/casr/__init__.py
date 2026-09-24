@@ -7,6 +7,7 @@ publishes routing/lifecycle decisions at a slower control cadence.
 
 from .affinity import AffinityPlan
 from .controller import CASRController
+from .autoscalers import ThresholdScaler, build_structural_evaluator
 from .evaluator import StructuralDecision, StructuralEvaluator
 from .flow_solver import CapacityAwareFlowSolver, FlowAssignment, FlowSolverConfig, SharedLink
 from .lifecycle import PrefillLifecycle
@@ -16,4 +17,5 @@ from .resources import ResourceEvent, ResourceOrchestrator
 from .state import PrometheusStateCollector, parse_prometheus_text
 from .executor import ExecutionResult, ReconfigExecutor
 
-__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink", "StructuralDecision", "StructuralEvaluator", "PrometheusStateCollector", "parse_prometheus_text", "ExecutionResult", "ReconfigExecutor"]
+__all__ = ["AffinityPlan", "BuiltinPolicy", "CASRController", "CapacityAwareFlowSolver", "FlowAssignment", "FlowSolverConfig", "PolicyError", "PrefillLifecycle", "PrefixProfiler", "ResourceEvent", "ResourceOrchestrator", "SharedLink", "StructuralDecision", "StructuralEvaluator", "ThresholdScaler",
+    "build_structural_evaluator", "PrometheusStateCollector", "parse_prometheus_text", "ExecutionResult", "ReconfigExecutor"]

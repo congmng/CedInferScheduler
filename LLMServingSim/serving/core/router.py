@@ -65,6 +65,9 @@ class Router:
         # whose wait already exceeds the request's budget when a compliant one
         # exists.  Off by default: it changes routing, so it must be an arm.
         options = policy_options or {}
+        #: Kept so a post-hoc component (the migration arm) can read the same
+        #: knobs the router was built with instead of re-parsing the config.
+        self.policy_options = dict(options)
         self.deadline_aware_decode = bool(options.get("deadline_aware_decode", False))
         self.decode_reference_tokens = max(
             1.0, float(options.get("decode_reference_tokens", 16) or 16))
@@ -202,6 +205,18 @@ class Router:
         self.local_prefill_queue_cap = float(
             options.get("local_prefill_queue_cap", 3.0) or 0.0)
 
+        # -- PrfaaS-style cross-DC Prefill offload --------------------------
+        # "Run the Prefill in another data centre" is only safe behind a
+        # transfer budget: the KV of a long prompt is what pays for it.  The
+        # arm keeps the *local* pool until it is loaded past
+        # ``prfaas_local_load_threshold``, then offloads to whichever producer
+        # minimises max(transfer, compute wait) -- and refuses any pairing whose
+        # transfer alone exceeds ``prfaas_max_offload_ms`` (0 = no gate).
+        self.prfaas_local_load_threshold = float(
+            options.get("prfaas_local_load_threshold", 0.5) or 0.0)
+        self.prfaas_max_offload_ms = float(
+            options.get("prfaas_max_offload_ms", 300.0) or 0.0)
+
         # Pending requests (loaded but not yet routed)
         self._pending_requests = []
         self._pending_idx = 0
@@ -233,6 +248,11 @@ class Router:
             # ``load`` with a round-robin tie-break: separates "the score has
             # no signal" from "our tie-break pinned everything to id 0".
             self._select_instance = self._least_load_rr_select
+        elif self.routing_policy == "PRFAAS":
+            # Cross-DC Prefill offload (see ``_prfaas_select``).  Decode and any
+            # other role keep the ``load`` semantics, so the arm differs from
+            # ``load`` in exactly one decision.
+            self._select_instance = self._least_load_select
         elif self.routing_policy == "CUSTOM":
             self._select_instance = self._custom_select
         else:
@@ -547,6 +567,157 @@ class Router:
                                (sched.max_num_seqs if sched.max_num_seqs not in (0, float('inf'))
                                 else 1), sched.instance_id),
         )
+
+    # -- Cross-DC Prefill offload (PrfaaS-style threshold arm) --------------
+
+    def _instance_load_score(self, role, sched):
+        """``(inflight + 1) / capacity`` -- the score every ``load`` arm uses."""
+        table = getattr(self, "capacity_tables", {}).get(role, {})
+        router_table = getattr(self, "router_capacity", {})
+        assigned = getattr(self, "_assigned", None)
+        if assigned is not None:
+            inflight = assigned.get(int(sched.instance_id), 0)
+        else:
+            inflight = len(sched.waiting) * 4 + len(sched.running)
+        capacity = (router_table.get(int(sched.instance_id))
+                    or table.get(int(sched.instance_id))
+                    or getattr(sched, "max_num_seqs", 0))
+        if capacity in (0, float('inf')):
+            return float(inflight + 1)
+        return (inflight + 1) / capacity
+
+    def _pair_transfer_ms(self, prefill, decode, tokens, now_ns=0):
+        """Milliseconds of KV transfer for this (Prefill, Decode) pair.
+
+        Uses the same two sources as ``kv_exchange_decision``: the cluster's own
+        link tables when they exist (``_link_derived_terms``) and the recorded
+        constants otherwise, plus what is already queued on the producer.
+        """
+        derived = self._link_derived_terms(prefill, decode, tokens)
+        if derived is not None:
+            transfer_ms = float(derived[1])
+        else:
+            thousands = float(tokens) / 1000.0
+            same_node = int(getattr(prefill, "node_id", -1)) == int(
+                getattr(decode, "node_id", -2))
+            if same_node:
+                transfer_ms = self.transfer_ms_per_1k_local * thousands
+            else:
+                transfer_ms = (self.transfer_fixed_ms_cross
+                               + self.transfer_ms_per_1k_cross * thousands)
+        link = getattr(self, "pd_link", None)
+        if link is not None and now_ns:
+            transfer_ms += float(link.pending_ns(
+                int(getattr(prefill, "instance_id", -1)), int(now_ns))) / 1e6
+        return transfer_ms
+
+    def node_link_cost_ms(self, source, target, tokens):
+        """KV copy cost between two *instances' nodes* in milliseconds.
+
+        ``pair_bandwidth`` / ``pair_rtt_ms`` are keyed by (Prefill, Decode)
+        pairs, and every domain-aware cluster config puts both roles on the
+        node, so a synthetic source Prefill on the source's node prices the
+        link the migration's bytes actually cross.
+        """
+        if tokens <= 0:
+            return 0.0
+        source_node = getattr(source, "node_id", None)
+        kv_bytes = float(tokens) * float(getattr(self, "kv_bytes_per_token", 0.0) or 0.0)
+        if kv_bytes <= 0.0:
+            return 0.0
+        bandwidth, rtt_ms = 0.0, 0.0
+        for scheduler in (self.prefill_schedulers or ()):
+            if getattr(scheduler, "node_id", None) != source_node:
+                continue
+            key = (int(scheduler.instance_id), int(getattr(target, "instance_id", -1)))
+            bandwidth = float(getattr(self, "pair_bandwidth", {}).get(key, 0.0) or 0.0)
+            rtt_ms = float(getattr(self, "pair_rtt_ms", {}).get(key, 0.0) or 0.0)
+            if bandwidth > 0.0:
+                break
+        if bandwidth <= 0.0:
+            return 0.0
+        return kv_bytes / bandwidth * 1000.0 + rtt_ms
+
+    def _prfaas_decode_target(self):
+        """The Decode this request's KV has to reach (the ``load`` arm's own)."""
+        eligible = [candidate for candidate in (self.decode_schedulers or ())
+                    if candidate.accepts_new_requests]
+        if not eligible:
+            return None
+        return eligible[self._least_load_select(eligible, "decode")]
+
+    def _prfaas_select(self, schedulers, role, req_data=None, now_ns=0):
+        """Prefill placement with a cross-data-centre offload gate.
+
+        PrfaaS-style deployments run Prefill as a service in another DC and keep
+        the request's own DC for Decode.  Two rules are what make that a
+        *different* algorithm from our planner and from plain ``load``:
+
+        1. **local first** -- while the local DC's Prefill pool is below
+           ``prfaas_local_load_threshold``, the request is prefilled there, even
+           if a remote producer is faster;
+        2. **a transfer budget, not a price** -- once local is saturated, the
+           remote candidates are ranked by ``max(transfer, compute wait)`` but
+           any pairing whose transfer alone exceeds ``prfaas_max_offload_ms``
+           is refused outright (this is the threshold the literature searches),
+           and the request degrades to the least-loaded local producer instead
+           of crossing the fabric.
+
+        Both rules price the *KV bytes* of this request over the pair's measured
+        bandwidth, so the arm is model-aware in the same way ``kv_aware`` is.
+        """
+        if role != "prefill" or not schedulers or req_data is None:
+            return self._least_load_select(schedulers, role)
+        tokens = len(req_data.get("input_hash_ids")
+                     or req_data.get("input_tok_ids") or ())
+        decode = self._prfaas_decode_target()
+        if decode is None or tokens <= 0:
+            return self._least_load_select(schedulers, role)
+        local = [candidate for candidate in schedulers
+                 if getattr(candidate, "node_id", None) is not None
+                 and getattr(candidate, "node_id", None) == getattr(decode, "node_id", None)]
+        if local:
+            pick = min(local, key=lambda item: (
+                self._instance_load_score(role, item), int(item.instance_id)))
+            if self._instance_load_score(role, pick) < self.prfaas_local_load_threshold:
+                self._counters["prfaas_local"] = self._counters.get("prfaas_local", 0) + 1
+                return schedulers.index(pick)
+
+        gate = self.prfaas_max_offload_ms
+        scored = []
+        blocked = 0
+        for index, candidate in enumerate(schedulers):
+            transfer_ms = self._pair_transfer_ms(candidate, decode, tokens, now_ns)
+            if gate > 0.0 and transfer_ms > gate:
+                blocked += 1
+                continue
+            compute_ms = self._instance_load_score(role, candidate) * 1000.0
+            scored.append((max(transfer_ms, compute_ms), transfer_ms,
+                           int(candidate.instance_id), index))
+        self._counters["prfaas_gate_blocked"] = (
+            self._counters.get("prfaas_gate_blocked", 0) + blocked)
+        if not scored:
+            # Nothing fits the transfer budget: stay in the local DC even
+            # though it is loaded (the fallback the threshold arm implies).
+            pool = local or schedulers
+            self._counters["prfaas_local_fallback"] = (
+                self._counters.get("prfaas_local_fallback", 0) + 1)
+            return schedulers.index(min(pool, key=lambda item: (
+                self._instance_load_score(role, item), int(item.instance_id))))
+        score, transfer_ms, instance_id, index = min(scored)
+        local_ids = {item.instance_id for item in local}
+        if instance_id in local_ids:
+            self._counters["prfaas_local_loaded"] = (
+                self._counters.get("prfaas_local_loaded", 0) + 1)
+        else:
+            self._counters["prfaas_offload"] = (
+                self._counters.get("prfaas_offload", 0) + 1)
+        if os.environ.get("PRFAAS_DEBUG"):
+            print(f"[prfaas] p{instance_id} transfer={transfer_ms:.1f}ms "
+                  f"score={score:.1f} -> "
+                  f"{'local' if instance_id in local_ids else 'offload'}",
+                  flush=True)
+        return index
 
     def install_affinity_plan(self, plan, flows=()):
         """Atomically replace the slow-layer plan used for future requests.
@@ -1196,6 +1367,9 @@ class Router:
                     instance_id = self._cache_aware_select(eligible, "prefill", req_data)
                 elif self.routing_policy == "KV_AWARE":
                     instance_id = self._kv_aware_select(
+                        eligible, "prefill", req_data, current_time_ns)
+                elif self.routing_policy == "PRFAAS":
+                    instance_id = self._prfaas_select(
                         eligible, "prefill", req_data, current_time_ns)
                 else:
                     instance_id = self._select_instance(eligible, "prefill")

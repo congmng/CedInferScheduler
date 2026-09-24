@@ -38,6 +38,10 @@ class Request:
         self.end_time = -1
         self.latency = -1
         self.queuing_delay = -1
+        #: KV copy a Llumnix-style migration charged to this request, in ns.
+        #: It delays the first token (and therefore the whole request) without
+        #: changing the per-token rate, which is what a block copy does.
+        self.migration_ns = 0
         self.ttft = -1
         self.tpot = -1
         self.itl = []
@@ -91,7 +95,7 @@ class Request:
 
     def add_latency(self, end_time):
         self.end_time = end_time
-        self.latency = self.end_time - self.arrival
+        self.latency = self.end_time - self.arrival + self.migration_ns
         self.input = self.original_input
         if self.output == self.input + 1:
             self.tpot = 0
@@ -106,7 +110,7 @@ class Request:
         self.queuing_delay = current - self.arrival
 
     def set_ttft(self, current):
-        self.ttft = current - self.arrival
+        self.ttft = current - self.arrival + self.migration_ns
         self.recent_end = current
     
     def log(self):

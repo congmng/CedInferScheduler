@@ -15,7 +15,7 @@ from .lifecycle import PrefillLifecycle
 from .policy import PolicyError, load_policy
 from typing import Mapping
 
-from .evaluator import StructuralEvaluator
+from .autoscalers import build_structural_evaluator
 from .state import PrometheusStateCollector
 from .executor import ReconfigExecutor
 
@@ -70,7 +70,10 @@ class CASRController:
             cap = lifecycle_policy.get("max_active_prefill")
             if cap:
                 structural_policy["max_active_prefill"] = int(cap)
-        self.evaluator = StructuralEvaluator(structural_policy)
+        # ``structural.rule`` picks the *rule*: CASR's counterfactual gain
+        # evaluation (default) or the DOPD-style threshold autoscaler that the
+        # SOTA comparison needs (``autoscalers.ThresholdScaler``).
+        self.evaluator = build_structural_evaluator(structural_policy)
         self.state_collector = PrometheusStateCollector((policy or {}).get("telemetry", {}))
         self.executor = ReconfigExecutor((policy or {}).get("executor", {}))
         self.last_action_ns = -1
@@ -348,6 +351,12 @@ class CASRController:
             self.last_action_ns, self.lifecycle.min_active,
             backlog_rps=getattr(self, "_backlog_rps", 0.0))
         self.last_structural_decision = decision.as_dict()
+        # A rule-based scaler has no counterfactual gain to report, so publish
+        # the reading its decision was based on (the run summary quotes it).
+        rule_metrics = getattr(self.evaluator, "last_metrics", None)
+        if rule_metrics:
+            self.last_structural_decision["rule"] = type(self.evaluator).__name__
+            self.last_structural_decision["rule_metrics"] = dict(rule_metrics)
         if decision.action != "keep":
             self.last_action_ns = int(current_ns)
             if decision.action == "+P" and decision.mode == "warm":

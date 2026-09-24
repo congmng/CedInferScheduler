@@ -21,6 +21,7 @@ router's recompute-vs-transfer decision chose).
 from __future__ import annotations
 
 import argparse
+import copy
 import collections
 import csv
 import json
@@ -50,7 +51,65 @@ ARMS = {
     # placement at equal capacity (the arena's casr_lp vs casr_full conflates the
     # two; pairing a 1-worker pool against a 3-worker baseline measures capacity).
     "casr_plan3": ["--enable-casr", "--casr-solver", "lp", "@fixed"],
+    # -- SOTA baselines added 2026-09-24 (docs/SOTA覆盖与模拟器基线映射.md) --
+    # DOPD-style autoscaling: pool size follows utilisation/queue thresholds
+    # with hysteresis instead of a counterfactual gain evaluation.
+    "dopd": ["--enable-casr", "--casr-solver", "lp", "@overlay"],
+    # PrfaaS-style cross-DC Prefill offload: local DC first, then a hard
+    # transfer budget.  ``prfaas_tight`` lowers that budget so the comparison
+    # shows what the threshold itself buys.
+    "prfaas": ["--request-routing-policy", "PRFAAS"],
+    "prfaas_tight": ["--request-routing-policy", "PRFAAS",
+                     "--prfaas-max-offload-ms", "150"],
+    # ServerlessLLM-style fast loading: the same elastic pool, with the boot
+    # modelled as engine init + weights / storage bandwidth (see
+    # ``serving/core/boot_model.py``).
+    "serverless_elastic": ["--enable-casr", "--casr-solver", "lp", "@overlay"],
+    # Llumnix-style migration on top of the load arm: queue rebalancing
+    # between Decodes, charged as the KV copy it is.
+    "llumnix": ["--request-routing-policy", "LOAD", "@overlay"],
+    # DistServe/Splitwise-style P:D ratio: the pool the search picked
+    # (``tests/pd_ratio_search.py --write-config``), with the baseline's own
+    # routing so the arm isolates the *ratio* decision.
+    "distserve": ["--request-routing-policy", "LOAD", "@fixed"],
+    "distserve_lp": ["--enable-casr", "--casr-solver", "lp", "@fixed"],
 }
+
+#: Per-arm cluster-config overlays, deep-merged into a copy of
+#: ``--cluster-config``.  Keeping them here (instead of duplicating the whole
+#: cluster JSON per arm) is what makes "one variable changed" checkable.
+OVERLAYS = {
+    "dopd": {"casr": {"structural": {
+        "rule": "dopd",
+        "scale_out_utilization": 0.8,
+        "scale_in_utilization": 0.3,
+        "scale_ticks": 3,
+        "queue_scale_out_ratio": 0.5,
+        "threshold_hold_ms": 5000,
+    }}},
+    "serverless_elastic": {"casr": {"boot": {
+        "model": "weight_load",
+        # engine init (17.2 s) and the P-15B weights (15.26 GiB) read from
+        # local NVMe at 3 GB/s, overlapped with initialisation -> 17.2 s.
+        "load_bandwidth_bytes_per_s": 3.0e9,
+        "overlap": True,
+    }}},
+    "llumnix": {"casr": {
+        "llumnix_interval_ms": 1000.0,
+        "llumnix_hot_threshold": 1.0,
+        "llumnix_cold_threshold": 0.5,
+        "llumnix_batch": 4,
+    }},
+}
+
+
+def _merge(base, overlay):
+    for key, value in (overlay or {}).items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
 def summarise(path: pathlib.Path) -> dict:
@@ -125,6 +184,17 @@ def main() -> int:
                 raise SystemExit(f"arm {arm} needs --fixed-config")
             flags.remove("@fixed")
             cluster_config = args.fixed_config
+        if "@overlay" in flags:
+            flags.remove("@overlay")
+            overlay = OVERLAYS.get(arm)
+            if overlay:
+                base = json.loads(pathlib.Path(cluster_config).read_text(
+                    encoding="utf-8"))
+                cluster_config = str(out_root / f"{arm}-cluster.json")
+                pathlib.Path(cluster_config).write_text(
+                    json.dumps(_merge(copy.deepcopy(base), overlay),
+                               ensure_ascii=False, indent=1) + "\n",
+                    encoding="utf-8")
         out_csv = out_root / f"{arm}.csv"
         cmd = [
             sys.executable, "-m", "serving",

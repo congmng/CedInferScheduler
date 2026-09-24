@@ -28,6 +28,7 @@ from serving.core.power_model import *
 from serving.core.logger import *
 from serving.core.run_paths import build_run_paths, resolve_run_id
 from serving.core.pd_link import PdHandoffLink
+from serving.core.migration import LlumnixMigrator
 from serving.casr import CASRController, PrefixProfiler
 import sys as flush
 
@@ -357,14 +358,37 @@ def main():
                         '``torch_dtype`` (falling back to bfloat16). Overrides only take effect if the profiler '
                         'produced matching data under perf/<hw>/<model>/<variant>/tp<N>/')
     parser.add_argument('--request-routing-policy', type=str,
-                        choices=['LOAD', 'LOAD_RR', 'RR', 'RAND', 'CACHE_AWARE', 'KV_AWARE', 'CUSTOM'], default='LOAD',
+                        choices=['LOAD', 'LOAD_RR', 'RR', 'RAND', 'CACHE_AWARE', 'KV_AWARE',
+                                 'PRFAAS', 'CUSTOM'], default='LOAD',
                         help='request routing policy across instances: LOAD (vLLM-style weighted least-loaded, default), '
                         'RR (round-robin), RAND (random), '
                         'CACHE_AWARE (SGLang-style longest-prefix match with load overflow), '
                         'KV_AWARE (least-loaded on the binding resource: KV egress '
                         'wait vs compute wait, the fixed version of the above), '
+                        'PRFAAS (cross-DC Prefill offload behind a transfer budget: '
+                        'local DC first, then max(transfer, compute wait) among the '
+                        'pairings under --prfaas-max-offload-ms), '
                         'LOAD_RR (LOAD with a round-robin tie-break), '
                         'CUSTOM (user-defined)')
+    parser.add_argument('--prfaas-local-load-threshold', type=float, default=0.5,
+                        help='PRFAAS arm: (inflight+1)/capacity the local DC\'s Prefill '
+                             'pool may reach before a request is offloaded')
+    parser.add_argument('--prfaas-max-offload-ms', type=float, default=300.0,
+                        help='PRFAAS arm: refuse any offload whose KV transfer alone '
+                             'would take longer than this (0 disables the gate)')
+    # -- Llumnix-style migration -------------------------------------------
+    parser.add_argument('--llumnix-interval-ms', type=float, default=0.0,
+                        help='Llumnix arm: rebalance Decode queues every N ms of '
+                             'simulated time by migrating queued requests '
+                             '(0 = off)')
+    parser.add_argument('--llumnix-hot-threshold', type=float, default=1.0,
+                        help='Llumnix arm: source Decode must be at least this '
+                             'loaded before a request leaves it')
+    parser.add_argument('--llumnix-cold-threshold', type=float, default=0.5,
+                        help='Llumnix arm: target Decode must be at most this '
+                             'loaded to receive a request')
+    parser.add_argument('--llumnix-batch', type=int, default=4,
+                        help='Llumnix arm: migrations per control tick')
     parser.add_argument('--expert-routing-policy', type=str,
                         choices=['BALANCED', 'RR', 'RAND', 'CUSTOM'],
                         default='BALANCED',
@@ -571,6 +595,31 @@ def main():
     # can raise the overflow price without editing the cluster JSON.
     if os.environ.get("OVERFLOW_PENALTY"):
         casr_config["overflow_penalty"] = float(os.environ["OVERFLOW_PENALTY"])
+    # The PRFAAS routing arm carries its two thresholds on the CLI (the router
+    # reads them off the same policy block as everything else).
+    casr_config.setdefault("prfaas_local_load_threshold",
+                           float(args.prfaas_local_load_threshold))
+    casr_config.setdefault("prfaas_max_offload_ms",
+                           float(args.prfaas_max_offload_ms))
+    # Llumnix-style migration knobs ride on the same policy block.
+    casr_config.setdefault("llumnix_interval_ms", float(args.llumnix_interval_ms))
+    casr_config.setdefault("llumnix_hot_threshold", float(args.llumnix_hot_threshold))
+    casr_config.setdefault("llumnix_cold_threshold", float(args.llumnix_cold_threshold))
+    casr_config.setdefault("llumnix_batch", int(args.llumnix_batch))
+    # A modelled boot (ServerlessLLM-style fast loading) replaces the single
+    # ``startup_ms`` with engine init + weights / storage bandwidth; both the
+    # resource pool and the lifecycle warm-up read the resolved number.
+    if casr_config.get("boot"):
+        from serving.core.boot_model import resolve_startup_ms
+        resources = casr_config.setdefault("resources", {})
+        lifecycle = casr_config.setdefault("lifecycle", {})
+        base = (resources.get("startup_ms") or lifecycle.get("warmup_ms")
+                or casr_config.get("startup_ms") or 0.0)
+        resolved = resolve_startup_ms(casr_config["boot"], base)
+        resources["startup_ms"] = resolved
+        lifecycle["warmup_ms"] = resolved
+        print(f"  • boot model            : {casr_config['boot'].get('model')} "
+              f"-> startup {resolved:.0f} ms (was {float(base or 0):.0f} ms)")
     # KV-transfer pricing.  The shared solver prices a (Preill, Decode) pair as
     # ``rtt + kv_bytes / bandwidth``, and the real router fills that from its
     # measured per-domain links -- same-domain pairs are free because the KV
@@ -858,6 +907,8 @@ def main():
     # KV is already queued behind it -- exactly like the real control loop
     # (``disagg_router._pair_cost``).
     router.pd_link = pd_link
+    # Llumnix-style Decode-queue rebalancing (off unless an interval is set).
+    llumnix_migrator = LlumnixMigrator(casr_config)
     # Power Modeling if enabled
     if power_modeling:
         power_model = PowerModel(power_configs)
@@ -995,6 +1046,11 @@ def main():
         # they cannot ride on Prefill completions, because a stalled Prefill
         # produces none (see Router.retry_pending_handoffs).
         router.retry_pending_handoffs(current)
+
+        # Llumnix-style rebalancing: move queued Decode work off a loaded
+        # instance onto an idle one, charging the request for its KV copy.
+        if llumnix_migrator.due(current):
+            llumnix_migrator.migrate(router, current)
 
         # KV that has landed by ``current`` makes its request decodable: the
         # handoff's bytes were charged to the producer's egress when the Prefill
